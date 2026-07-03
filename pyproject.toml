@@ -1,0 +1,60 @@
+[project]
+name = "core"
+version = "0.1.0"
+description = "Internal product, inventory, and rental system for 2010shop."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "alembic>=1.16.0",
+    "fastapi[standard]>=0.116.0",
+    "psycopg[binary]>=3.2.0",
+    "pydantic-settings>=2.10.0",
+    "redis>=6.2.0",
+    "rq>=2.4.0",
+    "sqladmin>=0.21.0",
+    "sqlalchemy>=2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "ruff>=0.12.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/core"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "ANN",
+    "B",
+    "D",
+    "E",
+    "F",
+    "I",
+    "UP",
+]
+ignore = [
+    "D100",
+    "D104",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D103"]
+"migrations/**/*.py" = ["D101", "D102", "D103"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

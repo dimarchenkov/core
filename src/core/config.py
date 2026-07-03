@@ -1,0 +1,30 @@
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Runtime settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="CORE_",
+        extra="ignore",
+    )
+
+    env: str = Field(default="local")
+    debug: bool = Field(default=False)
+    log_level: str = Field(default="INFO")
+    api_host: str = Field(default="0.0.0.0")
+    api_port: int = Field(default=8000)
+    database_url: str = Field(default="postgresql+psycopg://core:core@localhost:5432/core")
+    redis_url: str = Field(default="redis://localhost:6379/0")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return cached application settings for services and integrations."""
+    return Settings()

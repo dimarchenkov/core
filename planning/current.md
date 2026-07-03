@@ -10,41 +10,43 @@
 
 ### Environment
 
-- [ ] Инициализировать проект через uv
-- [ ] Создать pyproject.toml
-- [ ] Создать src-layout
+- [x] Инициализировать проект через uv
+- [x] Создать pyproject.toml
+- [x] Создать src-layout
 
 ### Backend
 
-- [ ] Настроить FastAPI
-- [ ] Настроить конфигурацию
-- [ ] Настроить логирование
+- [x] Настроить FastAPI
+- [x] Настроить конфигурацию
+- [x] Настроить логирование
 
 ### Database
 
-- [ ] PostgreSQL
-- [ ] SQLAlchemy
-- [ ] Alembic
+- [x] PostgreSQL
+- [x] SQLAlchemy
+- [x] Alembic
 
 ### Background jobs
 
-- [ ] Redis
-- [ ] RQ Worker
+- [x] Redis
+- [x] RQ Worker
 
 ### Admin
 
-- [ ] SQLAdmin
+- [x] SQLAdmin
+
+SQLAdmin mounted and opens successfully. It has no registered model views yet because business models are intentionally out of scope for the infrastructure skeleton.
 
 ### Infrastructure
 
-- [ ] Docker Compose
-- [ ] Angie
+- [x] Docker Compose
+- [x] Angie
 
 ### Validation
 
-- [ ] docker compose up
-- [ ] Swagger доступен
-- [ ] SQLAdmin открывается
+- [x] docker compose up
+- [x] Swagger доступен
+- [x] SQLAdmin открывается
 
 ---
 
