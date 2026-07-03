@@ -543,14 +543,14 @@ reverse-proxy
 
 Плохо:
 
-```python
-product.publish_to_tilda()
+```
+product.publish_to_tilda()"
 ```
 
 Хорошо:
 
-```python
-tilda_publisher.publish(variant)
+```
+tilda_publisher.publish(variant)"
 ```
 
 ---
