@@ -133,3 +133,10 @@ All functions must have type hints for arguments and return values.
 Do not use untyped functions.
 
 Do not use `Any` unless it is unavoidable and explained with a comment.
+
+Before starting any task:
+
+1. Read planning/current.md.
+2. Work only on the tasks listed there.
+3. Do not implement backlog items unless explicitly requested.
+4. When all current tasks are completed, suggest moving to planning/next.md.
