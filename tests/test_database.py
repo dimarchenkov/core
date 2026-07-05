@@ -6,16 +6,19 @@ from uuid import UUID
 from sqlalchemy import String, create_engine
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from core.database import (
+from core.shared.db import (
     Base,
+    BaseModel,
     SoftDeleteMixin,
     TimestampMixin,
+    UserTrackingMixin,
     UUIDPrimaryKeyMixin,
+    VersionMixin,
     generate_uuid_v7,
 )
 
 
-class _SharedFoundationModel(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
+class _SharedFoundationModel(BaseModel):
     __tablename__ = "test_shared_foundation_model"
 
     name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -41,6 +44,15 @@ def test_uuid_primary_key_default_generates_uuid_v7() -> None:
         assert model.id.version == 7
 
 
+def test_base_model_combines_shared_mixins() -> None:
+    assert issubclass(BaseModel, Base)
+    assert issubclass(BaseModel, UUIDPrimaryKeyMixin)
+    assert issubclass(BaseModel, TimestampMixin)
+    assert issubclass(BaseModel, SoftDeleteMixin)
+    assert issubclass(BaseModel, VersionMixin)
+    assert issubclass(BaseModel, UserTrackingMixin)
+
+
 def test_timestamp_mixin_defines_created_and_updated_columns() -> None:
     created_at = _SharedFoundationModel.__table__.c.created_at
     updated_at = _SharedFoundationModel.__table__.c.updated_at
@@ -50,6 +62,22 @@ def test_timestamp_mixin_defines_created_and_updated_columns() -> None:
     assert created_at.server_default is not None
     assert updated_at.server_default is not None
     assert updated_at.onupdate is not None
+
+
+def test_version_mixin_defines_version_column() -> None:
+    version = _SharedFoundationModel.__table__.c.version
+
+    assert version.nullable is False
+    assert version.default is not None
+    assert version.server_default is not None
+
+
+def test_user_tracking_mixin_defines_optional_user_columns() -> None:
+    created_by_id = _SharedFoundationModel.__table__.c.created_by_id
+    updated_by_id = _SharedFoundationModel.__table__.c.updated_by_id
+
+    assert created_by_id.nullable is True
+    assert updated_by_id.nullable is True
 
 
 def test_soft_delete_mixin_tracks_deletion_state() -> None:

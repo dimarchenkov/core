@@ -206,3 +206,47 @@ Possible values:
 One generic `status` field mixes unrelated business concepts.
 
 Separate statuses make the system easier to understand, extend and debug.
+
+## ADR-0005
+
+### Money type
+
+Status: Accepted
+
+Date: 2026-07-05
+
+### Decision
+
+All money values in Core are stored and calculated using Decimal.
+
+The default currency for MVP is RUB.
+
+Float must not be used for money values.
+
+### Storage
+
+PostgreSQL uses NUMERIC(12, 2) for money amounts in MVP.
+
+Python uses Decimal.
+
+### Currency
+
+Each money value stores currency explicitly.
+
+Default currency:
+
+- RUB
+
+### Rounding
+
+Core uses commercial rounding:
+
+- ROUND_HALF_UP
+
+Money values are rounded to 2 decimal places.
+
+### Rationale
+
+Float is not safe for money calculations.
+
+Decimal provides predictable arithmetic and correct rounding for prices, discounts, commissions and marketplace exports.

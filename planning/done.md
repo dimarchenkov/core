@@ -9,3 +9,10 @@
 - ✅ MVP
 - ✅ AI Rules
 - ✅ README
+
+## Sprint 1 — Infrastructure
+- ✅ Docker
+- ✅ FastAPI
+- ✅ SQLAdmin
+- ✅ Angie
+- ✅ Redis
