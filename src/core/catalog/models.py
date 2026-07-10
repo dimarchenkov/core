@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.shared.db import BaseModel, UUIDv7
@@ -58,3 +58,40 @@ class CatalogProduct(BaseModel):
     )
 
     category: Mapped[Category] = relationship("Category")
+    variants: Mapped[list[CatalogVariant]] = relationship(
+        "CatalogVariant",
+        back_populates="product",
+    )
+
+
+class CatalogVariant(BaseModel):
+    """Sellable catalog inventory unit that owns its stable system SKU."""
+
+    __tablename__ = "catalog_variants"
+
+    product_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("catalog_products.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    # TODO: Revisit whether this should become variant_name or display_name.
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    sku: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attributes: Mapped[dict[str, str | int | bool]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+
+    product: Mapped[CatalogProduct] = relationship(
+        "CatalogProduct",
+        back_populates="variants",
+    )

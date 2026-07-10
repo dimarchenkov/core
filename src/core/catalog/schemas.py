@@ -76,3 +76,43 @@ class CatalogProductRead(CatalogProductBase):
     created_at: datetime
     updated_at: datetime
     version: int
+
+
+class CatalogVariantBase(PydanticBaseModel):
+    """Shared catalog variant fields accepted by API schemas."""
+
+    product_id: UUIDv7
+    title: str = Field(min_length=1, max_length=255)
+    barcode: str | None = Field(default=None, max_length=64)
+    attributes: dict[str, str | int | bool] = Field(default_factory=dict)
+    is_active: bool = True
+
+
+class CatalogVariantCreate(CatalogVariantBase):
+    """Payload for creating a catalog variant without a user-supplied SKU."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CatalogVariantUpdate(PydanticBaseModel):
+    """Payload for updating mutable catalog variant fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    product_id: UUIDv7 | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    barcode: str | None = Field(default=None, max_length=64)
+    attributes: dict[str, str | int | bool] | None = None
+    is_active: bool | None = None
+
+
+class CatalogVariantRead(CatalogVariantBase):
+    """Catalog variant representation returned by the API."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUIDv7
+    sku: str
+    created_at: datetime
+    updated_at: datetime
+    version: int

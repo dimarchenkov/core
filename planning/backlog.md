@@ -26,3 +26,8 @@
 - [ ] Яндекс Маркет
 - [ ] Analytics
 - [ ] Multi Warehouse
+
+## Catalog technical debt
+
+- Discuss renaming `CatalogVariant.title` to `variant_name` or `display_name`.
+- Design `AssetCodeGenerator` for future rental assets.

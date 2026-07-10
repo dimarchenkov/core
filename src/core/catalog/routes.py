@@ -6,11 +6,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
-from core.catalog.models import CatalogProduct, Category
+from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.catalog.schemas import (
     CatalogProductCreate,
     CatalogProductRead,
     CatalogProductUpdate,
+    CatalogVariantCreate,
+    CatalogVariantRead,
+    CatalogVariantUpdate,
     CategoryCreate,
     CategoryRead,
     CategoryUpdate,
@@ -20,6 +23,9 @@ from core.catalog.service import (
     CatalogProductNotFoundError,
     CatalogProductService,
     CatalogProductSlugAlreadyExistsError,
+    CatalogVariantNotFoundError,
+    CatalogVariantProductError,
+    CatalogVariantService,
     CategoryNotFoundError,
     CategoryParentError,
     CategoryService,
@@ -30,6 +36,7 @@ from core.shared.db import UUIDv7
 
 router = APIRouter(prefix="/api/catalog/categories", tags=["catalog"])
 product_router = APIRouter(prefix="/api/catalog/products", tags=["catalog"])
+variant_router = APIRouter(prefix="/api/catalog/variants", tags=["catalog"])
 
 
 def get_category_service(session: Annotated[Session, Depends(get_session)]) -> CategoryService:
@@ -42,6 +49,13 @@ def get_catalog_product_service(
 ) -> CatalogProductService:
     """Provide catalog product service instances for route handlers."""
     return CatalogProductService(session)
+
+
+def get_catalog_variant_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> CatalogVariantService:
+    """Provide catalog variant service instances for route handlers."""
+    return CatalogVariantService(session)
 
 
 @router.get("", response_model=list[CategoryRead])
@@ -210,5 +224,80 @@ def delete_product(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found.",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@variant_router.get("", response_model=list[CatalogVariantRead])
+def list_variants(
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+) -> Sequence[CatalogVariant]:
+    """Return all non-deleted catalog variants."""
+    return service.list_variants()
+
+
+@variant_router.post("", response_model=CatalogVariantRead, status_code=status.HTTP_201_CREATED)
+def create_variant(
+    data: CatalogVariantCreate,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+) -> CatalogVariant:
+    """Create a catalog variant with a system-generated SKU."""
+    try:
+        return service.create_variant(data)
+    except CatalogVariantProductError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Variant product is invalid.",
+        ) from exc
+
+
+@variant_router.get("/{variant_id}", response_model=CatalogVariantRead)
+def get_variant(
+    variant_id: UUIDv7,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+) -> CatalogVariant:
+    """Return one catalog variant by id."""
+    try:
+        return service.get_variant(variant_id)
+    except CatalogVariantNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Variant not found.",
+        ) from exc
+
+
+@variant_router.patch("/{variant_id}", response_model=CatalogVariantRead)
+def update_variant(
+    variant_id: UUIDv7,
+    data: CatalogVariantUpdate,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+) -> CatalogVariant:
+    """Update a catalog variant without changing its SKU."""
+    try:
+        return service.update_variant(variant_id, data)
+    except CatalogVariantNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Variant not found.",
+        ) from exc
+    except CatalogVariantProductError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Variant product is invalid.",
+        ) from exc
+
+
+@variant_router.delete("/{variant_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_variant(
+    variant_id: UUIDv7,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+) -> Response:
+    """Soft-delete a catalog variant."""
+    try:
+        service.delete_variant(variant_id)
+    except CatalogVariantNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Variant not found.",
         ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

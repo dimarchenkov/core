@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqladmin import ModelView
 
-from core.catalog.models import CatalogProduct, Category
+from core.catalog.models import CatalogProduct, CatalogVariant, Category
 
 
 class CategoryAdmin(ModelView, model=Category):
@@ -36,3 +36,20 @@ class CatalogProductAdmin(ModelView, model=CatalogProduct):
     ]
     column_searchable_list = [CatalogProduct.title, CatalogProduct.slug]
     column_sortable_list = [CatalogProduct.title, CatalogProduct.slug]
+
+
+class CatalogVariantAdmin(ModelView, model=CatalogVariant):
+    """SQLAdmin view for managing sellable catalog variants."""
+
+    name = "Catalog variant"
+    name_plural = "Catalog variants"
+    icon = "fa-solid fa-cube"
+    column_list = [
+        CatalogVariant.title,
+        CatalogVariant.sku,
+        CatalogVariant.product_id,
+        CatalogVariant.barcode,
+        CatalogVariant.is_active,
+    ]
+    column_searchable_list = [CatalogVariant.title, CatalogVariant.sku, CatalogVariant.barcode]
+    column_sortable_list = [CatalogVariant.title, CatalogVariant.sku]
