@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.shared.db import BaseModel, UUIDv7
@@ -35,3 +35,26 @@ class Category(BaseModel):
         "Category",
         back_populates="parent",
     )
+
+
+class CatalogProduct(BaseModel):
+    """Catalog product family without sellable variant, price, or stock data."""
+
+    __tablename__ = "catalog_products"
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+
+    category: Mapped[Category] = relationship("Category")

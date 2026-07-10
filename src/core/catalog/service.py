@@ -4,9 +4,14 @@ from collections.abc import Sequence
 
 from sqlalchemy.orm import Session
 
-from core.catalog.models import Category
-from core.catalog.repository import CategoryRepository
-from core.catalog.schemas import CategoryCreate, CategoryUpdate
+from core.catalog.models import CatalogProduct, Category
+from core.catalog.repository import CatalogProductRepository, CategoryRepository
+from core.catalog.schemas import (
+    CatalogProductCreate,
+    CatalogProductUpdate,
+    CategoryCreate,
+    CategoryUpdate,
+)
 from core.shared.db import UUIDv7
 
 
@@ -20,6 +25,18 @@ class CategorySlugAlreadyExistsError(Exception):
 
 class CategoryParentError(Exception):
     """Raised when a category parent is invalid."""
+
+
+class CatalogProductNotFoundError(Exception):
+    """Raised when a catalog product cannot be found."""
+
+
+class CatalogProductSlugAlreadyExistsError(Exception):
+    """Raised when a slug is already used by a non-deleted product."""
+
+
+class CatalogProductCategoryError(Exception):
+    """Raised when a product category is missing, deleted, or inactive."""
 
 
 class CategoryService:
@@ -113,3 +130,81 @@ class CategoryService:
             raise CategoryParentError
         if self._repository.get(parent_id) is None:
             raise CategoryParentError
+
+
+class CatalogProductService:
+    """Business operations for catalog product families."""
+
+    def __init__(self, session: Session) -> None:
+        """Create a service using the given database session."""
+        self._session = session
+        self._repository = CatalogProductRepository(session)
+        self._category_repository = CategoryRepository(session)
+
+    def list_products(self) -> Sequence[CatalogProduct]:
+        """Return all non-deleted catalog products ordered for display."""
+        return self._repository.list()
+
+    def get_product(self, product_id: UUIDv7) -> CatalogProduct:
+        """Return one catalog product or raise when it does not exist."""
+        product = self._repository.get(product_id)
+        if product is None:
+            raise CatalogProductNotFoundError
+        return product
+
+    def create_product(self, data: CatalogProductCreate) -> CatalogProduct:
+        """Create a catalog product after validating its slug and category."""
+        self._ensure_slug_available(data.slug)
+        self._ensure_category_is_active(data.category_id)
+
+        product = CatalogProduct(**data.model_dump())
+        self._repository.add(product)
+        self._session.commit()
+        self._session.refresh(product)
+        return product
+
+    def update_product(
+        self,
+        product_id: UUIDv7,
+        data: CatalogProductUpdate,
+    ) -> CatalogProduct:
+        """Update a catalog product after validating supplied business fields."""
+        product = self.get_product(product_id)
+        changes = data.model_dump(exclude_unset=True)
+
+        if "slug" in changes:
+            self._ensure_slug_available(data.slug, current_product_id=product_id)
+        if "category_id" in changes:
+            self._ensure_category_is_active(data.category_id)
+        for field, value in changes.items():
+            setattr(product, field, value)
+
+        self._session.commit()
+        self._session.refresh(product)
+        return product
+
+    def delete_product(self, product_id: UUIDv7) -> None:
+        """Soft-delete a catalog product while preserving its business history."""
+        product = self.get_product(product_id)
+        product.soft_delete()
+        self._session.commit()
+
+    def _ensure_slug_available(
+        self,
+        slug: str | None,
+        current_product_id: UUIDv7 | None = None,
+    ) -> None:
+        """Raise when a slug belongs to another non-deleted catalog product."""
+        if slug is None:
+            return
+        product = self._repository.get_by_slug(slug)
+        if product is not None and product.id != current_product_id:
+            raise CatalogProductSlugAlreadyExistsError
+
+    def _ensure_category_is_active(self, category_id: UUIDv7 | None) -> None:
+        """Raise when a product category is unavailable for catalog assignment."""
+        if category_id is None:
+            raise CatalogProductCategoryError
+        category = self._category_repository.get(category_id)
+        if category is None or not category.is_active:
+            raise CatalogProductCategoryError
