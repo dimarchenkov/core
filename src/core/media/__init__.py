@@ -1,1 +1,1 @@
-"""Media module package reserved for future business entities."""
+"""Media metadata and entity-linking module."""

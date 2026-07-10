@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy.orm import Session
+
+from core.database import get_session
+from core.media.models import Image, ImageLink
+from core.media.schemas import (
+    ImageCreate,
+    ImageLinkCreate,
+    ImageLinkRead,
+    ImageLinkUpdate,
+    ImageRead,
+)
+from core.media.service import (
+    ImageLinkEntityError,
+    ImageLinkNotFoundError,
+    ImageLinkPrimaryConflictError,
+    ImageLinkService,
+    ImageNotFoundError,
+    ImageService,
+    ImageStorageKeyError,
+)
+from core.shared.db import UUIDv7
+
+image_router = APIRouter(prefix="/api/media/images", tags=["media"])
+image_link_router = APIRouter(prefix="/api/media/image-links", tags=["media"])
+
+
+def get_image_service(session: Annotated[Session, Depends(get_session)]) -> ImageService:
+    """Provide image service instances for route handlers."""
+    return ImageService(session)
+
+
+def get_image_link_service(session: Annotated[Session, Depends(get_session)]) -> ImageLinkService:
+    """Provide image-link service instances for route handlers."""
+    return ImageLinkService(session)
+
+
+@image_router.get("", response_model=list[ImageRead])
+def list_images(service: Annotated[ImageService, Depends(get_image_service)]) -> Sequence[Image]:
+    """Return all non-deleted image metadata records."""
+    return service.list_images()
+
+
+@image_router.post("", response_model=ImageRead, status_code=status.HTTP_201_CREATED)
+def create_image(
+    data: ImageCreate,
+    service: Annotated[ImageService, Depends(get_image_service)],
+) -> Image:
+    """Register image metadata without processing or writing a file."""
+    try:
+        return service.create_image(data)
+    except ImageStorageKeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image storage keys must be relative paths.",
+        ) from exc
+
+
+@image_router.get("/{image_id}", response_model=ImageRead)
+def get_image(
+    image_id: UUIDv7,
+    service: Annotated[ImageService, Depends(get_image_service)],
+) -> Image:
+    """Return one image metadata record by id."""
+    try:
+        return service.get_image(image_id)
+    except ImageNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image not found.",
+        ) from exc
+
+
+@image_router.delete("/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_image(
+    image_id: UUIDv7,
+    service: Annotated[ImageService, Depends(get_image_service)],
+) -> Response:
+    """Soft-delete image metadata without removing files."""
+    try:
+        service.delete_image(image_id)
+    except ImageNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image not found.",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@image_link_router.get("", response_model=list[ImageLinkRead])
+def list_image_links(
+    service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+) -> Sequence[ImageLink]:
+    """Return all non-deleted image links."""
+    return service.list_links()
+
+
+@image_link_router.post("", response_model=ImageLinkRead, status_code=status.HTTP_201_CREATED)
+def create_image_link(
+    data: ImageLinkCreate,
+    service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+) -> ImageLink:
+    """Attach an existing image to an active catalog entity."""
+    try:
+        return service.create_link(data)
+    except ImageNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image is invalid.",
+        ) from exc
+    except ImageLinkEntityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image link entity is invalid.",
+        ) from exc
+    except ImageLinkPrimaryConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Entity already has a primary image.",
+        ) from exc
+
+
+@image_link_router.get("/{link_id}", response_model=ImageLinkRead)
+def get_image_link(
+    link_id: UUIDv7,
+    service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+) -> ImageLink:
+    """Return one image link by id."""
+    try:
+        return service.get_link(link_id)
+    except ImageLinkNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image link not found.",
+        ) from exc
+
+
+@image_link_router.patch("/{link_id}", response_model=ImageLinkRead)
+def update_image_link(
+    link_id: UUIDv7,
+    data: ImageLinkUpdate,
+    service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+) -> ImageLink:
+    """Update the role or display order of an image link."""
+    try:
+        return service.update_link(link_id, data)
+    except ImageLinkNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image link not found.",
+        ) from exc
+    except ImageLinkPrimaryConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Entity already has a primary image.",
+        ) from exc
+
+
+@image_link_router.delete("/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_image_link(
+    link_id: UUIDv7,
+    service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+) -> Response:
+    """Soft-delete an image link without deleting the linked image."""
+    try:
+        service.delete_link(link_id)
+    except ImageLinkNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image link not found.",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

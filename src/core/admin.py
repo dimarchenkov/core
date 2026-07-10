@@ -5,6 +5,7 @@ from sqladmin import Admin
 
 from core.catalog.admin import CatalogProductAdmin, CatalogVariantAdmin, CategoryAdmin
 from core.database import engine
+from core.media.admin import ImageAdmin, ImageLinkAdmin
 
 
 def setup_admin(app: FastAPI) -> Admin:
@@ -13,4 +14,6 @@ def setup_admin(app: FastAPI) -> Admin:
     admin.add_view(CategoryAdmin)
     admin.add_view(CatalogProductAdmin)
     admin.add_view(CatalogVariantAdmin)
+    admin.add_view(ImageAdmin)
+    admin.add_view(ImageLinkAdmin)
     return admin

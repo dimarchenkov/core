@@ -2,13 +2,13 @@
 
 ## Sprint 3 — Catalog
 
-### Goal
+## Media foundation
 
-Create the basic catalog domain.
-
-### Tasks
-
-- [x] Category
-- [ ] CatalogProduct
-- [ ] CatalogVariant
-- [ ] Brand
+- [ ] Image entity
+- [ ] ImageLink entity
+- [ ] Image roles
+- [ ] Alembic migration
+- [ ] Tests
+- [ ] Local file storage
+- [ ] Image processing
+- [ ] Download source and master
