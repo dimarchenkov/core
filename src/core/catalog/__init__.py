@@ -1,1 +1,1 @@
-"""Catalog module package reserved for future business entities."""
+"""Catalog module for category and future catalog entities."""

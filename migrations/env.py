@@ -5,6 +5,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+import core.catalog.models  # noqa: F401
 from core.config import get_settings
 from core.shared.db import Base
 
