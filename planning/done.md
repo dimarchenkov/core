@@ -16,3 +16,14 @@
 - ✅ SQLAdmin
 - ✅ Angie
 - ✅ Redis
+
+## Sprint 2 — Shared Foundation
+
+- ✅ UUIDv7 mixin
+- ✅ Timestamp mixin
+- ✅ SoftDelete mixin
+- ✅ Version mixin
+- ✅ User tracking mixin
+- ✅ BaseModel
+- ✅ Money foundation
+- ✅ Category entity

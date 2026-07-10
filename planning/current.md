@@ -1,17 +1,14 @@
 # Current Sprint
 
-## Sprint 2 — Shared Foundation
+## Sprint 3 — Catalog
 
 ### Goal
 
-Create the common database foundation for all business entities.
+Create the basic catalog domain.
 
 ### Tasks
 
-- [ ] UUIDv7 mixin
-- [ ] Timestamp mixin
-- [ ] SoftDelete mixin
-- [ ] Version mixin
-- [ ] User tracking mixin
-- [ ] BaseModel
-- [ ] Tests
+- [x] Category
+- [ ] CatalogProduct
+- [ ] CatalogVariant
+- [ ] Brand
