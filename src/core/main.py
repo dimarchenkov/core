@@ -6,6 +6,7 @@ from core.admin import setup_admin
 from core.catalog.routes import product_router, variant_router
 from core.catalog.routes import router as catalog_router
 from core.config import get_settings
+from core.intake.routes import router as intake_router
 from core.logging import configure_logging
 from core.media.routes import image_link_router, image_router
 
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
     app.include_router(variant_router)
     app.include_router(image_router)
     app.include_router(image_link_router)
+    app.include_router(intake_router)
 
     @app.get("/health", tags=["system"])
     def health() -> dict[str, str]:

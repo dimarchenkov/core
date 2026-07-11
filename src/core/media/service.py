@@ -153,15 +153,18 @@ class ImageLinkService:
             raise ImageLinkNotFoundError
         return link
 
-    def create_link(self, data: ImageLinkCreate) -> ImageLink:
+    def create_link(self, data: ImageLinkCreate, *, commit: bool = True) -> ImageLink:
         """Link an existing image to an active catalog entity."""
         self._ensure_image_exists(data.image_id)
         self._ensure_entity_is_active(data.entity_type, data.entity_id)
         self._ensure_primary_available(data.entity_type, data.entity_id, data.role)
         link = ImageLink(**data.model_dump())
         self._repository.add(link)
-        self._session.commit()
-        self._session.refresh(link)
+        if commit:
+            self._session.commit()
+            self._session.refresh(link)
+        else:
+            self._session.flush()
         return link
 
     def update_link(self, link_id: UUIDv7, data: ImageLinkUpdate) -> ImageLink:
