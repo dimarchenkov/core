@@ -105,6 +105,20 @@ def test_category_routes_update_category(client: TestClient) -> None:
     assert response.json()["is_active"] is False
 
 
+def test_category_routes_get_category(client: TestClient) -> None:
+    """Category routes return an existing category by its identifier."""
+    created = client.post(
+        "/api/catalog/categories",
+        json={"title": "Cameras", "slug": "cameras"},
+    ).json()
+
+    response = client.get(f"/api/catalog/categories/{created['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == created["id"]
+    assert response.json()["slug"] == "cameras"
+
+
 def test_category_routes_reject_duplicate_slug(client: TestClient) -> None:
     first_response = client.post(
         "/api/catalog/categories",
