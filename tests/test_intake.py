@@ -9,13 +9,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.catalog.models import CatalogProduct, CatalogVariant, Category
-from core.catalog.repository import CatalogProductRepository
+from core.catalog.repository import CatalogProductRepository, CatalogVariantRepository
 from core.database import get_session
 from core.intake.schemas import IntakeCreate
 from core.intake.service import IntakeService
 from core.main import create_app
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import Image, ImageLink
+from core.media.repository import ImageLinkRepository, ImageRepository
 from core.media.schemas import ImageCreate
 from core.media.service import ImageNotFoundError, ImageService
 from core.shared.db import Base, generate_uuid_v7
@@ -140,8 +141,11 @@ def test_intake_rolls_back_when_image_is_invalid(
     session: Session,
     category_and_image: tuple[Category, Image],
 ) -> None:
-    """Invalid images leave no product or variant persisted by the intake."""
-    category, _ = category_and_image
+    """Invalid images roll back all intake records while retaining the original image."""
+    category, image = category_and_image
+    original_image_id = image.id
+    original_source_key = image.source_key
+    original_checksum = image.checksum
 
     with pytest.raises(ImageNotFoundError):
         IntakeService(session).create_intake(
@@ -155,6 +159,12 @@ def test_intake_rolls_back_when_image_is_invalid(
         )
 
     assert CatalogProductRepository(session).list() == []
+    assert CatalogVariantRepository(session).list() == []
+    assert ImageLinkRepository(session).list() == []
+    remaining_image = ImageRepository(session).get(original_image_id)
+    assert remaining_image is not None
+    assert remaining_image.source_key == original_source_key
+    assert remaining_image.checksum == original_checksum
 
 
 def test_intake_uses_variant_as_primary_image_target(

@@ -4,11 +4,12 @@
 
 ## Media foundation
 
-- [x] Image entity
-- [x] ImageLink entity
-- [x] Image roles
-- [x] Alembic migration
+## Intake MVP
+
+- [x] Intake application service
+- [x] Create Product and Variant
+- [x] Generate SKU
+- [x] Link mandatory primary image
+- [x] Single transaction
+- [x] API endpoint
 - [x] Tests
-- [x] Local file storage
-- [ ] Image processing
-- [ ] Download source and master
