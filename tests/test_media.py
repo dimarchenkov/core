@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Generator
 from io import BytesIO
 from pathlib import Path
+from struct import pack
+from zlib import crc32
 
 import pytest
 from fastapi.testclient import TestClient
@@ -94,6 +96,15 @@ def image_bytes(image_format: str) -> bytes:
     buffer = BytesIO()
     PillowImage.new("RGB", (2, 3), color="red").save(buffer, format=image_format)
     return buffer.getvalue()
+
+
+def oversized_png_header() -> bytes:
+    """Build a PNG header whose dimensions exceed the inspector pixel limit."""
+    image_type = b"IHDR"
+    image_data = pack(">IIBBBBB", 5_000, 5_000, 8, 2, 0, 0, 0)
+    header = pack(">I", len(image_data)) + image_type + image_data
+    header += pack(">I", crc32(image_type + image_data) & 0xFFFFFFFF)
+    return b"\x89PNG\r\n\x1a\n" + header + b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
 
 
 @pytest.fixture
@@ -209,6 +220,36 @@ def test_upload_rejects_files_over_maximum_size(upload_client: TestClient) -> No
     )
 
     assert response.status_code == 413
+
+
+def test_upload_rejects_excessive_image_dimensions(upload_client: TestClient) -> None:
+    """Upload rejects image headers that trigger Pillow decompression-bomb protection."""
+    response = upload_client.post(
+        "/api/media/images/upload",
+        files={"file": ("large.png", oversized_png_header(), "image/png")},
+    )
+
+    assert response.status_code == 415
+
+
+def test_failed_storage_write_leaves_no_partial_or_temporary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Atomic storage writes clean temporary files when final replacement fails."""
+    storage = LocalImageStorage(tmp_path)
+    key = "images/source/2026/07/source.jpg"
+
+    def raise_replace(self: Path, target: Path) -> Path:
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr(Path, "replace", raise_replace)
+
+    with pytest.raises(OSError, match="replacement failed"):
+        storage.save_source(key, b"source bytes")
+
+    assert not (tmp_path / key).exists()
+    assert not [path for path in tmp_path.rglob("*") if path.is_file()]
 
 
 def test_image_link_service_enforces_one_primary_link(

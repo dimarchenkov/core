@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from tempfile import NamedTemporaryFile
 
 from core.shared.db import UUIDv7
 
@@ -26,11 +28,28 @@ class LocalImageStorage:
         )
 
     def save_source(self, key: str, content: bytes) -> None:
-        """Write a new source file without altering its uploaded bytes."""
+        """Atomically write a new source file without altering uploaded bytes."""
         destination = self._destination_for(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with destination.open("xb") as source_file:
-            source_file.write(content)
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="xb",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as source_file:
+                temporary_path = Path(source_file.name)
+                source_file.write(content)
+                source_file.flush()
+                os.fsync(source_file.fileno())
+            if destination.exists():
+                raise FileExistsError(f"Source file already exists: {key}")
+            temporary_path.replace(destination)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
     def delete_saved_source(self, key: str) -> None:
         """Remove a newly saved source only after failed metadata persistence."""

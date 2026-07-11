@@ -9,6 +9,6 @@
 - [x] Image roles
 - [x] Alembic migration
 - [x] Tests
-- [ ] Local file storage
+- [x] Local file storage
 - [ ] Image processing
 - [ ] Download source and master

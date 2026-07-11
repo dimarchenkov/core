@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from io import BytesIO
 
@@ -24,6 +25,7 @@ class InspectedImage:
 class ImageInspector:
     """Validate source image bytes and obtain their format and dimensions."""
 
+    max_pixels = 20_000_000
     _formats: dict[str, tuple[str, str]] = {
         "JPEG": ("jpg", "image/jpeg"),
         "PNG": ("png", "image/png"),
@@ -33,12 +35,25 @@ class ImageInspector:
     def inspect(self, content: bytes) -> InspectedImage:
         """Validate uploaded bytes and return properties from their actual image content."""
         try:
-            with PillowImage.open(BytesIO(content)) as image:
-                image.verify()
-            with PillowImage.open(BytesIO(content)) as image:
-                image_format = image.format
-                width, height = image.size
-        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", PillowImage.DecompressionBombWarning)
+                previous_maximum = PillowImage.MAX_IMAGE_PIXELS
+                PillowImage.MAX_IMAGE_PIXELS = self.max_pixels
+                try:
+                    with PillowImage.open(BytesIO(content)) as image:
+                        image.verify()
+                    with PillowImage.open(BytesIO(content)) as image:
+                        image_format = image.format
+                        width, height = image.size
+                finally:
+                    PillowImage.MAX_IMAGE_PIXELS = previous_maximum
+        except (
+            PillowImage.DecompressionBombError,
+            PillowImage.DecompressionBombWarning,
+            UnidentifiedImageError,
+            OSError,
+            ValueError,
+        ) as exc:
             raise UnsupportedImageError("Uploaded file is not a valid image.") from exc
 
         if image_format not in self._formats:
