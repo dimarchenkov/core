@@ -1,15 +1,22 @@
 # Current Sprint
 
-## Sprint 3 — Catalog
+## Sprint 4 — Identity Lite
 
-## Media foundation
+### Identity foundation
 
-## Intake MVP
+- [ ] User entity
+- [ ] Argon2id password hashing
+- [ ] Administrator creation CLI
+- [ ] Emergency superuser CLI
+- [ ] Privilege audit events
+- [ ] Alembic migration
+- [ ] SQLAdmin views
+- [ ] Tests
 
-- [x] Intake application service
-- [x] Create Product and Variant
-- [x] Generate SKU
-- [x] Link mandatory primary image
-- [x] Single transaction
-- [x] API endpoint
-- [x] Tests
+### Authentication
+
+- [ ] Login endpoint
+- [ ] JWT access token
+- [ ] Current user dependency
+- [ ] Protected API routes
+- [ ] Populate audit user fields
