@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
+from core.config import get_settings
 from core.database import get_session
+from core.media.inspection import UnsupportedImageError
 from core.media.models import Image, ImageLink
 from core.media.schemas import (
     ImageCreate,
@@ -16,6 +18,7 @@ from core.media.schemas import (
     ImageRead,
 )
 from core.media.service import (
+    ImageFileTooLargeError,
     ImageLinkEntityError,
     ImageLinkNotFoundError,
     ImageLinkPrimaryConflictError,
@@ -24,6 +27,7 @@ from core.media.service import (
     ImageService,
     ImageStorageKeyError,
 )
+from core.media.storage import LocalImageStorage
 from core.shared.db import UUIDv7
 
 image_router = APIRouter(prefix="/api/media/images", tags=["media"])
@@ -32,7 +36,7 @@ image_link_router = APIRouter(prefix="/api/media/image-links", tags=["media"])
 
 def get_image_service(session: Annotated[Session, Depends(get_session)]) -> ImageService:
     """Provide image service instances for route handlers."""
-    return ImageService(session)
+    return ImageService(session, storage=LocalImageStorage(get_settings().storage_root))
 
 
 def get_image_link_service(session: Annotated[Session, Depends(get_session)]) -> ImageLinkService:
@@ -58,6 +62,27 @@ def create_image(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Image storage keys must be relative paths.",
+        ) from exc
+
+
+@image_router.post("/upload", response_model=ImageRead, status_code=status.HTTP_201_CREATED)
+async def upload_image(
+    file: Annotated[UploadFile, File(...)],
+    service: Annotated[ImageService, Depends(get_image_service)],
+) -> Image:
+    """Store one validated local source image and register its metadata."""
+    content = await file.read(ImageService.max_source_size_bytes + 1)
+    try:
+        return service.upload_source_image(file.filename or "upload", content)
+    except ImageFileTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Image file exceeds the 15 MB limit.",
+        ) from exc
+    except UnsupportedImageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
         ) from exc
 
 

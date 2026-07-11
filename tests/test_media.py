@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from io import BytesIO
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image as PillowImage
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -13,8 +16,10 @@ from core.database import get_session
 from core.main import create_app
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import Image, ImageLink
+from core.media.routes import get_image_service
 from core.media.schemas import ImageCreate, ImageLinkCreate
 from core.media.service import ImageLinkPrimaryConflictError, ImageLinkService, ImageService
+from core.media.storage import LocalImageStorage
 from core.shared.db import Base
 
 
@@ -84,6 +89,31 @@ def image_payload() -> dict[str, str | int]:
     }
 
 
+def image_bytes(image_format: str) -> bytes:
+    """Create valid in-memory image content for upload endpoint tests."""
+    buffer = BytesIO()
+    PillowImage.new("RGB", (2, 3), color="red").save(buffer, format=image_format)
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def upload_client(session: Session, tmp_path: Path) -> Generator[TestClient]:
+    """Provide a client whose uploads write only to a temporary storage root."""
+    app = create_app()
+
+    def override_get_session() -> Generator[Session]:
+        yield session
+
+    def override_get_image_service() -> ImageService:
+        return ImageService(session, storage=LocalImageStorage(tmp_path))
+
+    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_image_service] = override_get_image_service
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+
+
 def test_image_service_registers_metadata_with_relative_keys(session: Session) -> None:
     """Image registration persists metadata without any file operations."""
     image = ImageService(session).create_image(ImageCreate(**image_payload()))
@@ -120,6 +150,65 @@ def test_image_routes_reject_absolute_storage_keys(client: TestClient) -> None:
     response = client.post("/api/media/images", json=payload)
 
     assert response.status_code == 400
+
+
+def test_upload_creates_image_metadata_and_preserves_source(
+    upload_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """Upload stores valid JPEG source bytes and returns matching metadata."""
+    content = image_bytes("JPEG")
+
+    response = upload_client.post(
+        "/api/media/images/upload",
+        files={"file": ("camera.jpg", content, "image/jpeg")},
+    )
+
+    assert response.status_code == 201
+    image = response.json()
+    assert image["source_key"].startswith("images/source/")
+    assert image["source_key"].endswith(".jpg")
+    assert image["mime_type"] == "image/jpeg"
+    assert image["width"] == 2
+    assert image["height"] == 3
+    assert image["size_bytes"] == len(content)
+    assert (tmp_path / image["source_key"]).read_bytes() == content
+
+
+def test_upload_rejects_invalid_image_content(upload_client: TestClient) -> None:
+    """Upload rejects arbitrary bytes even when the declared MIME type is JPEG."""
+    response = upload_client.post(
+        "/api/media/images/upload",
+        files={"file": ("not-an-image.jpg", b"not an image", "image/jpeg")},
+    )
+
+    assert response.status_code == 415
+
+
+def test_upload_rejects_unsupported_actual_format(upload_client: TestClient) -> None:
+    """Upload rejects valid image content when its detected format is unsupported."""
+    response = upload_client.post(
+        "/api/media/images/upload",
+        files={"file": ("camera.gif", image_bytes("GIF"), "image/jpeg")},
+    )
+
+    assert response.status_code == 415
+
+
+def test_upload_rejects_files_over_maximum_size(upload_client: TestClient) -> None:
+    """Upload enforces the 15 MB source-file limit before image inspection."""
+    response = upload_client.post(
+        "/api/media/images/upload",
+        files={
+            "file": (
+                "large.jpg",
+                b"x" * (ImageService.max_source_size_bytes + 1),
+                "image/jpeg",
+            )
+        },
+    )
+
+    assert response.status_code == 413
 
 
 def test_image_link_service_enforces_one_primary_link(

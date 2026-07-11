@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000)
     database_url: str = Field(default="postgresql+psycopg://core:core@localhost:5432/core")
     redis_url: str = Field(default="redis://localhost:6379/0")
+    storage_root: Path = Field(default=Path("storage"))
 
 
 @lru_cache

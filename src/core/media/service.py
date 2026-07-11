@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from hashlib import sha256
 from pathlib import PurePosixPath
 
 from sqlalchemy.orm import Session
 
 from core.catalog.repository import CatalogProductRepository, CatalogVariantRepository
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
+from core.media.inspection import ImageInspector
 from core.media.models import Image, ImageLink
 from core.media.repository import ImageLinkRepository, ImageRepository
 from core.media.schemas import ImageCreate, ImageLinkCreate, ImageLinkUpdate
-from core.shared.db import UUIDv7
+from core.media.storage import LocalImageStorage
+from core.shared.db import UUIDv7, generate_uuid_v7
 
 
 class ImageNotFoundError(Exception):
@@ -33,13 +36,26 @@ class ImageLinkPrimaryConflictError(Exception):
     """Raised when an entity already has an active primary image link."""
 
 
+class ImageFileTooLargeError(Exception):
+    """Raised when uploaded source bytes exceed the local upload limit."""
+
+
 class ImageService:
     """Business operations for image metadata without physical file handling."""
 
-    def __init__(self, session: Session) -> None:
+    max_source_size_bytes = 15 * 1024 * 1024
+
+    def __init__(
+        self,
+        session: Session,
+        storage: LocalImageStorage | None = None,
+        inspector: ImageInspector | None = None,
+    ) -> None:
         """Create a service using the given database session."""
         self._session = session
         self._repository = ImageRepository(session)
+        self._storage = storage
+        self._inspector = inspector or ImageInspector()
 
     def list_images(self) -> Sequence[Image]:
         """Return all non-deleted image metadata records."""
@@ -61,6 +77,37 @@ class ImageService:
         self._session.refresh(image)
         return image
 
+    def upload_source_image(self, original_filename: str, content: bytes) -> Image:
+        """Store validated source bytes and create matching immutable image metadata."""
+        if len(content) > self.max_source_size_bytes:
+            raise ImageFileTooLargeError
+        if self._storage is None:
+            raise RuntimeError("Local image storage is not configured.")
+
+        inspected = self._inspector.inspect(content)
+        image_id = generate_uuid_v7()
+        source_key = self._storage.build_source_key(image_id, inspected.extension)
+        self._storage.save_source(source_key, content)
+        try:
+            image = Image(
+                id=image_id,
+                source_key=source_key,
+                original_filename=self._safe_filename(original_filename),
+                mime_type=inspected.mime_type,
+                size_bytes=len(content),
+                width=inspected.width,
+                height=inspected.height,
+                checksum=sha256(content).hexdigest(),
+            )
+            self._repository.add(image)
+            self._session.commit()
+            self._session.refresh(image)
+            return image
+        except Exception:
+            self._session.rollback()
+            self._storage.delete_saved_source(source_key)
+            raise
+
     def delete_image(self, image_id: UUIDv7) -> None:
         """Soft-delete image metadata without removing physical source files."""
         image = self.get_image(image_id)
@@ -77,6 +124,11 @@ class ImageService:
         """Return whether a storage key is a safe non-empty relative POSIX path."""
         path = PurePosixPath(key)
         return bool(key) and not path.is_absolute() and ".." not in path.parts
+
+    def _safe_filename(self, filename: str) -> str:
+        """Return a basename suitable for metadata without retaining path components."""
+        normalized = filename.replace("\\", "/")
+        return normalized.rsplit("/", maxsplit=1)[-1] or "upload"
 
 
 class ImageLinkService:
