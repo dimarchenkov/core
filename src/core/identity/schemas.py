@@ -22,3 +22,10 @@ class UserRead(PydanticBaseModel):
     created_at: datetime
     updated_at: datetime
     version: int
+
+
+class AccessToken(PydanticBaseModel):
+    """Bearer access token returned by the local identity login endpoint."""
+
+    access_token: str
+    token_type: str

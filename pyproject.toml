@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary]>=3.2.0",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.10.0",
+    "pyjwt>=2.13.0",
     "redis>=6.2.0",
     "rq>=2.4.0",
     "sqladmin>=0.21.0",

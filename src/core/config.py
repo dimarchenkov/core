@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     database_url: str = Field(default="postgresql+psycopg://core:core@localhost:5432/core")
     redis_url: str = Field(default="redis://localhost:6379/0")
     storage_root: Path = Field(default=Path("storage"))
+    jwt_secret: str
+    jwt_algorithm: str = Field(default="HS256")
+    jwt_access_token_expire_minutes: int = Field(default=480)
 
 
 @lru_cache

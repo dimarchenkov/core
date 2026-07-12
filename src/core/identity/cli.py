@@ -5,6 +5,8 @@ import getpass
 import sys
 from collections.abc import Sequence
 
+from sqlalchemy.exc import OperationalError, ProgrammingError
+
 from core.database import SessionLocal
 from core.identity.service import (
     FullNameRequiredError,
@@ -50,6 +52,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as exc:
         print(_error_message(exc), file=sys.stderr)
         return 1
+    except (OperationalError, ProgrammingError) as exc:
+        if not _is_missing_schema_error(exc):
+            raise
+        print(_schema_not_up_to_date_message(), file=sys.stderr)
+        return 1
 
     print("Identity command completed.")
     return 0
@@ -92,7 +99,7 @@ def _error_message(error: Exception) -> str:
     """Return a clear human-readable message for expected CLI failures."""
     messages: dict[type[Exception], str] = {
         FullNameRequiredError: "Full name is required.",
-        PasswordValidationError: "Password must contain at least 12 non-whitespace characters.",
+        PasswordValidationError: "Password must contain at least 8 non-whitespace characters.",
         SuperuserAlreadyDisabledError: "Superuser access is already disabled.",
         SuperuserAlreadyEnabledError: "Superuser access is already enabled.",
         SuperuserReasonRequiredError: "A non-empty reason is required to enable superuser access.",
@@ -100,3 +107,27 @@ def _error_message(error: Exception) -> str:
         UserNotFoundOrInactiveError: "The user does not exist or is inactive.",
     }
     return messages[type(error)]
+
+
+def _is_missing_schema_error(error: OperationalError | ProgrammingError) -> bool:
+    """Return whether a database error specifically reports missing identity tables."""
+    original_error = getattr(error, "orig", None)
+    if getattr(original_error, "sqlstate", None) == "42P01":
+        return True
+    message = str(original_error or error).lower()
+    missing_tables = (
+        "no such table: users",
+        "no such table: privilege_audit_events",
+        'relation "users" does not exist',
+        'relation "privilege_audit_events" does not exist',
+    )
+    return any(table in message for table in missing_tables)
+
+
+def _schema_not_up_to_date_message() -> str:
+    """Return the recovery guidance for missing identity database tables."""
+    return (
+        "Database schema is not up to date.\n\n"
+        "Run:\n\n"
+        "docker compose exec api uv run alembic upgrade head"
+    )

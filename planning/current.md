@@ -4,19 +4,22 @@
 
 ### Identity foundation
 
-- [ ] User entity
-- [ ] Argon2id password hashing
-- [ ] Administrator creation CLI
-- [ ] Emergency superuser CLI
-- [ ] Privilege audit events
-- [ ] Alembic migration
-- [ ] SQLAdmin views
-- [ ] Tests
+- [x] User entity
+- [x] Argon2id password hashing
+- [x] Administrator creation CLI
+- [x] Emergency superuser CLI
+- [x] Privilege audit events
+- [x] Alembic migration
+- [x] SQLAdmin views
+- [x] Tests
 
-### Authentication
+### Authentication and attribution
 
-- [ ] Login endpoint
-- [ ] JWT access token
-- [ ] Current user dependency
+- [x] Login endpoint
+- [x] JWT access token
+- [x] Current user dependency
 - [ ] Protected API routes
-- [ ] Populate audit user fields
+- [ ] Populate created_by_id
+- [ ] Populate updated_by_id
+- [ ] Populate deleted_by_id
+- [ ] Docker authentication smoke test

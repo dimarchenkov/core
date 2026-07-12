@@ -30,3 +30,63 @@ Core — внутренняя система управления каталог
 ## Статус
 
 Проект находится в стадии активной разработки.
+
+## Administrative CLI
+
+Administrative commands should normally run inside the Docker API container. It
+contains the application environment and has access to PostgreSQL.
+
+### Create an administrator
+
+```bash
+docker compose exec api uv run python -m core identity create-admin
+```
+
+This interactive command asks for an email, full name, password, and password
+confirmation. It creates an active administrator account, but does not grant
+emergency superuser access. Passwords must contain at least 8 characters and
+must not be empty or whitespace-only.
+
+### Enable emergency superuser access
+
+```bash
+docker compose exec api uv run python -m core identity enable-superuser \
+  <email> \
+  --reason "<reason>"
+```
+
+Emergency superuser access is available only through the local CLI. Enabling it
+requires a non-empty reason and writes a privilege audit event. It must not be
+used for normal daily work.
+
+### Disable emergency superuser access
+
+```bash
+docker compose exec api uv run python -m core identity disable-superuser \
+  <email> \
+  --reason "<reason>"
+```
+
+This disables emergency privileges and writes a privilege audit event. A reason
+is optional in code, but always providing one is recommended.
+
+### Help commands
+
+```bash
+docker compose exec api uv run python -m core identity --help
+
+docker compose exec api uv run python -m core identity enable-superuser --help
+```
+
+### Local non-Docker usage
+
+```bash
+uv run python -m core identity <command>
+```
+
+Local execution requires a valid `DATABASE_URL` and a reachable PostgreSQL
+instance.
+
+Never run identity CLI commands inside the `postgres`, `worker`, or
+`angie` containers: use the `api` container. Do not expose these CLI
+commands through a public HTTP endpoint.

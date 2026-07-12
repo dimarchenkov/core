@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.identity import cli
 from core.identity.admin import PrivilegeAuditEventAdmin, UserAdmin
 from core.identity.models import PrivilegeAuditAction, PrivilegeAuditEvent, User
 from core.identity.repository import PrivilegeAuditEventRepository
@@ -15,6 +16,7 @@ from core.identity.security import hash_password, verify_password
 from core.identity.service import (
     FullNameRequiredError,
     IdentityService,
+    PasswordValidationError,
     SuperuserAlreadyDisabledError,
     SuperuserReasonRequiredError,
     UserAlreadyExistsError,
@@ -81,6 +83,27 @@ def test_create_admin_trims_full_name_before_storage(session: Session) -> None:
     )
 
     assert user.full_name == "Core Admin"
+
+
+def test_create_admin_accepts_eight_character_password(session: Session) -> None:
+    """Administrator creation accepts the eight-character minimum password length."""
+    user = IdentityService(session).create_admin(
+        "admin@example.com",
+        "Core Admin",
+        "password",
+    )
+
+    assert user.email == "admin@example.com"
+
+
+def test_create_admin_rejects_passwords_shorter_than_eight_characters(session: Session) -> None:
+    """Administrator creation rejects passwords shorter than the new minimum."""
+    with pytest.raises(PasswordValidationError):
+        IdentityService(session).create_admin(
+            "admin@example.com",
+            "Core Admin",
+            "short",
+        )
 
 
 def test_password_hash_uses_argon2id_and_verifies() -> None:
@@ -193,3 +216,22 @@ def test_sqladmin_excludes_superuser_editing_and_audit_is_read_only() -> None:
     assert PrivilegeAuditEventAdmin.can_create is False
     assert PrivilegeAuditEventAdmin.can_edit is False
     assert PrivilegeAuditEventAdmin.can_delete is False
+
+
+def test_cli_reports_missing_identity_tables_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI explains how to upgrade a database missing the identity schema."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    missing_schema_session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(cli, "SessionLocal", missing_schema_session_factory)
+
+    exit_code = cli.main(["enable-superuser", "admin@example.com", "--reason", "Repair"])
+
+    assert exit_code == 1
+    assert capsys.readouterr().err == (
+        "Database schema is not up to date.\n\n"
+        "Run:\n\n"
+        "docker compose exec api uv run alembic upgrade head\n"
+    )

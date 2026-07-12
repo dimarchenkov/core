@@ -35,6 +35,16 @@ class UserRepository:
             )
         )
 
+    def get_active_by_id(self, user_id: UUIDv7) -> User | None:
+        """Return an active non-deleted user by identifier."""
+        return self._session.scalar(
+            select(User).where(
+                User.id == user_id,
+                User.deleted_at.is_(None),
+                User.is_active.is_(True),
+            )
+        )
+
 
 class PrivilegeAuditEventRepository:
     """Database access for append-only privilege audit events."""

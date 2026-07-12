@@ -115,4 +115,13 @@ Business entities will later reference User through:
 - updated_by_id
 - deleted_by_id
 
-These fields remain nullable for system operations and existing historical records.
+## Access tokens
+
+- Authentication uses email and password.
+- JWT access tokens use HS256.
+- Access token lifetime is 8 hours.
+- JWT subject contains the User UUID.
+- Inactive or soft-deleted users cannot log in.
+- Tokens belonging to inactive or soft-deleted users are rejected.
+- JWT secrets are stored only in environment configuration.
+- Refresh tokens are not part of Identity Lite.

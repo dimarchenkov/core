@@ -31,3 +31,7 @@
 
 - Discuss renaming `CatalogVariant.title` to `variant_name` or `display_name`.
 - Design `AssetCodeGenerator` for future rental assets.
+
+
+- Configure Angie to re-resolve the Docker `api` service after container recreation.
+- Add an API healthcheck and make Angie depend on API health.

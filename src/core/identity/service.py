@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from core.identity.models import PrivilegeAuditAction, PrivilegeAuditEvent, User
 from core.identity.repository import PrivilegeAuditEventRepository, UserRepository
-from core.identity.security import hash_password
+from core.identity.security import hash_password, verify_password
 
 
 class UserAlreadyExistsError(Exception):
@@ -21,6 +21,10 @@ class PasswordValidationError(Exception):
 
 class FullNameRequiredError(Exception):
     """Raised when administrator creation has no meaningful full name."""
+
+
+class InvalidCredentialsError(Exception):
+    """Raised when login credentials cannot authenticate an active user."""
 
 
 class SuperuserReasonRequiredError(Exception):
@@ -69,6 +73,19 @@ class IdentityService:
         self._users.add(user)
         self._session.commit()
         self._session.refresh(user)
+        return user
+
+    def authenticate_user(self, email: str, password: str) -> User:
+        """Authenticate an active user without revealing credential failure details."""
+        user = self._users.get_active_by_email(normalize_email(email))
+        if user is None:
+            raise InvalidCredentialsError
+        try:
+            password_valid = verify_password(password, user.password_hash)
+        except ValueError:
+            password_valid = False
+        if not password_valid:
+            raise InvalidCredentialsError
         return user
 
     def enable_superuser(self, email: str, reason: str, actor_description: str) -> User:
@@ -137,5 +154,5 @@ class IdentityService:
 
     def _validate_admin_password(self, password: str) -> None:
         """Reject empty, whitespace-only, and too-short administrator passwords."""
-        if not password.strip() or len(password) < 12:
+        if not password.strip() or len(password) < 8:
             raise PasswordValidationError
