@@ -7,6 +7,7 @@ from core.catalog.admin import CatalogProductAdmin, CatalogVariantAdmin, Categor
 from core.database import engine
 from core.identity.admin import PrivilegeAuditEventAdmin, UserAdmin
 from core.media.admin import ImageAdmin, ImageLinkAdmin
+from core.supplier.admin import SupplierAdmin
 
 
 def setup_admin(app: FastAPI) -> Admin:
@@ -19,4 +20,5 @@ def setup_admin(app: FastAPI) -> Admin:
     admin.add_view(ImageLinkAdmin)
     admin.add_view(UserAdmin)
     admin.add_view(PrivilegeAuditEventAdmin)
+    admin.add_view(SupplierAdmin)
     return admin

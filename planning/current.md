@@ -1,18 +1,18 @@
 # Current Sprint
 
-## Sprint 5 — Purchasing and Receiving
+## Sprint 5 — Supplier Management
 
 ### Supplier foundation
 
-- [ ] Supplier domain rules
-- [ ] Supplier entity
-- [ ] Supplier repository
-- [ ] Supplier service
-- [ ] Supplier API
-- [ ] Supplier SQLAdmin
-- [ ] Alembic migration
-- [ ] Supplier tests
-- [ ] Authenticated attribution
+- [x] Supplier domain rules
+- [x] Supplier entity
+- [x] Supplier repository
+- [x] Supplier service
+- [x] Supplier API
+- [x] Supplier SQLAdmin
+- [x] Alembic migration
+- [x] Supplier tests
+- [x] Authenticated attribution
 - [ ] Docker smoke test
 
 ### Receipt design

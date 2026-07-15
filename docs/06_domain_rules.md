@@ -32,3 +32,14 @@ Variant readiness validation will be implemented later.
 - Users find images through CatalogProduct, CatalogVariant, SKU or barcode.
 - Core provides direct download of source and master files.
 - Replacing a master image must not destroy the source file.
+
+## Suppliers
+
+- Supplier is a reusable counterparty reference, not a container of products.
+- A Supplier may represent a company, sole proprietor, marketplace, individual, or internal production source.
+- Suppliers are reused across many Receipts.
+- Supplier does not change stock directly.
+- Products supplied by a Supplier are derived from Receipt and ReceiptItem history.
+- One Receipt may contain existing variants and newly created catalog items.
+- A direct Supplier-to-Variant association is not part of the MVP.
+- SupplierProduct may be introduced later for supplier SKU, source URL, minimum order quantity, and supplier-specific naming.

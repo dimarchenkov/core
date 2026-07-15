@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 import core.catalog.models  # noqa: F401
 import core.identity.models  # noqa: F401
 import core.media.models  # noqa: F401
+import core.supplier.models  # noqa: F401
 from core.config import get_settings
 from core.shared.db import Base
 
