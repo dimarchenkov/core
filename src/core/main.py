@@ -10,6 +10,7 @@ from core.identity.routes import router as identity_router
 from core.intake.routes import router as intake_router
 from core.logging import configure_logging
 from core.media.routes import image_link_router, image_router
+from core.receipt.routes import router as receipt_router
 from core.supplier.routes import router as supplier_router
 
 
@@ -30,6 +31,7 @@ def create_app() -> FastAPI:
     app.include_router(image_router)
     app.include_router(image_link_router)
     app.include_router(intake_router)
+    app.include_router(receipt_router)
     app.include_router(supplier_router)
     app.include_router(identity_router)
 
