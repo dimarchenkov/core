@@ -11,6 +11,8 @@ from sqlalchemy.pool import StaticPool
 from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.catalog.repository import CatalogProductRepository, CatalogVariantRepository
 from core.database import get_session
+from core.identity.dependencies import get_current_user
+from core.identity.models import User
 from core.intake.schemas import IntakeCreate
 from core.intake.service import IntakeService
 from core.main import create_app
@@ -33,6 +35,7 @@ def session() -> Generator[Session]:
     Base.metadata.create_all(
         engine,
         tables=[
+            User.__table__,
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
@@ -54,6 +57,7 @@ def client(session: Session) -> Generator[TestClient]:
         yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_current_user] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

@@ -68,16 +68,22 @@ class ImageService:
             raise ImageNotFoundError
         return image
 
-    def create_image(self, data: ImageCreate) -> Image:
+    def create_image(self, data: ImageCreate, *, actor_id: UUIDv7 | None = None) -> Image:
         """Register immutable-source image metadata without writing any files."""
         self._ensure_relative_keys(data)
-        image = Image(**data.model_dump())
+        image = Image(**data.model_dump(), created_by_id=actor_id)
         self._repository.add(image)
         self._session.commit()
         self._session.refresh(image)
         return image
 
-    def upload_source_image(self, original_filename: str, content: bytes) -> Image:
+    def upload_source_image(
+        self,
+        original_filename: str,
+        content: bytes,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> Image:
         """Store validated source bytes and create matching immutable image metadata."""
         if len(content) > self.max_source_size_bytes:
             raise ImageFileTooLargeError
@@ -98,6 +104,7 @@ class ImageService:
                 width=inspected.width,
                 height=inspected.height,
                 checksum=sha256(content).hexdigest(),
+                created_by_id=actor_id,
             )
             self._repository.add(image)
             self._session.commit()
@@ -108,10 +115,10 @@ class ImageService:
             self._storage.delete_saved_source(source_key)
             raise
 
-    def delete_image(self, image_id: UUIDv7) -> None:
+    def delete_image(self, image_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> None:
         """Soft-delete image metadata without removing physical source files."""
         image = self.get_image(image_id)
-        image.soft_delete()
+        image.soft_delete(actor_id)
         self._session.commit()
 
     def _ensure_relative_keys(self, data: ImageCreate) -> None:
@@ -153,12 +160,18 @@ class ImageLinkService:
             raise ImageLinkNotFoundError
         return link
 
-    def create_link(self, data: ImageLinkCreate, *, commit: bool = True) -> ImageLink:
+    def create_link(
+        self,
+        data: ImageLinkCreate,
+        *,
+        commit: bool = True,
+        actor_id: UUIDv7 | None = None,
+    ) -> ImageLink:
         """Link an existing image to an active catalog entity."""
         self._ensure_image_exists(data.image_id)
         self._ensure_entity_is_active(data.entity_type, data.entity_id)
         self._ensure_primary_available(data.entity_type, data.entity_id, data.role)
-        link = ImageLink(**data.model_dump())
+        link = ImageLink(**data.model_dump(), created_by_id=actor_id)
         self._repository.add(link)
         if commit:
             self._session.commit()
@@ -167,7 +180,13 @@ class ImageLinkService:
             self._session.flush()
         return link
 
-    def update_link(self, link_id: UUIDv7, data: ImageLinkUpdate) -> ImageLink:
+    def update_link(
+        self,
+        link_id: UUIDv7,
+        data: ImageLinkUpdate,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> ImageLink:
         """Update display fields while preserving image and entity references."""
         link = self.get_link(link_id)
         changes = data.model_dump(exclude_unset=True)
@@ -175,14 +194,16 @@ class ImageLinkService:
         self._ensure_primary_available(link.entity_type, link.entity_id, role, link.id)
         for field, value in changes.items():
             setattr(link, field, value)
+        if actor_id is not None:
+            link.updated_by_id = actor_id
         self._session.commit()
         self._session.refresh(link)
         return link
 
-    def delete_link(self, link_id: UUIDv7) -> None:
+    def delete_link(self, link_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> None:
         """Soft-delete an image link without deleting the linked image metadata."""
         link = self.get_link(link_id)
-        link.soft_delete()
+        link.soft_delete(actor_id)
         self._session.commit()
 
     def _ensure_image_exists(self, image_id: UUIDv7) -> None:

@@ -12,6 +12,8 @@ from core.catalog.models import CatalogProduct, Category
 from core.catalog.schemas import CatalogProductCreate
 from core.catalog.service import CatalogProductService
 from core.database import get_session
+from core.identity.dependencies import get_current_user
+from core.identity.models import User
 from core.main import create_app
 from core.shared.db import Base
 
@@ -24,7 +26,10 @@ def session() -> Generator[Session]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    Base.metadata.create_all(engine, tables=[Category.__table__, CatalogProduct.__table__])
+    Base.metadata.create_all(
+        engine,
+        tables=[User.__table__, Category.__table__, CatalogProduct.__table__],
+    )
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
     with session_factory() as database_session:
@@ -40,6 +45,7 @@ def client(session: Session) -> Generator[TestClient]:
         yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_current_user] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

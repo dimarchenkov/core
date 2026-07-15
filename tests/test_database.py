@@ -86,7 +86,7 @@ def test_soft_delete_mixin_tracks_deletion_state() -> None:
 
     assert model.is_deleted is False
 
-    model.soft_delete(deleted_by_id=deleted_by_id)
+    model.soft_delete(actor_id=deleted_by_id)
 
     assert model.is_deleted is True
     assert isinstance(model.deleted_at, datetime)

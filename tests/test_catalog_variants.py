@@ -13,6 +13,8 @@ from core.catalog.schemas import CatalogVariantCreate, CatalogVariantUpdate
 from core.catalog.service import CatalogVariantProductError, CatalogVariantService
 from core.catalog.sku import SkuGenerator
 from core.database import get_session
+from core.identity.dependencies import get_current_user
+from core.identity.models import User
 from core.main import create_app
 from core.shared.db import Base
 
@@ -27,7 +29,12 @@ def session() -> Generator[Session]:
     )
     Base.metadata.create_all(
         engine,
-        tables=[Category.__table__, CatalogProduct.__table__, CatalogVariant.__table__],
+        tables=[
+            User.__table__,
+            Category.__table__,
+            CatalogProduct.__table__,
+            CatalogVariant.__table__,
+        ],
     )
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -44,6 +51,7 @@ def client(session: Session) -> Generator[TestClient]:
         yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_current_user] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

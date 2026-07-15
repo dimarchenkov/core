@@ -8,7 +8,7 @@ from core.intake.schemas import IntakeCreate, IntakeRead
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.schemas import ImageLinkCreate
 from core.media.service import ImageLinkService
-from core.shared.db import generate_uuid_v7
+from core.shared.db import UUIDv7, generate_uuid_v7
 
 
 class IntakeService:
@@ -21,7 +21,7 @@ class IntakeService:
         self._variant_service = CatalogVariantService(session)
         self._image_link_service = ImageLinkService(session)
 
-    def create_intake(self, data: IntakeCreate) -> IntakeRead:
+    def create_intake(self, data: IntakeCreate, *, actor_id: UUIDv7 | None = None) -> IntakeRead:
         """Create an intake atomically by coordinating existing domain services."""
         try:
             product = self._product_service.create_product(
@@ -32,6 +32,7 @@ class IntakeService:
                     category_id=data.category_id,
                 ),
                 commit=False,
+                actor_id=actor_id,
             )
             variant = self._variant_service.create_variant(
                 CatalogVariantCreate(
@@ -40,6 +41,7 @@ class IntakeService:
                     attributes=data.attributes,
                 ),
                 commit=False,
+                actor_id=actor_id,
             )
             image_link = self._image_link_service.create_link(
                 ImageLinkCreate(
@@ -49,6 +51,7 @@ class IntakeService:
                     role=ImageLinkRole.PRIMARY,
                 ),
                 commit=False,
+                actor_id=actor_id,
             )
             self._session.commit()
             self._session.refresh(product)

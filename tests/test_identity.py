@@ -128,6 +128,7 @@ def test_create_admin_creates_admin_without_superuser(session: Session) -> None:
     assert user.is_active is True
     assert user.is_admin is True
     assert user.is_superuser is False
+    assert user.created_by_id is None
 
 
 def test_enable_superuser_requires_reason(session: Session) -> None:

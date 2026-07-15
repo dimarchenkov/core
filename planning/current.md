@@ -18,8 +18,8 @@
 - [x] Login endpoint
 - [x] JWT access token
 - [x] Current user dependency
-- [ ] Protected API routes
-- [ ] Populate created_by_id
-- [ ] Populate updated_by_id
-- [ ] Populate deleted_by_id
-- [ ] Docker authentication smoke test
+- [x] Protected API routes
+- [x] Populate created_by_id
+- [x] Populate updated_by_id
+- [x] Populate deleted_by_id
+- [x] Docker authentication smoke test

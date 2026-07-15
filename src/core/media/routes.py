@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from core.database import get_session
+from core.identity.dependencies import get_current_user
+from core.identity.models import User
 from core.media.inspection import UnsupportedImageError
 from core.media.models import Image, ImageLink
 from core.media.schemas import (
@@ -30,8 +32,21 @@ from core.media.service import (
 from core.media.storage import LocalImageStorage
 from core.shared.db import UUIDv7
 
-image_router = APIRouter(prefix="/api/media/images", tags=["media"])
-image_link_router = APIRouter(prefix="/api/media/image-links", tags=["media"])
+image_router = APIRouter(
+    prefix="/api/media/images",
+    tags=["media"],
+    dependencies=[Depends(get_current_user)],
+)
+image_link_router = APIRouter(
+    prefix="/api/media/image-links",
+    tags=["media"],
+    dependencies=[Depends(get_current_user)],
+)
+
+
+def _actor_id(current_user: User | None) -> UUIDv7 | None:
+    """Return an actor id while allowing existing system-operation test overrides."""
+    return current_user.id if current_user is not None else None
 
 
 def get_image_service(session: Annotated[Session, Depends(get_session)]) -> ImageService:
@@ -54,10 +69,11 @@ def list_images(service: Annotated[ImageService, Depends(get_image_service)]) ->
 def create_image(
     data: ImageCreate,
     service: Annotated[ImageService, Depends(get_image_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Image:
     """Register image metadata without processing or writing a file."""
     try:
-        return service.create_image(data)
+        return service.create_image(data, actor_id=_actor_id(current_user))
     except ImageStorageKeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -69,11 +85,14 @@ def create_image(
 async def upload_image(
     file: Annotated[UploadFile, File(...)],
     service: Annotated[ImageService, Depends(get_image_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Image:
     """Store one validated local source image and register its metadata."""
     content = await file.read(ImageService.max_source_size_bytes + 1)
     try:
-        return service.upload_source_image(file.filename or "upload", content)
+        return service.upload_source_image(
+            file.filename or "upload", content, actor_id=_actor_id(current_user)
+        )
     except ImageFileTooLargeError as exc:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
@@ -105,10 +124,11 @@ def get_image(
 def delete_image(
     image_id: UUIDv7,
     service: Annotated[ImageService, Depends(get_image_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete image metadata without removing files."""
     try:
-        service.delete_image(image_id)
+        service.delete_image(image_id, actor_id=_actor_id(current_user))
     except ImageNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -129,10 +149,11 @@ def list_image_links(
 def create_image_link(
     data: ImageLinkCreate,
     service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> ImageLink:
     """Attach an existing image to an active catalog entity."""
     try:
-        return service.create_link(data)
+        return service.create_link(data, actor_id=_actor_id(current_user))
     except ImageNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -170,10 +191,11 @@ def update_image_link(
     link_id: UUIDv7,
     data: ImageLinkUpdate,
     service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> ImageLink:
     """Update the role or display order of an image link."""
     try:
-        return service.update_link(link_id, data)
+        return service.update_link(link_id, data, actor_id=_actor_id(current_user))
     except ImageLinkNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -190,10 +212,11 @@ def update_image_link(
 def delete_image_link(
     link_id: UUIDv7,
     service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete an image link without deleting the linked image."""
     try:
-        service.delete_link(link_id)
+        service.delete_link(link_id, actor_id=_actor_id(current_user))
     except ImageLinkNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

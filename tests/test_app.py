@@ -28,3 +28,13 @@ def test_swagger_ui_is_available() -> None:
 
     assert response.status_code == 200
     assert "Swagger UI" in response.text
+
+
+def test_openapi_schema_is_public() -> None:
+    """OpenAPI remains available without authentication for Swagger clients."""
+    client = _build_client()
+
+    response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    assert response.json()["info"]["title"] == "Core"

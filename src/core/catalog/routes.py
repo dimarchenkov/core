@@ -32,11 +32,30 @@ from core.catalog.service import (
     CategorySlugAlreadyExistsError,
 )
 from core.database import get_session
+from core.identity.dependencies import get_current_user
+from core.identity.models import User
 from core.shared.db import UUIDv7
 
-router = APIRouter(prefix="/api/catalog/categories", tags=["catalog"])
-product_router = APIRouter(prefix="/api/catalog/products", tags=["catalog"])
-variant_router = APIRouter(prefix="/api/catalog/variants", tags=["catalog"])
+router = APIRouter(
+    prefix="/api/catalog/categories",
+    tags=["catalog"],
+    dependencies=[Depends(get_current_user)],
+)
+product_router = APIRouter(
+    prefix="/api/catalog/products",
+    tags=["catalog"],
+    dependencies=[Depends(get_current_user)],
+)
+variant_router = APIRouter(
+    prefix="/api/catalog/variants",
+    tags=["catalog"],
+    dependencies=[Depends(get_current_user)],
+)
+
+
+def _actor_id(current_user: User | None) -> UUIDv7 | None:
+    """Return an actor id while allowing existing system-operation test overrides."""
+    return current_user.id if current_user is not None else None
 
 
 def get_category_service(session: Annotated[Session, Depends(get_session)]) -> CategoryService:
@@ -70,10 +89,11 @@ def list_categories(
 def create_category(
     data: CategoryCreate,
     service: Annotated[CategoryService, Depends(get_category_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Category:
     """Create a catalog category."""
     try:
-        return service.create_category(data)
+        return service.create_category(data, actor_id=_actor_id(current_user))
     except CategorySlugAlreadyExistsError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -106,10 +126,11 @@ def update_category(
     category_id: UUIDv7,
     data: CategoryUpdate,
     service: Annotated[CategoryService, Depends(get_category_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Category:
     """Update a catalog category."""
     try:
-        return service.update_category(category_id, data)
+        return service.update_category(category_id, data, actor_id=_actor_id(current_user))
     except CategoryNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -131,10 +152,11 @@ def update_category(
 def delete_category(
     category_id: UUIDv7,
     service: Annotated[CategoryService, Depends(get_category_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete a catalog category."""
     try:
-        service.delete_category(category_id)
+        service.delete_category(category_id, actor_id=_actor_id(current_user))
     except CategoryNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -155,10 +177,11 @@ def list_products(
 def create_product(
     data: CatalogProductCreate,
     service: Annotated[CatalogProductService, Depends(get_catalog_product_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogProduct:
     """Create a catalog product."""
     try:
-        return service.create_product(data)
+        return service.create_product(data, actor_id=_actor_id(current_user))
     except CatalogProductSlugAlreadyExistsError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -191,10 +214,11 @@ def update_product(
     product_id: UUIDv7,
     data: CatalogProductUpdate,
     service: Annotated[CatalogProductService, Depends(get_catalog_product_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogProduct:
     """Update a catalog product."""
     try:
-        return service.update_product(product_id, data)
+        return service.update_product(product_id, data, actor_id=_actor_id(current_user))
     except CatalogProductNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -216,10 +240,11 @@ def update_product(
 def delete_product(
     product_id: UUIDv7,
     service: Annotated[CatalogProductService, Depends(get_catalog_product_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete a catalog product."""
     try:
-        service.delete_product(product_id)
+        service.delete_product(product_id, actor_id=_actor_id(current_user))
     except CatalogProductNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -240,10 +265,11 @@ def list_variants(
 def create_variant(
     data: CatalogVariantCreate,
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogVariant:
     """Create a catalog variant with a system-generated SKU."""
     try:
-        return service.create_variant(data)
+        return service.create_variant(data, actor_id=_actor_id(current_user))
     except CatalogVariantProductError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -271,10 +297,11 @@ def update_variant(
     variant_id: UUIDv7,
     data: CatalogVariantUpdate,
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogVariant:
     """Update a catalog variant without changing its SKU."""
     try:
-        return service.update_variant(variant_id, data)
+        return service.update_variant(variant_id, data, actor_id=_actor_id(current_user))
     except CatalogVariantNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -291,10 +318,11 @@ def update_variant(
 def delete_variant(
     variant_id: UUIDv7,
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete a catalog variant."""
     try:
-        service.delete_variant(variant_id)
+        service.delete_variant(variant_id, actor_id=_actor_id(current_user))
     except CatalogVariantNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

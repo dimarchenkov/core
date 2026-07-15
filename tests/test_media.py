@@ -15,6 +15,8 @@ from sqlalchemy.pool import StaticPool
 
 from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.database import get_session
+from core.identity.dependencies import get_current_user
+from core.identity.models import User
 from core.main import create_app
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import Image, ImageLink
@@ -36,6 +38,7 @@ def session() -> Generator[Session]:
     Base.metadata.create_all(
         engine,
         tables=[
+            User.__table__,
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
@@ -57,6 +60,7 @@ def client(session: Session) -> Generator[TestClient]:
         yield session
 
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_current_user] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -120,6 +124,7 @@ def upload_client(session: Session, tmp_path: Path) -> Generator[TestClient]:
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_image_service] = override_get_image_service
+    app.dependency_overrides[get_current_user] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
