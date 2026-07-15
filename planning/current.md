@@ -13,7 +13,7 @@
 - [x] Alembic migration
 - [x] Supplier tests
 - [x] Authenticated attribution
-- [ ] Docker smoke test
+- [x] Docker smoke test
 
 ### Receipt design
 
