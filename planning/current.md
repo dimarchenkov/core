@@ -1,25 +1,25 @@
 # Current Sprint
 
-## Sprint 4 — Identity Lite
+## Sprint 5 — Purchasing and Receiving
 
-### Identity foundation
+### Supplier foundation
 
-- [x] User entity
-- [x] Argon2id password hashing
-- [x] Administrator creation CLI
-- [x] Emergency superuser CLI
-- [x] Privilege audit events
-- [x] Alembic migration
-- [x] SQLAdmin views
-- [x] Tests
+- [ ] Supplier domain rules
+- [ ] Supplier entity
+- [ ] Supplier repository
+- [ ] Supplier service
+- [ ] Supplier API
+- [ ] Supplier SQLAdmin
+- [ ] Alembic migration
+- [ ] Supplier tests
+- [ ] Authenticated attribution
+- [ ] Docker smoke test
 
-### Authentication and attribution
+### Receipt design
 
-- [x] Login endpoint
-- [x] JWT access token
-- [x] Current user dependency
-- [x] Protected API routes
-- [x] Populate created_by_id
-- [x] Populate updated_by_id
-- [x] Populate deleted_by_id
-- [x] Docker authentication smoke test
+- [ ] Receipt belongs to one Supplier
+- [ ] Receipt may contain existing CatalogVariants
+- [ ] Receipt may create a new Variant for an existing Product
+- [ ] Receipt may create a new Product and Variant
+- [ ] One Receipt may mix existing and newly created items
+- [ ] ReceiptItem stores quantity and purchase price
