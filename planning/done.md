@@ -11,6 +11,7 @@
 - ✅ README
 
 ## Sprint 1 — Infrastructure
+
 - ✅ Docker
 - ✅ FastAPI
 - ✅ SQLAdmin
@@ -35,7 +36,8 @@
 - ✅ SKU generation
 - ✅ Image
 - ✅ ImageLink
-- ✅ Local image upload
+- ✅ Image roles and primary image rules
+- ✅ Local image upload and original storage
 - ✅ Intake workflow
 - ✅ Category API
 - ✅ Docker foundation checkpoint
@@ -56,41 +58,66 @@
 - ✅ deleted_by attribution
 - ✅ Docker authentication smoke test
 
-## Sprint 5 — Supplier Management
+## Sprint 5 — Supplier Management and Receipt Drafts
 
 ### Supplier foundation
 
-- [x] Supplier domain rules
-- [x] Supplier entity
-- [x] Supplier repository
-- [x] Supplier service
-- [x] Supplier API
-- [x] Supplier SQLAdmin
-- [x] Alembic migration
-- [x] Supplier tests
-- [x] Authenticated attribution
-- [x] Docker smoke test
+- ✅ Supplier domain rules
+- ✅ Supplier entity
+- ✅ Supplier repository
+- ✅ Supplier service
+- ✅ Supplier API
+- ✅ Supplier SQLAdmin
+- ✅ Alembic migration
+- ✅ Supplier tests
+- ✅ Authenticated attribution
+- ✅ Docker smoke test
 
 ### Receipt design
 
-- [x] Receipt belongs to one Supplier
-- [x] ReceiptItem references CatalogVariant
-- [x] New catalog items are registered through Intake
-- [x] One Receipt may mix existing and newly registered Variants
-- [x] ReceiptItem stores quantity and purchase price
-- [x] Draft Receipt does not affect stock
+- ✅ Receipt belongs to one Supplier
+- ✅ ReceiptItem references CatalogVariant
+- ✅ New catalog items are registered through Intake
+- ✅ One Receipt may mix existing and newly registered Variants
+- ✅ ReceiptItem stores quantity and purchase price
+- ✅ Draft Receipt does not affect stock
 
 ### Receipt draft foundation
 
-- [x] Receipt entity
-- [x] ReceiptItem entity
-- [x] Receipt number generation
-- [x] Draft lifecycle rules
-- [x] Receipt repository
-- [x] Receipt service
-- [x] Receipt API
-- [x] Receipt SQLAdmin
-- [x] Alembic migration
-- [x] Tests
-- [x] Authenticated attribution
-- [ ] Docker smoke test
+- ✅ Receipt entity
+- ✅ ReceiptItem entity
+- ✅ Receipt number generation
+- ✅ Draft lifecycle rules
+- ✅ Receipt repository
+- ✅ Receipt service
+- ✅ Receipt API
+- ✅ Receipt SQLAdmin
+- ✅ Alembic migration
+- ✅ Tests
+- ✅ Authenticated attribution
+- ✅ Docker smoke test
+
+## Sprint 6 — Inventory Engine
+
+### Inventory design
+
+- ✅ Immutable stock movement ledger
+- ✅ Movement types
+- ✅ Balance calculation strategy
+- ✅ Receipt posting rules
+- ✅ Receipt cancellation rules
+- ✅ Reversal movements instead of deletion
+
+### Inventory foundation
+
+- ✅ StockMovement entity
+- ✅ Movement repository
+- ✅ Inventory service
+- ✅ Receipt posting service
+- ✅ Receipt cancellation service
+- ✅ Row locking for posting and cancellation
+- ✅ Alembic migrations
+- ✅ Unit and integration tests
+- ✅ Docker end-to-end smoke test
+- ✅ Verified receipt lifecycle: draft → posted → cancelled
+- ✅ Verified ledger balance returns to zero after reversal
