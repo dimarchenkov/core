@@ -65,7 +65,7 @@ class ReceiptPostingService:
 
     def _get_draft_receipt(self, receipt_id: UUIDv7) -> Receipt:
         """Load a non-deleted draft receipt or raise the matching business error."""
-        receipt = self._receipt_repository.get(receipt_id)
+        receipt = self._receipt_repository.get_for_update(receipt_id)
         if receipt is None:
             raise ReceiptNotFoundError
         if receipt.status is not ReceiptStatus.DRAFT:

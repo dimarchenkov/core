@@ -27,6 +27,15 @@ class ReceiptRepository:
             select(Receipt).where(Receipt.id == receipt_id, Receipt.deleted_at.is_(None))
         )
 
+    def get_for_update(self, receipt_id: UUIDv7) -> Receipt | None:
+        """Lock one non-deleted receipt row for lifecycle state transitions."""
+        statement = (
+            select(Receipt)
+            .where(Receipt.id == receipt_id, Receipt.deleted_at.is_(None))
+            .with_for_update()
+        )
+        return self._session.scalar(statement)
+
     def list(self) -> Sequence[Receipt]:
         """Return non-deleted receipts ordered by newest business date and number."""
         statement = (

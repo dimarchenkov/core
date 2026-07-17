@@ -36,6 +36,14 @@ class ReceiptNotDraftError(Exception):
     """Raised when an operation is attempted on a non-draft receipt."""
 
 
+class ReceiptNotPostedError(Exception):
+    """Raised when an operation requires a receipt in the posted lifecycle state."""
+
+
+class ReceiptOriginalMovementsNotFoundError(Exception):
+    """Raised when a posted receipt has no original receipt ledger movements to reverse."""
+
+
 class ReceiptService:
     """Business operations for draft supplier receipts without inventory posting."""
 

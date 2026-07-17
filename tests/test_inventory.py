@@ -117,6 +117,7 @@ def test_movement_enums_match_inventory_design() -> None:
         "write_off",
         "transfer_in",
         "transfer_out",
+        "reversal",
     ]
     assert [item.value for item in SourceType] == ["receipt", "sale", "inventory", "system"]
 
@@ -213,6 +214,35 @@ def test_inventory_service_flushes_without_committing(
     session.expunge(movement)
 
     assert session.get(StockMovement, movement.id) is not None
+
+
+def test_inventory_service_reverses_historical_movement_without_variant_validation(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """A compensating entry can be appended after its original variant is archived."""
+    service = InventoryService(session)
+    original = service.create_movement(
+        variant.id,
+        MovementType.RECEIPT,
+        "2.500",
+        SourceType.RECEIPT,
+        generate_uuid_v7(),
+    )
+    variant.soft_delete()
+    session.commit()
+
+    reversal = service.reverse_movement(
+        original,
+        source_type=SourceType.RECEIPT,
+        source_id=generate_uuid_v7(),
+        actor_id=generate_uuid_v7(),
+    )
+
+    assert reversal.movement_type is MovementType.REVERSAL
+    assert reversal.variant_id == original.variant_id
+    assert reversal.quantity_delta == -original.quantity_delta
+    assert reversal.created_by_id is not None
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ class MovementType(StrEnum):
     WRITE_OFF = "write_off"
     TRANSFER_IN = "transfer_in"
     TRANSFER_OUT = "transfer_out"
+    REVERSAL = "reversal"
 
 
 class SourceType(StrEnum):

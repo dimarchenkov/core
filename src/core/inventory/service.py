@@ -76,6 +76,35 @@ class InventoryService:
         self._session.flush()
         return movement
 
+    def reverse_movement(
+        self,
+        original_movement: StockMovement,
+        *,
+        source_type: SourceType,
+        source_id: UUIDv7 | None,
+        notes: str | None = None,
+        actor_id: UUIDv7 | None = None,
+    ) -> StockMovement:
+        """Append an inverse ledger entry without revalidating historical variant state.
+
+        Reversals compensate an existing immutable movement.  They therefore remain
+        possible after the original catalog variant has been archived or deactivated.
+        """
+        if source_id is None:
+            raise MovementSourceRequiredError(original_movement.variant_id)
+        movement = StockMovement(
+            variant_id=original_movement.variant_id,
+            movement_type=MovementType.REVERSAL,
+            quantity_delta=-original_movement.quantity_delta,
+            source_type=source_type,
+            source_id=source_id,
+            notes=notes,
+            created_by_id=actor_id,
+        )
+        self._repository.add(movement)
+        self._session.flush()
+        return movement
+
     def get_balance(self, variant_id: UUIDv7) -> Decimal:
         """Return a variant balance calculated by SQL aggregation of immutable movements."""
         return self._repository.get_balance(variant_id)

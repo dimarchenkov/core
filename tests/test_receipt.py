@@ -20,14 +20,20 @@ from core.identity.models import User
 from core.identity.service import IdentityService
 from core.inventory.enums import MovementType, SourceType
 from core.inventory.models import StockMovement
+from core.inventory.service import InventoryService
 from core.main import create_app
+from core.receipt.cancellation import ReceiptCancellationService
 from core.receipt.enums import ReceiptStatus
 from core.receipt.models import Receipt, ReceiptItem
 from core.receipt.posting import ReceiptItemsRequiredError, ReceiptPostingService
+from core.receipt.repository import ReceiptRepository
 from core.receipt.schemas import ReceiptCreate, ReceiptItemCreate, ReceiptItemUpdate, ReceiptUpdate
 from core.receipt.service import (
     ReceiptItemService,
     ReceiptNotDraftError,
+    ReceiptNotFoundError,
+    ReceiptNotPostedError,
+    ReceiptOriginalMovementsNotFoundError,
     ReceiptService,
     ReceiptSupplierError,
     ReceiptVariantError,
@@ -523,3 +529,202 @@ def test_receipt_post_route_returns_not_found_for_missing_receipt(
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Receipt not found."
+
+
+def test_receipt_cancellation_creates_reversals_and_restores_zero_balance(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+) -> None:
+    """Cancelling a posted receipt appends exact inverse movements without changing originals."""
+    receipt = draft_receipt_with_items(session, supplier, variant, item_count=2)
+    ReceiptPostingService(session).post_receipt(receipt.id)
+    originals = [
+        movement
+        for movement in session.query(StockMovement).all()
+        if movement.movement_type is MovementType.RECEIPT
+    ]
+    original_deltas = [movement.quantity_delta for movement in originals]
+    actor_id = UUID("019f64e4-a309-742b-b1ca-b6059d31bce5")
+
+    cancelled = ReceiptCancellationService(session).cancel_receipt(receipt.id, actor_id=actor_id)
+    reversals = [
+        movement
+        for movement in session.query(StockMovement).all()
+        if movement.movement_type is MovementType.REVERSAL
+    ]
+
+    assert cancelled.status is ReceiptStatus.CANCELLED
+    assert cancelled.updated_by_id == actor_id
+    assert len(reversals) == len(originals)
+    assert sorted(movement.quantity_delta for movement in reversals) == sorted(
+        -delta for delta in original_deltas
+    )
+    assert [movement.quantity_delta for movement in originals] == original_deltas
+    assert all(movement.source_id == receipt.id for movement in reversals)
+    assert all(movement.source_type is SourceType.RECEIPT for movement in reversals)
+    assert all(movement.created_by_id == actor_id for movement in reversals)
+    assert InventoryService(session).get_balance(variant.id) == Decimal("0")
+
+
+def test_receipt_cancellation_rejects_draft_cancelled_and_missing_receipts(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+) -> None:
+    """Only posted receipts can be cancelled, and missing receipts retain their normal error."""
+    service = ReceiptCancellationService(session)
+    draft_receipt = draft_receipt_with_items(session, supplier, variant)
+    with pytest.raises(ReceiptNotPostedError):
+        service.cancel_receipt(draft_receipt.id)
+
+    ReceiptPostingService(session).post_receipt(draft_receipt.id)
+    service.cancel_receipt(draft_receipt.id)
+    with pytest.raises(ReceiptNotPostedError):
+        service.cancel_receipt(draft_receipt.id)
+    with pytest.raises(ReceiptNotFoundError):
+        service.cancel_receipt(UUID("019f64e4-a309-742b-b1ca-b6059d31bce5"))
+
+
+def test_receipt_cancellation_rejects_posted_receipt_without_original_movements(
+    session: Session,
+    supplier: Supplier,
+) -> None:
+    """Cancellation fails when a posted receipt lacks the original ledger movements to reverse."""
+    receipt = ReceiptService(session).open_receipt(receipt_payload(supplier))
+    receipt.status = ReceiptStatus.POSTED
+    session.commit()
+
+    with pytest.raises(ReceiptOriginalMovementsNotFoundError):
+        ReceiptCancellationService(session).cancel_receipt(receipt.id)
+
+
+def test_receipt_cancellation_rolls_back_reversals_when_creation_fails(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reversal failure rolls back all appended reversals and preserves posted receipt status."""
+    receipt = draft_receipt_with_items(session, supplier, variant, item_count=2)
+    ReceiptPostingService(session).post_receipt(receipt.id)
+    cancellation_service = ReceiptCancellationService(session)
+    original_reverse_movement = cancellation_service._inventory_service.reverse_movement
+    calls = 0
+
+    def fail_second_reversal(*args: object, **kwargs: object) -> StockMovement:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("reversal creation failed")
+        return original_reverse_movement(*args, **kwargs)
+
+    monkeypatch.setattr(
+        cancellation_service._inventory_service,
+        "reverse_movement",
+        fail_second_reversal,
+    )
+    with pytest.raises(RuntimeError, match="reversal creation failed"):
+        cancellation_service.cancel_receipt(receipt.id)
+
+    session.refresh(receipt)
+    assert receipt.status is ReceiptStatus.POSTED
+    assert session.query(StockMovement).filter_by(movement_type=MovementType.REVERSAL).count() == 0
+    assert session.query(StockMovement).filter_by(movement_type=MovementType.RECEIPT).count() == 2
+
+
+@pytest.mark.parametrize("archive_variant", [False, True], ids=["inactive", "archived"])
+def test_receipt_cancellation_reverses_historical_variant_movements(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+    archive_variant: bool,
+) -> None:
+    """Posted receipts remain cancellable after their variant becomes unavailable."""
+    receipt = draft_receipt_with_items(session, supplier, variant)
+    ReceiptPostingService(session).post_receipt(receipt.id)
+    if archive_variant:
+        variant.soft_delete()
+    else:
+        variant.is_active = False
+    session.commit()
+
+    cancelled = ReceiptCancellationService(session).cancel_receipt(receipt.id)
+
+    reversals = session.query(StockMovement).filter_by(movement_type=MovementType.REVERSAL).all()
+    assert cancelled.status is ReceiptStatus.CANCELLED
+    assert len(reversals) == 1
+    assert reversals[0].variant_id == variant.id
+    assert reversals[0].quantity_delta == Decimal("-2.000")
+    assert InventoryService(session).get_balance(variant.id) == Decimal("0")
+
+
+def test_receipt_transitions_use_row_locks_and_commit_once(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Posting and cancellation lock the receipt row and each own one final commit."""
+    receipt = draft_receipt_with_items(session, supplier, variant)
+    original_get_for_update = ReceiptRepository.get_for_update
+    locked_receipt_ids: list[UUID] = []
+
+    def track_get_for_update(repository: ReceiptRepository, receipt_id: UUID) -> Receipt | None:
+        locked_receipt_ids.append(receipt_id)
+        return original_get_for_update(repository, receipt_id)
+
+    monkeypatch.setattr(ReceiptRepository, "get_for_update", track_get_for_update)
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
+    ReceiptPostingService(session).post_receipt(receipt.id)
+    ReceiptCancellationService(session).cancel_receipt(receipt.id)
+
+    assert locked_receipt_ids == [receipt.id, receipt.id]
+    assert commit_calls == 2
+
+
+def test_receipt_cancel_route_returns_updated_receipt_and_expected_errors(
+    client: TestClient,
+    session: Session,
+    supplier: Supplier,
+    user: User,
+    variant: CatalogVariant,
+) -> None:
+    """Cancellation endpoint returns posted reversals and maps lifecycle failures to HTTP errors."""
+    headers = authorization_header(client, user)
+    receipt = draft_receipt_with_items(session, supplier, variant)
+    posted_response = client.post(f"/api/receipts/{receipt.id}/post", headers=headers)
+    assert posted_response.status_code == 200
+
+    cancelled_response = client.post(f"/api/receipts/{receipt.id}/cancel", headers=headers)
+    assert cancelled_response.status_code == 200
+    assert cancelled_response.json()["status"] == "cancelled"
+
+    draft_receipt = ReceiptService(session).open_receipt(receipt_payload(supplier))
+    draft_response = client.post(f"/api/receipts/{draft_receipt.id}/cancel", headers=headers)
+    assert draft_response.status_code == 400
+    assert draft_response.json()["detail"] == "Receipt is not posted."
+
+    missing_response = client.post(
+        "/api/receipts/019f64e4-a309-742b-b1ca-b6059d31bce5/cancel",
+        headers=headers,
+    )
+    assert missing_response.status_code == 404
+
+    no_movements_receipt = ReceiptService(session).open_receipt(receipt_payload(supplier))
+    no_movements_receipt.status = ReceiptStatus.POSTED
+    session.commit()
+    no_movements_response = client.post(
+        f"/api/receipts/{no_movements_receipt.id}/cancel",
+        headers=headers,
+    )
+    assert no_movements_response.status_code == 400
+    assert no_movements_response.json()["detail"] == "Receipt has no original movements."

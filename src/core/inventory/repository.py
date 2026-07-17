@@ -6,6 +6,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from core.inventory.enums import MovementType, SourceType
 from core.inventory.models import StockMovement
 from core.shared.db import UUIDv7
 
@@ -31,6 +32,19 @@ class StockMovementRepository:
         statement = (
             select(StockMovement)
             .where(StockMovement.variant_id == variant_id)
+            .order_by(StockMovement.created_at, StockMovement.id)
+        )
+        return self._session.scalars(statement).all()
+
+    def list_original_receipt_movements(self, receipt_id: UUIDv7) -> Sequence[StockMovement]:
+        """Return original receipt movements for one receipt in deterministic ledger order."""
+        statement = (
+            select(StockMovement)
+            .where(
+                StockMovement.source_type == SourceType.RECEIPT,
+                StockMovement.source_id == receipt_id,
+                StockMovement.movement_type == MovementType.RECEIPT,
+            )
             .order_by(StockMovement.created_at, StockMovement.id)
         )
         return self._session.scalars(statement).all()
