@@ -7,8 +7,8 @@
 - [ ] Inventory architecture
 - [x] Movement types
 - [x] StockMovement entity
-- [ ] InventoryService
-- [ ] Balance calculation strategy
+- [x] InventoryService
+- [x] Balance calculation strategy
 - [ ] Receipt posting rules
 - [ ] Receipt cancellation rules
 
@@ -16,7 +16,7 @@
 
 - [x] StockMovement entity
 - [x] Movement repository
-- [ ] Inventory service
+- [x] Inventory service
 - [ ] Posting service
 - [x] Alembic migration
 - [x] Tests

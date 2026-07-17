@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.inventory.models import StockMovement
@@ -33,3 +34,27 @@ class StockMovementRepository:
             .order_by(StockMovement.created_at, StockMovement.id)
         )
         return self._session.scalars(statement).all()
+
+    def get_balance(self, variant_id: UUIDv7) -> Decimal:
+        """Calculate one variant balance in SQL without loading movement rows."""
+        statement = select(func.sum(StockMovement.quantity_delta)).where(
+            StockMovement.variant_id == variant_id
+        )
+        total = self._session.scalar(statement)
+        return total if isinstance(total, Decimal) else Decimal("0")
+
+    def get_balances(self, variant_ids: Collection[UUIDv7]) -> dict[UUIDv7, Decimal]:
+        """Calculate requested variant balances with one grouped SQL aggregate query."""
+        requested_ids = tuple(variant_ids)
+        balances = {variant_id: Decimal("0") for variant_id in requested_ids}
+        if not requested_ids:
+            return balances
+
+        statement = (
+            select(StockMovement.variant_id, func.sum(StockMovement.quantity_delta))
+            .where(StockMovement.variant_id.in_(requested_ids))
+            .group_by(StockMovement.variant_id)
+        )
+        for variant_id, total in self._session.execute(statement):
+            balances[variant_id] = total if isinstance(total, Decimal) else Decimal("0")
+        return balances
