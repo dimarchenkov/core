@@ -18,10 +18,12 @@ from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
+from core.inventory.enums import MovementType, SourceType
 from core.inventory.models import StockMovement
 from core.main import create_app
 from core.receipt.enums import ReceiptStatus
 from core.receipt.models import Receipt, ReceiptItem
+from core.receipt.posting import ReceiptItemsRequiredError, ReceiptPostingService
 from core.receipt.schemas import ReceiptCreate, ReceiptItemCreate, ReceiptItemUpdate, ReceiptUpdate
 from core.receipt.service import (
     ReceiptItemService,
@@ -124,6 +126,23 @@ def receipt_payload(supplier: Supplier) -> ReceiptCreate:
         receipt_date=date(2026, 7, 15),
         source_document_number="  INV-42  ",
     )
+
+
+def draft_receipt_with_items(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+    item_count: int = 1,
+) -> Receipt:
+    """Create one draft receipt with the requested number of active variant lines."""
+    receipt = ReceiptService(session).open_receipt(receipt_payload(supplier))
+    item_service = ReceiptItemService(session)
+    for _ in range(item_count):
+        item_service.add_item(
+            receipt.id,
+            ReceiptItemCreate(variant_id=variant.id, quantity=2, purchase_price="5.00"),
+        )
+    return receipt
 
 
 def test_open_receipt_generates_draft_number_and_trims_source_document(
@@ -330,3 +349,177 @@ def test_receipt_migration_revision_identifier_is_short() -> None:
 
     assert match is not None
     assert len(match.group(1)) <= 32
+
+
+def test_receipt_posting_creates_one_movement_per_item_and_posts_receipt(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+) -> None:
+    """Posting a draft creates receipt ledger movements before committing posted status."""
+    receipt = draft_receipt_with_items(session, supplier, variant, item_count=2)
+    actor_id = UUID("019f64e4-a309-742b-b1ca-b6059d31bce5")
+
+    posted = ReceiptPostingService(session).post_receipt(receipt.id, actor_id=actor_id)
+    movements = session.query(StockMovement).order_by(StockMovement.id).all()
+
+    assert posted.status is ReceiptStatus.POSTED
+    assert posted.updated_by_id == actor_id
+    assert len(movements) == 2
+    assert all(movement.variant_id == variant.id for movement in movements)
+    assert all(movement.movement_type is MovementType.RECEIPT for movement in movements)
+    assert all(movement.quantity_delta == Decimal("2.000") for movement in movements)
+    assert all(movement.source_type is SourceType.RECEIPT for movement in movements)
+    assert all(movement.source_id == receipt.id for movement in movements)
+    assert all(movement.created_by_id == actor_id for movement in movements)
+
+
+def test_receipt_posting_rejects_empty_and_already_posted_receipts(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+) -> None:
+    """Only non-empty draft receipts can enter the posting transaction."""
+    empty_receipt = ReceiptService(session).open_receipt(receipt_payload(supplier))
+    posting_service = ReceiptPostingService(session)
+    with pytest.raises(ReceiptItemsRequiredError):
+        posting_service.post_receipt(empty_receipt.id)
+    assert session.query(StockMovement).count() == 0
+
+    receipt = draft_receipt_with_items(session, supplier, variant)
+    receipt.status = ReceiptStatus.POSTED
+    session.commit()
+    with pytest.raises(ReceiptNotDraftError):
+        posting_service.post_receipt(receipt.id)
+    assert session.query(StockMovement).count() == 0
+
+
+def test_receipt_posting_rejects_inactive_supplier_and_variant(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+) -> None:
+    """Posting revalidates supplier and item variants immediately before ledger creation."""
+    posting_service = ReceiptPostingService(session)
+    inactive_supplier_receipt = draft_receipt_with_items(session, supplier, variant)
+    supplier.is_active = False
+    session.commit()
+    with pytest.raises(ReceiptSupplierError):
+        posting_service.post_receipt(inactive_supplier_receipt.id)
+    assert session.query(StockMovement).count() == 0
+
+    supplier.is_active = True
+    session.commit()
+    inactive_variant_receipt = draft_receipt_with_items(session, supplier, variant)
+    variant.is_active = False
+    session.commit()
+    with pytest.raises(ReceiptVariantError):
+        posting_service.post_receipt(inactive_variant_receipt.id)
+    assert session.query(StockMovement).count() == 0
+
+
+def test_receipt_posting_rolls_back_when_movement_creation_fails(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed item movement removes all prior movements and preserves draft receipt status."""
+    receipt = draft_receipt_with_items(session, supplier, variant, item_count=2)
+    posting_service = ReceiptPostingService(session)
+    original_create_movement = posting_service._inventory_service.create_movement
+    calls = 0
+
+    def fail_second_movement(*args: object, **kwargs: object) -> StockMovement:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("movement creation failed")
+        return original_create_movement(*args, **kwargs)
+
+    monkeypatch.setattr(posting_service._inventory_service, "create_movement", fail_second_movement)
+    with pytest.raises(RuntimeError, match="movement creation failed"):
+        posting_service.post_receipt(receipt.id)
+
+    session.refresh(receipt)
+    assert receipt.status is ReceiptStatus.DRAFT
+    assert session.query(StockMovement).count() == 0
+
+
+def test_receipt_posting_commits_exactly_once(
+    session: Session,
+    supplier: Supplier,
+    variant: CatalogVariant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Posting owns one final transaction commit after all movement flushes succeed."""
+    receipt = draft_receipt_with_items(session, supplier, variant)
+    posting_service = ReceiptPostingService(session)
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
+    posting_service.post_receipt(receipt.id)
+
+    assert commit_calls == 1
+
+
+def test_receipt_post_route_posts_draft_receipt(
+    client: TestClient,
+    session: Session,
+    supplier: Supplier,
+    user: User,
+    variant: CatalogVariant,
+) -> None:
+    """Posting endpoint returns the posted receipt after creating its inventory movements."""
+    receipt = draft_receipt_with_items(session, supplier, variant)
+
+    response = client.post(
+        f"/api/receipts/{receipt.id}/post",
+        headers=authorization_header(client, user),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "posted"
+    assert session.query(StockMovement).count() == 1
+
+
+def test_receipt_post_route_rejects_empty_and_posted_receipts(
+    client: TestClient,
+    session: Session,
+    supplier: Supplier,
+    user: User,
+    variant: CatalogVariant,
+) -> None:
+    """Posting endpoint maps empty and non-draft receipts to the expected client errors."""
+    headers = authorization_header(client, user)
+    empty_receipt = ReceiptService(session).open_receipt(receipt_payload(supplier))
+    empty_response = client.post(f"/api/receipts/{empty_receipt.id}/post", headers=headers)
+    assert empty_response.status_code == 400
+    assert empty_response.json()["detail"] == "Receipt has no items."
+
+    posted_receipt = draft_receipt_with_items(session, supplier, variant)
+    posted_receipt.status = ReceiptStatus.POSTED
+    session.commit()
+    posted_response = client.post(f"/api/receipts/{posted_receipt.id}/post", headers=headers)
+    assert posted_response.status_code == 400
+    assert posted_response.json()["detail"] == "Receipt is not a draft."
+
+
+def test_receipt_post_route_returns_not_found_for_missing_receipt(
+    client: TestClient,
+    user: User,
+) -> None:
+    """Posting endpoint returns the standard missing receipt response."""
+    response = client.post(
+        "/api/receipts/019f64e4-a309-742b-b1ca-b6059d31bce5/post",
+        headers=authorization_header(client, user),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Receipt not found."

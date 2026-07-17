@@ -10,6 +10,7 @@ from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
 from core.receipt.models import Receipt, ReceiptItem
+from core.receipt.posting import ReceiptItemsRequiredError, ReceiptPostingService
 from core.receipt.schemas import (
     ReceiptCreate,
     ReceiptItemCreate,
@@ -46,6 +47,13 @@ def get_receipt_item_service(
     return ReceiptItemService(session)
 
 
+def get_receipt_posting_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> ReceiptPostingService:
+    """Provide receipt posting service instances for route handlers."""
+    return ReceiptPostingService(session)
+
+
 @router.get("", response_model=list[ReceiptRead])
 def list_receipts(
     service: Annotated[ReceiptService, Depends(get_receipt_service)],
@@ -66,6 +74,37 @@ def open_receipt(
     except ReceiptSupplierError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Supplier is invalid."
+        ) from exc
+
+
+@router.post("/{receipt_id}/post", response_model=ReceiptRead, status_code=status.HTTP_200_OK)
+def post_receipt(
+    receipt_id: UUIDv7,
+    service: Annotated[ReceiptPostingService, Depends(get_receipt_posting_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Receipt:
+    """Post a validated draft receipt and create its inventory movements."""
+    try:
+        return service.post_receipt(receipt_id, actor_id=current_user.id)
+    except ReceiptNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found."
+        ) from exc
+    except ReceiptNotDraftError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Receipt is not a draft."
+        ) from exc
+    except ReceiptSupplierError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Supplier is invalid."
+        ) from exc
+    except ReceiptVariantError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Variant is invalid."
+        ) from exc
+    except ReceiptItemsRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Receipt has no items."
         ) from exc
 
 
