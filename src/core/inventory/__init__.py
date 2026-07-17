@@ -1,1 +1,1 @@
-"""Inventory module package reserved for future business entities."""
+"""Inventory module for immutable stock movement ledger records."""

@@ -18,6 +18,7 @@ from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
+from core.inventory.models import StockMovement
 from core.main import create_app
 from core.receipt.enums import ReceiptStatus
 from core.receipt.models import Receipt, ReceiptItem
@@ -51,6 +52,7 @@ def session() -> Generator[Session]:
             CatalogVariant.__table__,
             Receipt.__table__,
             ReceiptItem.__table__,
+            StockMovement.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -263,7 +265,7 @@ def test_draft_item_update_remove_and_duplicate_variant_lines(
     assert updated.purchase_price == Decimal("2.51")
     assert [item.id for item in service.list_items(receipt.id)] == [first.id]
     assert second.deleted_at is not None
-    assert not any("stock" in table_name for table_name in Base.metadata.tables)
+    assert session.query(StockMovement).count() == 0
 
 
 def test_receipt_routes_require_authentication(client: TestClient) -> None:

@@ -5,8 +5,8 @@
 ### Inventory design
 
 - [ ] Inventory architecture
-- [ ] Movement types
-- [ ] StockMovement entity
+- [x] Movement types
+- [x] StockMovement entity
 - [ ] InventoryService
 - [ ] Balance calculation strategy
 - [ ] Receipt posting rules
@@ -14,10 +14,10 @@
 
 ### Inventory foundation
 
-- [ ] StockMovement entity
-- [ ] Movement repository
+- [x] StockMovement entity
+- [x] Movement repository
 - [ ] Inventory service
 - [ ] Posting service
-- [ ] Alembic migration
-- [ ] Tests
+- [x] Alembic migration
+- [x] Tests
 - [ ] Docker smoke test
