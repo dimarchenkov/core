@@ -1,23 +1,39 @@
 # Current Sprint
 
-## Sprint 6 — Inventory Engine
+## Sprint 7 — Pricing and Identifiers
 
-### Inventory design
+### Goal
 
-- [ ] Inventory architecture
-- [x] Movement types
-- [x] StockMovement entity
-- [x] InventoryService
-- [x] Balance calculation strategy
-- [x] Receipt posting rules
-- [ ] Receipt cancellation rules
+Prepare catalog variants for sale by adding explicit retail pricing and stable machine-readable identifiers.
 
-### Inventory foundation
+### Pricing design
 
-- [x] StockMovement entity
-- [x] Movement repository
-- [x] Inventory service
-- [x] Posting service
-- [x] Alembic migration
-- [x] Tests
-- [x] Docker smoke test
+- [ ] Define the pricing domain rules
+- [ ] Decide whether prices are current-state fields or an append-only history
+- [ ] Define money precision and currency rules
+- [ ] Define where purchase price belongs after receipt posting
+- [ ] Define retail price update rules
+
+### Pricing foundation
+
+- [ ] Price entity or catalog pricing fields
+- [ ] Pricing repository
+- [ ] Pricing service
+- [ ] Pricing API
+- [ ] Pricing SQLAdmin integration
+- [ ] Alembic migration
+- [ ] Tests
+
+### Product identifiers
+
+- [ ] Define barcode format and ownership rules
+- [ ] Implement automatic barcode generation
+- [ ] Guarantee barcode uniqueness
+- [ ] Expose barcode through catalog API and SQLAdmin
+- [ ] Add barcode tests
+
+### Sprint completion
+
+- [ ] Authenticated audit attribution
+- [ ] Docker smoke test
+- [ ] Update project documentation
