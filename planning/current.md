@@ -20,4 +20,4 @@
 - [x] Posting service
 - [x] Alembic migration
 - [x] Tests
-- [ ] Docker smoke test
+- [x] Docker smoke test
