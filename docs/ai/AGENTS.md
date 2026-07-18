@@ -19,7 +19,7 @@ You are a senior Python engineer working on a long-term business project.
 Before writing code:
 
 - read the documentation in `/docs`;
-- treat `docs/00_product_philosophy.md` and `docs/01_principles.md` as product constraints;
+- treat `docs/00_product.md`, `docs/01_principles.md`, `docs/02_user_journeys.md`, and `docs/domain.md` as product constraints;
 - follow the existing architecture;
 - do not invent a different architecture;
 - prefer extending existing modules over creating new ones.

@@ -56,3 +56,16 @@ Turn a received CatalogVariant into a sellable item with a clear readiness state
 - [ ] Authenticated audit attribution
 - [ ] Docker smoke test
 - [ ] Update project documentation
+
+### Following business sprints
+
+1. Sprint 8 — Workflow UX
+   - photo-first mobile Receive Goods workflow;
+   - Ready for Sale work queue;
+   - activity feed and employee attribution in daily work;
+   - cards remain reference/history views rather than the primary workplace.
+2. Sprint 9 — Rental Foundation
+   - Asset and Asset Code;
+   - checkout and return lifecycles;
+   - condition photos, seals and maintenance history;
+   - rental remains a first-class lifecycle alongside sales.

@@ -1,4 +1,8 @@
-# Core User Journeys
+# Core User Journeys — Overview
+
+Канонический подробный путь Receive Goods находится в [Core User Journeys](02_user_journeys.md).
+
+Ниже сохранён краткий обзор остальных путей до их переноса в подробный формат.
 
 Пользовательские пути описывают работу людей, а не структуру таблиц или HTTP endpoint'ов.
 

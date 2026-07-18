@@ -19,14 +19,30 @@
 - [ ] AQSI integration
 - [ ] End-to-end photo-first intake workflow from phone
 
-## P2 — Sell
+## P2 — Workflow UX
+
+- [ ] Photo-first mobile Receive Goods workflow
+- [ ] Ready for Sale employee work queue
+- [ ] Activity feed for daily operations
+- [ ] Employee workflow timing, errors and cancellation metrics
+- [ ] Reference/history cards separated from daily workflow screens
+
+## P3 — Rental Foundation
+
+- [ ] Rental Asset and Asset Code
+- [ ] Checkout and return lifecycle foundation
+- [ ] Before/after condition photos
+- [ ] Seals, maintenance and damage history
+- [ ] Rental pricing and deposits
+
+## P4 — Sell
 
 - [ ] Sales document and lifecycle
 - [ ] Sale inventory movements
 - [ ] Returns and corrections
 - [ ] AQSI sales synchronization
 
-## P3 — Warehouse Operations
+## P5 — Warehouse Operations
 
 - [ ] Stock balance read API
 - [ ] Media processing: master/WebP generation
@@ -36,15 +52,7 @@
 - [ ] Inventory counting and adjustments
 - [ ] Write-offs and transfers
 
-## P4 — Rental lifecycle
-
-- [ ] Rental Asset and Asset Code
-- [ ] Checkout and return
-- [ ] Before/after condition photos
-- [ ] Seals, maintenance and damage history
-- [ ] Rental pricing and deposits
-
-## P5 — Marketplace and Messaging
+## P6 — Marketplace and Messaging
 
 - [ ] Tilda Sync
 - [ ] Telegram
@@ -52,7 +60,7 @@
 - [ ] Wildberries
 - [ ] Яндекс Маркет
 
-## P6 — Productization
+## P7 — Productization
 
 - [ ] Zero-to-Working bootstrap
 - [ ] Deployment and upgrade guide

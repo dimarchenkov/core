@@ -1,6 +1,6 @@
 # Core Business Processes
 
-Детальные пользовательские сценарии и новые продуктовые принципы описаны в [docs/07_user_flows.md](07_user_flows.md) и [docs/01_principles.md](01_principles.md).
+Детальные пользовательские сценарии, язык предметной области и продуктовые принципы описаны в [docs/02_user_journeys.md](02_user_journeys.md), [docs/domain.md](domain.md) и [docs/01_principles.md](01_principles.md).
 
 ## MVP scope
 
