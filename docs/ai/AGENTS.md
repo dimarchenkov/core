@@ -19,6 +19,7 @@ You are a senior Python engineer working on a long-term business project.
 Before writing code:
 
 - read the documentation in `/docs`;
+- treat `docs/00_product_philosophy.md` and `docs/01_principles.md` as product constraints;
 - follow the existing architecture;
 - do not invent a different architecture;
 - prefer extending existing modules over creating new ones.
@@ -28,6 +29,15 @@ Before writing code:
 ## Architecture rules
 
 Always respect these rules.
+
+### Product principles
+
+- New physical objects follow Photo First.
+- Build business processes instead of exposing CRUD as the product experience.
+- Sales and rental are first-class lifecycles on a shared foundation.
+- Every important action has an author and should support future measurement.
+- Core is mobile-first and API-first.
+- Deployment, bootstrap and documentation are part of the product.
 
 ### Product
 

@@ -11,31 +11,58 @@
 - [x] Inventory ledger, posting and cancellation
 - [x] Media foundation: image metadata, links, primary image and local original upload
 
-## P1 — MVP remaining
+## P1 — Ready for Sale
 
-- [ ] Pricing and product identifiers
+- [ ] Retail pricing and product identifiers
+- [ ] Derived ready-for-sale checks
+- [ ] Label generation and printing
+- [ ] AQSI integration
+- [ ] End-to-end photo-first intake workflow from phone
+
+## P2 — Sell
+
+- [ ] Sales document and lifecycle
+- [ ] Sale inventory movements
+- [ ] Returns and corrections
+- [ ] AQSI sales synchronization
+
+## P3 — Warehouse Operations
+
 - [ ] Stock balance read API
 - [ ] Media processing: master/WebP generation
 - [ ] Media delivery: source and master download
 - [ ] Brand support
-- [ ] Label generation and printing
 - [ ] CSV import from Tilda
-- [ ] AQSI integration
-- [ ] End-to-end intake workflow from phone
+- [ ] Inventory counting and adjustments
+- [ ] Write-offs and transfers
 
-## P2 — After MVP
+## P4 — Rental lifecycle
 
-- [ ] Rental
+- [ ] Rental Asset and Asset Code
+- [ ] Checkout and return
+- [ ] Before/after condition photos
+- [ ] Seals, maintenance and damage history
+- [ ] Rental pricing and deposits
+
+## P5 — Marketplace and Messaging
+
 - [ ] Tilda Sync
 - [ ] Telegram
 - [ ] MAX
-
-## P3 — Future
-
-- [ ] React UI
 - [ ] Wildberries
 - [ ] Яндекс Маркет
-- [ ] Analytics
+
+## P6 — Productization
+
+- [ ] Zero-to-Working bootstrap
+- [ ] Deployment and upgrade guide
+- [ ] User and administrator guides
+- [ ] Versioned developer API guide
+- [ ] Subscription deployment model
+- [ ] Franchise operations guide
+- [ ] Investor and partner materials
+- [ ] Optional first-party frontend
+- [ ] Employee activity feed and operational analytics
 - [ ] Multi Warehouse
 
 ## Technical debt

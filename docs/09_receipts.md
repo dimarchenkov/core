@@ -48,7 +48,7 @@ Statuses:
 - posted
 - cancelled
 
-Only draft behavior is implemented initially.
+Draft, posting and cancellation behavior are implemented.
 
 A draft Receipt:
 
@@ -57,7 +57,7 @@ A draft Receipt:
 - does not create StockMovement;
 - does not affect stock balance.
 
-Posting and cancellation are implemented together with StockMovement later.
+Posting creates immutable receipt movements in one transaction. Cancellation appends exact reversal movements and never deletes the original ledger history.
 
 ## Receipt
 
@@ -104,10 +104,10 @@ Rules:
 
 Draft Receipt does not affect stock.
 
-Future posting will create StockMovement records in one transaction.
+Posting creates StockMovement records in one transaction.
 
 A posted Receipt must not be freely edited or deleted.
-Corrections will use explicit cancellation or reversal operations.
+Corrections use explicit cancellation and reversal operations.
 
 ## Invariants
 
@@ -119,3 +119,5 @@ Corrections will use explicit cancellation or reversal operations.
 - Posted Receipt cannot be freely modified.
 - Receipt does not create Product or Variant.
 - Intake is responsible for catalog registration.
+- Posting and cancellation lock the Receipt row before changing lifecycle state.
+- Cancellation reverses original receipt movements, including when the current Variant is inactive or archived.

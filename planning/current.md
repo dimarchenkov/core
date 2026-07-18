@@ -1,10 +1,18 @@
 # Current Sprint
 
-## Sprint 7 — Pricing and Identifiers
+## Sprint 7 — Ready for Sale
 
 ### Goal
 
-Prepare catalog variants for sale by adding explicit retail pricing and stable machine-readable identifiers.
+Turn a received CatalogVariant into a sellable item with a clear readiness state, retail price, barcode, label and AQSI publication path.
+
+### Product principles
+
+- [x] Photo First is mandatory for new physical objects
+- [x] API First: every business capability remains interface-independent
+- [x] Rental remains a first-class lifecycle alongside sales
+- [x] Employee attribution and future operational metrics remain required
+- [x] Deployment, bootstrap and documentation are product concerns
 
 ### Pricing design
 
@@ -31,6 +39,17 @@ Prepare catalog variants for sale by adding explicit retail pricing and stable m
 - [ ] Guarantee barcode uniqueness
 - [ ] Expose barcode through catalog API and SQLAdmin
 - [ ] Add barcode tests
+
+### Ready-for-sale workflow
+
+- [ ] Define readiness as derived checks, not one overloaded universal status
+- [ ] Require an active primary image
+- [ ] Require an active Variant with SKU
+- [ ] Require a retail price
+- [ ] Require a barcode
+- [ ] Add a read API for missing readiness requirements
+- [ ] Generate and print a basic label
+- [ ] Define the AQSI publication boundary
 
 ### Sprint completion
 
