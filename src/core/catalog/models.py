@@ -77,7 +77,7 @@ class CatalogVariant(BaseModel):
     # TODO: Revisit whether this should become variant_name or display_name.
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     sku: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
-    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    barcode: Mapped[str] = mapped_column(String(22), nullable=False, unique=True, index=True)
     attributes: Mapped[dict[str, str | int | bool]] = mapped_column(
         JSON,
         nullable=False,

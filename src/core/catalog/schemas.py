@@ -83,7 +83,6 @@ class CatalogVariantBase(PydanticBaseModel):
 
     product_id: UUIDv7
     title: str = Field(min_length=1, max_length=255)
-    barcode: str | None = Field(default=None, max_length=64)
     attributes: dict[str, str | int | bool] = Field(default_factory=dict)
     is_active: bool = True
 
@@ -101,7 +100,6 @@ class CatalogVariantUpdate(PydanticBaseModel):
 
     product_id: UUIDv7 | None = None
     title: str | None = Field(default=None, min_length=1, max_length=255)
-    barcode: str | None = Field(default=None, max_length=64)
     attributes: dict[str, str | int | bool] | None = None
     is_active: bool | None = None
 
@@ -113,6 +111,7 @@ class CatalogVariantRead(CatalogVariantBase):
 
     id: UUIDv7
     sku: str
+    barcode: str
     created_at: datetime
     updated_at: datetime
     version: int

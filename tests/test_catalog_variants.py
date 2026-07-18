@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.catalog.barcode import InternalBarcodeGenerator
 from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.catalog.schemas import CatalogVariantCreate, CatalogVariantUpdate
 from core.catalog.service import CatalogVariantProductError, CatalogVariantService
@@ -85,6 +86,8 @@ def test_variant_service_generates_stable_sequential_skus(
 
     assert first.sku == "SKU-000001"
     assert second.sku == "SKU-000002"
+    assert first.barcode == "2000000000015"
+    assert second.barcode == "2000000000022"
     assert set(CatalogVariant.__table__.columns.keys()) == {
         "product_id",
         "title",
@@ -117,6 +120,20 @@ def test_sku_generator_rejects_non_positive_numbers(number: int) -> None:
     """Only positive sequence numbers may be converted into SKUs."""
     with pytest.raises(ValueError, match="positive"):
         SkuGenerator.generate(number)
+
+
+@pytest.mark.parametrize(
+    ("number", "expected"),
+    [(1, "2000000000015"), (42, "2000000000428"), (1_000_000, "2000010000005")],
+)
+def test_internal_barcode_generator_creates_valid_ean13(number: int, expected: str) -> None:
+    """Internal variant numbers use the restricted 20 prefix and EAN check digit."""
+    barcode = InternalBarcodeGenerator.generate(number)
+
+    assert barcode == expected
+    assert len(barcode) == 13
+    assert barcode.isdigit()
+    assert barcode.startswith("20")
 
 
 def test_variant_service_rejects_inactive_product(session: Session) -> None:
@@ -156,28 +173,33 @@ def test_variant_routes_reject_user_supplied_sku(
     assert response.status_code == 422
 
 
-def test_variant_routes_update_without_changing_sku(
+def test_variant_routes_update_without_changing_identifiers(
     client: TestClient,
     active_product: CatalogProduct,
 ) -> None:
-    """Updates retain the system-generated SKU and reject SKU changes."""
+    """Updates retain system-generated identifiers and reject their changes."""
     created = client.post(
         "/api/catalog/variants",
         json={"product_id": str(active_product.id), "title": "Camera body"},
     ).json()
     update = client.patch(
         f"/api/catalog/variants/{created['id']}",
-        json={"title": "Updated camera body", "barcode": "123456"},
+        json={"title": "Updated camera body"},
     )
     sku_change = client.patch(
         f"/api/catalog/variants/{created['id']}",
         json={"sku": "MANUAL-1"},
     )
+    barcode_change = client.patch(
+        f"/api/catalog/variants/{created['id']}",
+        json={"barcode": "123456"},
+    )
 
     assert update.status_code == 200
     assert update.json()["sku"] == "SKU-000001"
-    assert update.json()["barcode"] == "123456"
+    assert update.json()["barcode"] == "2000000000015"
     assert sku_change.status_code == 422
+    assert barcode_change.status_code == 422
 
 
 def test_variant_routes_soft_delete(client: TestClient, active_product: CatalogProduct) -> None:
@@ -192,6 +214,28 @@ def test_variant_routes_soft_delete(client: TestClient, active_product: CatalogP
     assert client.get("/api/catalog/variants").json() == []
 
 
+def test_variant_can_be_found_by_exact_barcode_and_archived_code_is_hidden(
+    client: TestClient,
+    active_product: CatalogProduct,
+) -> None:
+    """Scanner lookup resolves one exact active record and hides archived variants."""
+    created = client.post(
+        "/api/catalog/variants",
+        json={"product_id": str(active_product.id), "title": "Camera body"},
+    ).json()
+    path = f"/api/catalog/variants/by-barcode/{created['barcode']}"
+
+    found = client.get(path)
+
+    assert found.status_code == 200
+    assert found.json()["id"] == created["id"]
+    assert client.get("/api/catalog/variants/by-barcode/9999999999999").status_code == 404
+
+    assert client.delete(f"/api/catalog/variants/{created['id']}").status_code == 204
+    assert client.get(path).status_code == 404
+
+
 def test_variant_update_schema_has_no_sku_field() -> None:
     """The update schema prevents any changes to stable generated SKUs."""
     assert "sku" not in CatalogVariantUpdate.model_fields
+    assert "barcode" not in CatalogVariantUpdate.model_fields

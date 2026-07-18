@@ -121,3 +121,41 @@
 - ✅ Docker end-to-end smoke test
 - ✅ Verified receipt lifecycle: draft → posted → cancelled
 - ✅ Verified ledger balance returns to zero after reversal
+
+## Sprint 7 — Ready for Sale
+
+### Pricing and identifiers
+
+- ✅ Immutable retail price history with actor attribution
+- ✅ Current retail price API and SQLAdmin view
+- ✅ Automatic internal EAN-13-compatible barcode generation
+- ✅ Exact scanner lookup by primary barcode
+- ✅ Barcode migration for existing Variants
+
+### Sale readiness and labels
+
+- ✅ Derived Ready for Sale checks
+- ✅ Required active primary image, SKU, barcode and positive retail RUB price
+- ✅ Authenticated readiness API with explicit missing requirements
+- ✅ Printer-independent 58 × 40 mm PDF label
+- ✅ Standard driver-managed printing boundary
+
+### AQSI publication
+
+- ✅ Minimal ordinary-goods payload with VAT-exempt code `6`
+- ✅ Stable AQSI identity based on CatalogVariant UUID
+- ✅ Deterministic `Товары Core` fallback category
+- ✅ Asynchronous, idempotent and actor-attributed publication attempts
+- ✅ AQSI shop discovery and retail-price binding
+- ✅ Remote verification before `published`
+- ✅ Worker scheduler for delayed retries
+- ✅ Authenticated command, status and history API
+- ✅ Alembic migrations through `0014_create_publications`
+
+### Verification
+
+- ✅ 179 automated tests
+- ✅ Docker rebuild and migration smoke test
+- ✅ Real AQSI publication of one dedicated Variant
+- ✅ Cash-register lookup by generated barcode
+- ✅ Repeated publication command verified idempotent

@@ -105,6 +105,18 @@ class CatalogVariantRepository:
         )
         return self._session.scalar(statement)
 
+    def get_for_update(self, variant_id: UUIDv7) -> CatalogVariant | None:
+        """Return and lock one non-deleted Variant for a serialized workflow command."""
+        statement = (
+            select(CatalogVariant)
+            .where(
+                CatalogVariant.id == variant_id,
+                CatalogVariant.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        return self._session.scalar(statement)
+
     def list(self) -> Sequence[CatalogVariant]:
         """Return non-deleted catalog variants ordered for display."""
         statement = (
@@ -113,6 +125,19 @@ class CatalogVariantRepository:
             .order_by(CatalogVariant.title)
         )
         return self._session.scalars(statement).all()
+
+    def get_by_barcode(self, barcode: str) -> CatalogVariant | None:
+        """Return a variant by its globally unique Core barcode."""
+        statement = select(CatalogVariant).where(CatalogVariant.barcode == barcode)
+        return self._session.scalar(statement)
+
+    def get_active_by_barcode(self, barcode: str) -> CatalogVariant | None:
+        """Return a non-archived variant by its exact barcode."""
+        statement = select(CatalogVariant).where(
+            CatalogVariant.barcode == barcode,
+            CatalogVariant.deleted_at.is_(None),
+        )
+        return self._session.scalar(statement)
 
     def next_sku_number(self) -> int:
         """Reserve the next SKU number from PostgreSQL or the test database."""

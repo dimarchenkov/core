@@ -39,7 +39,9 @@ class SupplierService:
             display_name=self._normalize_display_name(data.display_name),
             notes=data.notes,
             is_active=data.is_active,
-            code=SupplierCodeGenerator.generate(self._repository.reserve_next_supplier_code_number()),
+            code=SupplierCodeGenerator.generate(
+                self._repository.reserve_next_supplier_code_number()
+            ),
             created_by_id=actor_id,
         )
         self._repository.add(supplier)

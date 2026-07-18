@@ -44,6 +44,7 @@ class CatalogVariantAdmin(ModelView, model=CatalogVariant):
     name = "Catalog variant"
     name_plural = "Catalog variants"
     icon = "fa-solid fa-cube"
+    can_create = False
     column_list = [
         CatalogVariant.title,
         CatalogVariant.sku,
@@ -53,3 +54,4 @@ class CatalogVariantAdmin(ModelView, model=CatalogVariant):
     ]
     column_searchable_list = [CatalogVariant.title, CatalogVariant.sku, CatalogVariant.barcode]
     column_sortable_list = [CatalogVariant.title, CatalogVariant.sku]
+    form_excluded_columns = [CatalogVariant.sku, CatalogVariant.barcode]

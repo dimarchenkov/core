@@ -1,0 +1,1 @@
+"""AQSI product publication integration."""

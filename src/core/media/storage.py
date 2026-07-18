@@ -22,10 +22,7 @@ class LocalImageStorage:
     def build_source_key(self, image_id: UUIDv7, extension: str) -> str:
         """Build a relative date-organized source key for an image identifier."""
         created_at = datetime.now(UTC)
-        return (
-            f"images/source/{created_at:%Y}/{created_at:%m}/"
-            f"{image_id}.{extension.lower()}"
-        )
+        return f"images/source/{created_at:%Y}/{created_at:%m}/{image_id}.{extension.lower()}"
 
     def save_source(self, key: str, content: bytes) -> None:
         """Atomically write a new source file without altering uploaded bytes."""

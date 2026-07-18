@@ -1,71 +1,62 @@
 # Current Sprint
 
-## Sprint 7 — Ready for Sale
+## Sprint 8 — Workflow UX
 
 ### Goal
 
-Turn a received CatalogVariant into a sellable item with a clear readiness state, retail price, barcode, label and AQSI publication path.
+Turn the completed catalog, media, receipt, inventory and Ready for Sale capabilities into one fast mobile-first employee workflow.
+
+The first daily workflow starts with a photo and takes a physical product from an opened delivery box to a posted receipt and a clear Ready for Sale state.
 
 ### Product principles
 
-- [x] Photo First is mandatory for new physical objects
-- [x] API First: every business capability remains interface-independent
-- [x] Rental remains a first-class lifecycle alongside sales
-- [x] Employee attribution and future operational metrics remain required
-- [x] Deployment, bootstrap and documentation are product concerns
+- [x] Photo First: a new physical product begins with its first photo
+- [x] Process over CRUD: employees work through a guided workflow, not admin tables
+- [x] Mobile First: the primary intake path must work comfortably from a phone
+- [x] Every Action Has an Author
+- [x] Everything Is Measurable
+- [x] API First: the workflow remains independent from a specific frontend
+- [x] Rental remains a first-class future lifecycle
 
-### Pricing design
+### Discovery and design
 
-- [ ] Define the pricing domain rules
-- [ ] Decide whether prices are current-state fields or an append-only history
-- [ ] Define money precision and currency rules
-- [ ] Define where purchase price belongs after receipt posting
-- [ ] Define retail price update rules
+- [ ] Describe the new-product mobile intake journey step by step
+- [ ] Describe the repeat-delivery journey for an existing Variant
+- [ ] Define draft ownership, resume and safe abandonment rules
+- [ ] Define when the first photo is stored and linked
+- [ ] Define workflow progress and validation without a generic BPM engine
+- [ ] Define employee timing and activity events without invasive surveillance
+- [ ] Define the Ready for Sale work queue and attention reasons
+- [ ] Define the minimal first-party mobile interface boundary
 
-### Pricing foundation
+### First product outcome
 
-- [ ] Price entity or catalog pricing fields
-- [ ] Pricing repository
-- [ ] Pricing service
-- [ ] Pricing API
-- [ ] Pricing SQLAdmin integration
-- [ ] Alembic migration
-- [ ] Tests
+- [ ] Start intake from the phone camera or photo library
+- [ ] Prevent a new physical product from proceeding without a photo
+- [ ] Select an existing Variant or create Product and Variant data
+- [ ] Capture supplier, quantity and purchase price
+- [ ] Post the receipt through the existing inventory ledger
+- [ ] Show readiness immediately after posting
+- [ ] Preserve actor attribution across the entire workflow
+- [ ] Resume an interrupted draft safely
 
-### Product identifiers
+### Operational visibility
 
-- [ ] Define barcode format and ownership rules
-- [ ] Implement automatic barcode generation
-- [ ] Guarantee barcode uniqueness
-- [ ] Expose barcode through catalog API and SQLAdmin
-- [ ] Add barcode tests
+- [ ] Add an employee-facing activity feed
+- [ ] Add an owner-facing Ready for Sale attention queue
+- [ ] Record workflow start, completion, cancellation and duration
+- [ ] Keep audit history separate from operational metrics
 
-### Ready-for-sale workflow
+### Sprint boundary
 
-- [ ] Define readiness as derived checks, not one overloaded universal status
-- [ ] Require an active primary image
-- [ ] Require an active Variant with SKU
-- [ ] Require a retail price
-- [ ] Require a barcode
-- [ ] Add a read API for missing readiness requirements
-- [ ] Generate and print a basic label
-- [ ] Define the AQSI publication boundary
+Sprint 8 does not add a general-purpose workflow engine, sales documents, rental contracts, direct XPrinter USB printing or marketplace synchronization.
 
-### Sprint completion
+### Following business sprint
 
-- [ ] Authenticated audit attribution
-- [ ] Docker smoke test
-- [ ] Update project documentation
+Sprint 9 — Rental Foundation:
 
-### Following business sprints
-
-1. Sprint 8 — Workflow UX
-   - photo-first mobile Receive Goods workflow;
-   - Ready for Sale work queue;
-   - activity feed and employee attribution in daily work;
-   - cards remain reference/history views rather than the primary workplace.
-2. Sprint 9 — Rental Foundation
-   - Asset and Asset Code;
-   - checkout and return lifecycles;
-   - condition photos, seals and maintenance history;
-   - rental remains a first-class lifecycle alongside sales.
+- Asset and Asset Code;
+- checkout and return lifecycles;
+- before/after condition photos;
+- seals, maintenance and damage history;
+- rental pricing and deposits.

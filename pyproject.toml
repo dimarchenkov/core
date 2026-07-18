@@ -1,12 +1,13 @@
 [project]
 name = "core"
-version = "0.1.0"
+version = "0.4.0"
 description = "Internal product, inventory, and rental system for 2010shop."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "alembic>=1.16.0",
     "fastapi[standard]>=0.116.0",
+    "font-roboto>=0.0.1",
     "httpx2>=2.5.0",
     "pillow>=12.3.0",
     "psycopg[binary]>=3.2.0",
@@ -14,6 +15,7 @@ dependencies = [
     "pydantic-settings>=2.10.0",
     "pyjwt>=2.13.0",
     "redis>=6.2.0",
+    "reportlab>=5.0.0",
     "rq>=2.4.0",
     "sqladmin>=0.21.0",
     "sqlalchemy>=2.0.0",

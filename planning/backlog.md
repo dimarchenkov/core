@@ -13,11 +13,21 @@
 
 ## P1 — Ready for Sale
 
-- [ ] Retail pricing and product identifiers
-- [ ] Derived ready-for-sale checks
-- [ ] Label generation and printing
-- [ ] AQSI integration
+- [x] Retail pricing and product identifiers
+- [x] Derived ready-for-sale checks
+- [x] Printer-independent 58 x 40 mm label and standard PDF printing
+- [x] AQSI product publication boundary and field mapping
+- [x] AQSI asynchronous product publication implementation
+- [x] Controlled live AQSI smoke test with one dedicated Variant
+- [ ] Runtime versioned AQSI fiscal profile and controlled bulk republishing
 - [ ] End-to-end photo-first intake workflow from phone
+
+## Deferred — Local Printing Infrastructure
+
+- [ ] Physically calibrate XPrinter XP-365B with 58 x 40 mm labels
+- [ ] Verify thermal barcode scanning, margins, darkness and gap detection
+- [ ] Add a local TSPL-over-USB print adapter when the local server is available
+- [ ] Preserve standard PDF printing as the universal fallback
 
 ## P2 — Workflow UX
 
@@ -84,3 +94,4 @@
 
 - Configure Angie to re-resolve the Docker `api` service after container recreation.
 - Add an API healthcheck and make Angie depend on API health.
+- Add recovery for an AQSI publication attempt left in `processing` after a hard worker crash.

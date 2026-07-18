@@ -18,7 +18,7 @@ def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
     redis_connection = Redis.from_url(settings.redis_url)
-    build_worker(redis_connection).work()
+    build_worker(redis_connection).work(with_scheduler=True)
 
 
 if __name__ == "__main__":

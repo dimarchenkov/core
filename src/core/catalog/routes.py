@@ -23,6 +23,7 @@ from core.catalog.service import (
     CatalogProductNotFoundError,
     CatalogProductService,
     CatalogProductSlugAlreadyExistsError,
+    CatalogVariantBarcodeConflictError,
     CatalogVariantNotFoundError,
     CatalogVariantProductError,
     CatalogVariantService,
@@ -267,13 +268,33 @@ def create_variant(
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogVariant:
-    """Create a catalog variant with a system-generated SKU."""
+    """Create a catalog variant with system-generated stable identifiers."""
     try:
         return service.create_variant(data, actor_id=_actor_id(current_user))
     except CatalogVariantProductError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Variant product is invalid.",
+        ) from exc
+    except CatalogVariantBarcodeConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Generated barcode already exists.",
+        ) from exc
+
+
+@variant_router.get("/by-barcode/{barcode}", response_model=CatalogVariantRead)
+def find_variant_by_barcode(
+    barcode: str,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+) -> CatalogVariant:
+    """Resolve an exact scanned barcode to a non-archived catalog variant."""
+    try:
+        return service.find_variant_by_barcode(barcode)
+    except CatalogVariantNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Variant not found.",
         ) from exc
 
 
@@ -299,7 +320,7 @@ def update_variant(
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogVariant:
-    """Update a catalog variant without changing its SKU."""
+    """Update mutable catalog fields without changing stable identifiers."""
     try:
         return service.update_variant(variant_id, data, actor_id=_actor_id(current_user))
     except CatalogVariantNotFoundError as exc:

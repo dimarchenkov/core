@@ -57,7 +57,12 @@ def variant(session: Session) -> CatalogVariant:
     product = CatalogProduct(title="Film camera", slug="film-camera", category_id=category.id)
     session.add(product)
     session.flush()
-    value = CatalogVariant(product_id=product.id, title="Black body", sku="SKU-000001")
+    value = CatalogVariant(
+        product_id=product.id,
+        title="Black body",
+        sku="SKU-000001",
+        barcode="2000000000015",
+    )
     session.add(value)
     session.commit()
     return value
@@ -343,8 +348,18 @@ def test_inventory_service_aggregates_requested_variant_balances(
     product = CatalogProduct(title="Prime lens", slug="prime-lens", category_id=category.id)
     session.add(product)
     session.flush()
-    second_variant = CatalogVariant(product_id=product.id, title="50mm", sku="SKU-000002")
-    no_history_variant = CatalogVariant(product_id=product.id, title="85mm", sku="SKU-000003")
+    second_variant = CatalogVariant(
+        product_id=product.id,
+        title="50mm",
+        sku="SKU-000002",
+        barcode="2000000000022",
+    )
+    no_history_variant = CatalogVariant(
+        product_id=product.id,
+        title="85mm",
+        sku="SKU-000003",
+        barcode="2000000000039",
+    )
     session.add_all([second_variant, no_history_variant])
     session.commit()
 

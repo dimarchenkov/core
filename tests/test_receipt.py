@@ -86,7 +86,12 @@ def variant(session: Session) -> CatalogVariant:
     product = CatalogProduct(title="Film camera", slug="film-camera", category_id=category.id)
     session.add(product)
     session.flush()
-    value = CatalogVariant(product_id=product.id, title="Black body", sku="SKU-000001")
+    value = CatalogVariant(
+        product_id=product.id,
+        title="Black body",
+        sku="SKU-000001",
+        barcode="2000000000015",
+    )
     session.add(value)
     session.commit()
     return value

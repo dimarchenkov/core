@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
@@ -75,3 +75,21 @@ class ImageLinkRepository:
                 ImageLink.deleted_at.is_(None),
             )
         )
+
+    def has_active_primary_for_entity(
+        self,
+        entity_type: ImageLinkEntityType,
+        entity_id: UUIDv7,
+    ) -> bool:
+        """Return whether an entity has a primary link to a non-deleted image."""
+        statement = select(
+            exists().where(
+                ImageLink.image_id == Image.id,
+                ImageLink.entity_type == entity_type,
+                ImageLink.entity_id == entity_id,
+                ImageLink.role == ImageLinkRole.PRIMARY,
+                ImageLink.deleted_at.is_(None),
+                Image.deleted_at.is_(None),
+            )
+        )
+        return bool(self._session.scalar(statement))
