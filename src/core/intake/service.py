@@ -48,7 +48,6 @@ class IntakeService:
                     entity_id=variant.id,
                     role=ImageLinkRole.PRIMARY,
                 ),
-                commit=False,
                 actor_id=actor_id,
             )
             self._session.commit()

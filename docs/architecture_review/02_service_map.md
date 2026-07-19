@@ -25,7 +25,7 @@ automatically require a new class.
 | `InventoryService` | Inventory | Domain Service | Only production writer of stock/reversal movements; quantity validation | movement/variant repositories | Also exposes balance/history reads; split only when read use grows |
 | `ReceiptService` | Receipt | Domain Service | Receipt root lifecycle except posting/cancellation | receipt/supplier repositories | Transaction-neutral; list/get remain mixed with commands |
 | `ReceiptItemService` | Receipt | Domain Service | Guard item changes through Receipt draft state | `ReceiptService`, item/variant repositories | Transaction-neutral; route or workflow owns finalization |
-| `ImageLinkService` | Media | Domain Service | Image-link validity, target validity and primary-image uniqueness | media and catalog repositories | Cross-context target validation; conditional `commit` |
+| `ImageLinkService` | Media | Domain Service | Image-link validity, target validity and primary-image uniqueness | media and catalog repositories | Transaction-neutral; cross-context target validation remains deliberate |
 | `IntakeService` | Intake | Application / Workflow Service | Legacy atomic Product + Variant + primary-image command | Catalog and Media services | Legacy workflow overlaps `CompleteIntakeWorkflow`; should be retired deliberately |
 | `IntakeDraftService` | Intake | Application / Workflow Service | Owned draft commands, resume, completeness and abandonment | Intake, Catalog, Supplier, Media repositories/services | **Mixed role:** commands + read projection + filesystem compensation; largest SRP debt |
 | `CompleteIntakeWorkflow` | Intake | Application / Workflow Service | Idempotent atomic materialization into Catalog, Receipt, Inventory and Readiness | nine services/repositories across contexts | Cohesive workflow and sole transaction owner for Complete Intake |
@@ -36,7 +36,7 @@ automatically require a new class.
 | `VariantLabelService` | Labels | Application / Workflow Service | Authorize and assemble one printable label request | Readiness, Catalog, Pricing, renderer | Essentially a read/application query; no material debt |
 | `ReadyForSaleService` | Readiness | Read Service | Derive readiness and exact missing requirements | Catalog, Media and Pricing repositories | Correctly stateless; must remain so |
 | `AqsiPayloadBuilder` | AQSI | Infrastructure Service | Anti-corruption mapping from Core reads to deterministic AQSI payload | Readiness, Catalog, Pricing, Settings | Performs cross-context reads; acceptable for integration mapping |
-| `ImageService` | Media | Infrastructure Service | Image metadata plus validated local source-file persistence | inspector, local storage, image repository | **Mixed role:** filesystem adapter, metadata domain operations and transaction/compensation ownership |
+| `ImageService` | Media | Infrastructure Service | Image metadata plus validated local source-file persistence | inspector, local storage, image repository | **Mixed role:** filesystem adapter and metadata operations; compensates only files it owns |
 | `ImageInspector` | Media | Infrastructure Service | Validate bytes and extract trusted image metadata | Pillow | None |
 | `LocalImageStorage` | Media | Infrastructure Service | Safe atomic local filesystem writes and deletion | filesystem | None |
 | `VariantLabel58x40Renderer` | Labels | Infrastructure Service | Render deterministic PDF bytes | ReportLab/fonts | None |

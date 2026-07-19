@@ -139,7 +139,7 @@ holding long-lived row locks or an uncommitted transaction.
 ## Implementation record
 
 - `CompleteIntakeWorkflow` is the sole commit/rollback owner for Complete Intake.
-- Catalog, Media-link and Receipt services expose explicit staged operations for that workflow.
+- Catalog, Media-link and Receipt services expose transaction-neutral operations for workflows.
 - `ReceiptPostingService.apply_posting` participates without commit/rollback, while
   `post_receipt` remains the owner for the direct Receipt command.
 - nested Media upload compensates its saved file but does not rollback caller-owned SQL.
@@ -149,6 +149,8 @@ holding long-lived row locks or an uncommitted transaction.
   one explicit commit/rollback per command.
 - Category, Product and Variant domain commands are transaction-neutral; their HTTP adapters or
   Intake workflows own finalization without transaction-mode flags.
+- Image and ImageLink commands are transaction-neutral. HTTP or Intake owns SQL finalization,
+  while Media compensates only a source file written by the failed command.
 
 ## Consequences
 

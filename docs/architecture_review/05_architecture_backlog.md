@@ -160,7 +160,7 @@ workflow is left for AB-005.
 
 - **Priority:** P1
 - **Engineering name:** `remove-commit-flags`
-- **Status:** In progress — Receipt and Catalog contexts completed on 2026-07-19
+- **Status:** In progress — Receipt, Catalog and Media contexts completed on 2026-07-19
 - **Estimate:** L
 - **Dependencies:** AB-002
 
@@ -198,7 +198,7 @@ must catch missing commits. Avoid one giant PR.
 - [x] Receipt HTTP commands explicitly commit once and rollback failures.
 - [x] Direct Post/Cancel Receipt workflows retain their own clear transaction boundary.
 - [x] Catalog command APIs and routes are transaction-neutral/explicit owners respectively.
-- [ ] Media metadata/link command APIs and routes.
+- [x] Media metadata/link commands are transaction-neutral and HTTP owns finalization.
 - [ ] Pricing command APIs and routes.
 - [ ] Remove transitional staged aliases once no workflow needs compatibility methods.
 

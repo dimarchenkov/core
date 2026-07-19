@@ -16,15 +16,15 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `CatalogVariantService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
 | `SupplierService` | Yes | No | every write | No | No | Itself |
 | `PriceService` | Yes | when `commit=False` | when `commit=True` | No | No | Conditional / caller-dependent |
-| `ImageService` | Yes for metadata | upload with `commit=False` | create/delete and upload default | only when it owns upload; never as participant | Inspector + storage | Caller owns nested SQL; Media always compensates its file |
-| `ImageLinkService` | Yes | `stage_link` and `commit=False` | create default/update/delete | No | No | Explicit caller for `stage_link`; legacy conditional API remains |
+| `ImageService` | Yes for metadata | every metadata write | Never | Never | Inspector + storage | HTTP/Intake command; Media compensates only its file |
+| `ImageLinkService` | Yes | every write | Never | Never | No | HTTP/Intake command caller |
 | `ReceiptService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
 | `ReceiptItemService` | Yes | every write | Never | Never | `ReceiptService` read/guard methods | HTTP command or workflow caller |
 | `InventoryService` | Yes | every movement/reversal | Never | Never | No | Deliberately delegates ownership |
 | `ReceiptPostingService` | Yes | `apply_posting` plus nested inventory flushes | `post_receipt` once | `post_receipt` once; `apply_posting` never | `InventoryService` | Direct command owns; caller owns explicit participant operation |
 | `ReceiptCancellationService` | Yes | nested reversal flushes | once | once on exception | `InventoryService` | Itself |
 | `IntakeService` (legacy) | Yes | nested service flushes | once | once on exception | Catalog + ImageLink services with `commit=False` | Itself |
-| `IntakeDraftService` | Yes | nested image upload | each command | add-new outer rollback only | `ImageService(commit=False)` | Itself; Media compensates only its filesystem write |
+| `IntakeDraftService` | Yes | nested image upload | each command | add-new outer rollback only | transaction-neutral `ImageService` | Itself; Media compensates only its filesystem write |
 | `CompleteIntakeWorkflow` | Yes; row lock | own final flush + explicit staged domain operations | once; also commit on idempotent retry to release lock | once on exception | Catalog, ImageLink, Receipt, Posting, Readiness | Sole owner of Complete Intake |
 | `ReadyForSaleService` | Read transaction | No | No | No | No | None; read-only |
 | `VariantLabelService` | Read transaction | No | No | No | Readiness + renderer | None; read-only |
@@ -71,8 +71,7 @@ next operation, but they neither commit nor rollback the caller-owned transactio
 ### `commit=False`
 
 `commit=False` began as a pragmatic way to reuse validated Catalog/Media operations inside
-`IntakeService`. After the Catalog and Receipt AB-003 slices it remains in Media and Pricing,
-but not in either Intake workflow, Catalog, Receipt CRUD or Receipt posting.
+`IntakeService`. After the Catalog, Receipt and Media AB-003 slices it remains only in Pricing.
 At this breadth it is still no longer merely a
 local compromise: it is a transaction-protocol encoded as optional booleans across domain APIs.
 

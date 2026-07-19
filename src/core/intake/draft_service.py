@@ -179,7 +179,6 @@ class IntakeDraftService:
             image = self._image_service.upload_source_image(
                 original_filename,
                 content,
-                commit=False,
                 actor_id=actor_id,
             )
             item = IntakeItemDraft(

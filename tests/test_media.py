@@ -130,12 +130,23 @@ def upload_client(session: Session, tmp_path: Path) -> Generator[TestClient]:
     app.dependency_overrides.clear()
 
 
-def test_image_service_registers_metadata_with_relative_keys(session: Session) -> None:
+def test_image_service_registers_metadata_with_relative_keys(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Image registration persists metadata without any file operations."""
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+
+    monkeypatch.setattr(session, "commit", count_commit)
     image = ImageService(session).create_image(ImageCreate(**image_payload()))
 
     assert image.source_key == "images/source/camera.jpg"
     assert image.id.version == 7
+    assert commit_calls == 0
     assert set(Image.__table__.columns.keys()) == {
         "source_key",
         "master_key",
@@ -170,10 +181,21 @@ def test_image_routes_reject_absolute_storage_keys(client: TestClient) -> None:
 
 def test_upload_creates_image_metadata_and_preserves_source(
     upload_client: TestClient,
+    session: Session,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Upload stores valid JPEG source bytes and returns matching metadata."""
     content = image_bytes("JPEG")
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
 
     response = upload_client.post(
         "/api/media/images/upload",
@@ -189,6 +211,39 @@ def test_upload_creates_image_metadata_and_preserves_source(
     assert image["height"] == 3
     assert image["size_bytes"] == len(content)
     assert (tmp_path / image["source_key"]).read_bytes() == content
+    assert commit_calls == 1
+
+
+def test_upload_commit_failure_rolls_back_metadata_and_removes_source(
+    upload_client: TestClient,
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The upload command compensates its file when the outer SQL commit fails."""
+    original_rollback = session.rollback
+    rollback_calls = 0
+
+    def fail_commit() -> None:
+        raise RuntimeError("commit failed")
+
+    def count_rollback() -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        original_rollback()
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+    monkeypatch.setattr(session, "rollback", count_rollback)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        upload_client.post(
+            "/api/media/images/upload",
+            files={"file": ("camera.jpg", image_bytes("JPEG"), "image/jpeg")},
+        )
+
+    assert rollback_calls == 1
+    assert session.query(Image).count() == 0
+    assert not [path for path in tmp_path.rglob("*") if path.is_file()]
 
 
 def test_upload_rejects_invalid_image_content(upload_client: TestClient) -> None:
@@ -279,7 +334,7 @@ def test_upload_participant_failure_compensates_file_without_rolling_back_owner(
     monkeypatch.setattr(session, "rollback", count_rollback)
 
     with pytest.raises(RuntimeError, match="metadata flush failed"):
-        service.upload_source_image("camera.jpg", image_bytes("JPEG"), commit=False)
+        service.upload_source_image("camera.jpg", image_bytes("JPEG"))
 
     assert rollback_calls == 0
     assert session.query(Image).count() == 0

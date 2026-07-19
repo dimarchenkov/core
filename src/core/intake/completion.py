@@ -212,7 +212,7 @@ class CompleteIntakeWorkflow:
             ),
             actor_id=actor_id,
         )
-        self._image_link_service.stage_link(
+        self._image_link_service.create_link(
             ImageLinkCreate(
                 image_id=item.image_id,
                 entity_type=ImageLinkEntityType.CATALOG_VARIANT,

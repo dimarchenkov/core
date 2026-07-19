@@ -80,6 +80,7 @@ def category_and_image(session: Session) -> tuple[Category, Image]:
             checksum="sha256:camera",
         )
     )
+    session.commit()
     return category, image
 
 
