@@ -80,7 +80,7 @@ class CompleteIntakeWorkflow:
             active_items = [item for item in intake_session.items if item.abandoned_at is None]
             self._validate_completion(intake_session, active_items)
 
-            receipt = self._receipt_service.stage_receipt(
+            receipt = self._receipt_service.open_receipt(
                 ReceiptCreate(
                     supplier_id=intake_session.supplier_id,
                     receipt_date=date.today(),
@@ -92,7 +92,7 @@ class CompleteIntakeWorkflow:
             completed_items: list[IntakeCompletionItemRead] = []
             for item in active_items:
                 product_id, variant_id = self._materialize_item(item, actor_id=actor_id)
-                self._receipt_item_service.stage_item(
+                self._receipt_item_service.add_item(
                     receipt.id,
                     ReceiptItemCreate(
                         variant_id=variant_id,

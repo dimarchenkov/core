@@ -41,21 +41,30 @@ def set_price(
     variant_id: UUIDv7,
     data: PriceCreate,
     service: Annotated[PriceService, Depends(get_price_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Price:
     """Append one price fact to a sellable variant's history."""
     try:
-        return service.set_price(variant_id, data, actor_id=current_user.id)
+        price = service.set_price(variant_id, data, actor_id=current_user.id)
+        session.commit()
+        session.refresh(price)
+        return price
     except PriceVariantNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Active catalog variant not found.",
         ) from exc
     except UnsupportedCurrencyError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only RUB prices are currently supported.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.get("/{variant_id}/prices/current", response_model=PriceRead)

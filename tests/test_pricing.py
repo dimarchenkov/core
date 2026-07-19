@@ -112,8 +112,16 @@ def test_set_price_appends_normalized_audited_fact(
     session: Session,
     variant: CatalogVariant,
     user: User,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Setting a price rounds money and attributes the immutable fact."""
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+
+    monkeypatch.setattr(session, "commit", count_commit)
     price = PriceService(session).set_price(
         variant.id,
         PriceCreate(price_type=PriceType.RETAIL, amount="125.555", reason="  Shelf price  "),
@@ -125,6 +133,7 @@ def test_set_price_appends_normalized_audited_fact(
     assert price.reason == "Shelf price"
     assert price.created_by_id == user.id
     assert session.query(Price).count() == 1
+    assert commit_calls == 0
 
 
 def test_new_price_preserves_history_and_becomes_current(
@@ -245,6 +254,7 @@ def test_pricing_routes_are_authenticated_and_append_history(
     session: Session,
     variant: CatalogVariant,
     user: User,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pricing API protects writes and exposes current and historical facts."""
     path = f"/api/pricing/variants/{variant.id}/prices"
@@ -253,6 +263,15 @@ def test_pricing_routes_are_authenticated_and_append_history(
     assert client.post(path, json=payload).status_code == 401
 
     headers = authorization_header(client, user)
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
     created = client.post(path, headers=headers, json=payload)
     current = client.get(f"{path}/current?price_type=retail", headers=headers)
     history = client.get(f"{path}?price_type=retail", headers=headers)
@@ -265,6 +284,7 @@ def test_pricing_routes_are_authenticated_and_append_history(
     stored = session.get(Price, UUID(created.json()["id"]))
     assert stored is not None
     assert stored.created_by_id == user.id
+    assert commit_calls == 1
 
 
 def test_pricing_api_has_no_update_or_delete_operation(client: TestClient) -> None:

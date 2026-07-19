@@ -15,7 +15,7 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `CatalogProductService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
 | `CatalogVariantService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
 | `SupplierService` | Yes | No | every write | No | No | Itself |
-| `PriceService` | Yes | when `commit=False` | when `commit=True` | No | No | Conditional / caller-dependent |
+| `PriceService` | Yes | every write | Never | Never | No | HTTP command caller |
 | `ImageService` | Yes for metadata | every metadata write | Never | Never | Inspector + storage | HTTP/Intake command; Media compensates only its file |
 | `ImageLinkService` | Yes | every write | Never | Never | No | HTTP/Intake command caller |
 | `ReceiptService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
@@ -23,7 +23,7 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `InventoryService` | Yes | every movement/reversal | Never | Never | No | Deliberately delegates ownership |
 | `ReceiptPostingService` | Yes | `apply_posting` plus nested inventory flushes | `post_receipt` once | `post_receipt` once; `apply_posting` never | `InventoryService` | Direct command owns; caller owns explicit participant operation |
 | `ReceiptCancellationService` | Yes | nested reversal flushes | once | once on exception | `InventoryService` | Itself |
-| `IntakeService` (legacy) | Yes | nested service flushes | once | once on exception | Catalog + ImageLink services with `commit=False` | Itself |
+| `IntakeService` (legacy) | Yes | nested service flushes | once | once on exception | transaction-neutral Catalog + ImageLink services | Itself |
 | `IntakeDraftService` | Yes | nested image upload | each command | add-new outer rollback only | transaction-neutral `ImageService` | Itself; Media compensates only its filesystem write |
 | `CompleteIntakeWorkflow` | Yes; row lock | own final flush + explicit staged domain operations | once; also commit on idempotent retry to release lock | once on exception | Catalog, ImageLink, Receipt, Posting, Readiness | Sole owner of Complete Intake |
 | `ReadyForSaleService` | Read transaction | No | No | No | No | None; read-only |
@@ -45,13 +45,13 @@ sequenceDiagram
     participant I as InventoryService
 
     W->>W: Session autobegin + lock IntakeSession
-    W->>R: stage_receipt()
+    W->>R: open_receipt()
     R-->>W: flush
     W->>C: stage_product/variant()
     C-->>W: flush
     W->>M: stage_link()
     M-->>W: flush
-    W->>R: stage_item()
+    W->>R: add_item()
     R-->>W: flush
     W->>P: apply_posting()
     P->>I: create_movement()
@@ -71,7 +71,8 @@ next operation, but they neither commit nor rollback the caller-owned transactio
 ### `commit=False`
 
 `commit=False` began as a pragmatic way to reuse validated Catalog/Media operations inside
-`IntakeService`. After the Catalog, Receipt and Media AB-003 slices it remains only in Pricing.
+`IntakeService`. AB-003 removed the transaction-mode boolean from production services. HTTP
+commands and named workflows now finalize writes explicitly.
 At this breadth it is still no longer merely a
 local compromise: it is a transaction-protocol encoded as optional booleans across domain APIs.
 

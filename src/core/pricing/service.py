@@ -41,9 +41,8 @@ class PriceService:
         data: PriceCreate,
         *,
         actor_id: UUIDv7 | None = None,
-        commit: bool = True,
     ) -> Price:
-        """Append a normalized price fact without changing prior history."""
+        """Stage a normalized price fact for the command owner to commit."""
         self._ensure_variant_is_active(variant_id)
         if data.currency != DEFAULT_CURRENCY:
             raise UnsupportedCurrencyError
@@ -58,11 +57,7 @@ class PriceService:
             created_by_id=actor_id,
         )
         self._repository.add(price)
-        if commit:
-            self._session.commit()
-            self._session.refresh(price)
-        else:
-            self._session.flush()
+        self._session.flush()
         return price
 
     def get_current_price(

@@ -59,16 +59,7 @@ class ReceiptService:
         *,
         actor_id: UUIDv7 | None = None,
     ) -> Receipt:
-        """Stage an empty draft receipt for the command owner to commit."""
-        return self.stage_receipt(data, actor_id=actor_id)
-
-    def stage_receipt(
-        self,
-        data: ReceiptCreate,
-        *,
-        actor_id: UUIDv7 | None = None,
-    ) -> Receipt:
-        """Validate and stage a draft receipt inside a caller-owned transaction."""
+        """Validate and stage a draft receipt for the command owner to commit."""
         self._ensure_supplier_is_active(data.supplier_id)
         receipt = Receipt(
             number=ReceiptNumberGenerator.generate(self._repository.reserve_next_receipt_number()),
@@ -165,17 +156,7 @@ class ReceiptItemService:
         *,
         actor_id: UUIDv7 | None = None,
     ) -> ReceiptItem:
-        """Stage one active variant line for the command owner to commit."""
-        return self.stage_item(receipt_id, data, actor_id=actor_id)
-
-    def stage_item(
-        self,
-        receipt_id: UUIDv7,
-        data: ReceiptItemCreate,
-        *,
-        actor_id: UUIDv7 | None = None,
-    ) -> ReceiptItem:
-        """Validate and stage a receipt line inside a caller-owned transaction."""
+        """Validate and stage a receipt line for the command owner to commit."""
         receipt = self._receipt_service.get_receipt(receipt_id)
         self._ensure_draft(receipt)
         self._ensure_variant_is_active(data.variant_id)

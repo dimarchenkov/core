@@ -21,7 +21,7 @@ automatically require a new class.
 | `CatalogProductService` | Catalog | Domain Service | Product invariants and lifecycle | product/category repositories | Transaction-neutral; route or workflow owns finalization |
 | `CatalogVariantService` | Catalog | Domain Service | Variant lifecycle, SKU and barcode allocation | product/variant repositories, generators | Transaction-neutral; route or workflow owns finalization |
 | `SupplierService` | Supplier | Domain Service | Supplier lifecycle and normalization | supplier repository, code generator | Also owns command transactions |
-| `PriceService` | Pricing | Domain Service | Append price facts and enforce currency/catalog rules | price/variant repositories | Includes read methods; conditional `commit` |
+| `PriceService` | Pricing | Domain Service | Append price facts and enforce currency/catalog rules | price/variant repositories | Transaction-neutral; includes current/history reads while context remains small |
 | `InventoryService` | Inventory | Domain Service | Only production writer of stock/reversal movements; quantity validation | movement/variant repositories | Also exposes balance/history reads; split only when read use grows |
 | `ReceiptService` | Receipt | Domain Service | Receipt root lifecycle except posting/cancellation | receipt/supplier repositories | Transaction-neutral; list/get remain mixed with commands |
 | `ReceiptItemService` | Receipt | Domain Service | Guard item changes through Receipt draft state | `ReceiptService`, item/variant repositories | Transaction-neutral; route or workflow owns finalization |

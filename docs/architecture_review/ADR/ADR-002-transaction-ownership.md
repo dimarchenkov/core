@@ -151,6 +151,8 @@ holding long-lived row locks or an uncommitted transaction.
   Intake workflows own finalization without transaction-mode flags.
 - Image and ImageLink commands are transaction-neutral. HTTP or Intake owns SQL finalization,
   while Media compensates only a source file written by the failed command.
+- Price commands are transaction-neutral and the HTTP adapter owns finalization. AB-003 removed
+  every production transaction-mode boolean and all transitional staged aliases.
 
 ## Consequences
 

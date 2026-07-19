@@ -160,7 +160,7 @@ workflow is left for AB-005.
 
 - **Priority:** P1
 - **Engineering name:** `remove-commit-flags`
-- **Status:** In progress — Receipt, Catalog and Media contexts completed on 2026-07-19
+- **Status:** Completed on 2026-07-19
 - **Estimate:** L
 - **Dependencies:** AB-002
 
@@ -199,8 +199,18 @@ must catch missing commits. Avoid one giant PR.
 - [x] Direct Post/Cancel Receipt workflows retain their own clear transaction boundary.
 - [x] Catalog command APIs and routes are transaction-neutral/explicit owners respectively.
 - [x] Media metadata/link commands are transaction-neutral and HTTP owns finalization.
-- [ ] Pricing command APIs and routes.
-- [ ] Remove transitional staged aliases once no workflow needs compatibility methods.
+- [x] Pricing commands are transaction-neutral and the HTTP command owns finalization.
+- [x] Transitional staged aliases are removed; workflows use the same domain methods as adapters.
+
+### Completion evidence
+
+- no production service accepts a transaction-mode boolean;
+- Receipt, Catalog, Media and Pricing domain operations flush but never commit or rollback;
+- direct HTTP commands explicitly finalize their shared request-scoped Session;
+- Complete Intake remains the sole owner across Catalog, Media, Receipt and Inventory;
+- upload commit failure rolls back metadata and compensates the saved source file;
+- AQSI checkpoint commits and direct Receipt Post/Cancel workflow commits remain intentional and
+  outside the removed boolean protocol.
 
 ---
 
