@@ -7,6 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 import core.catalog.models  # noqa: F401
 import core.identity.models  # noqa: F401
+import core.intake.models  # noqa: F401
 import core.integrations.aqsi.models  # noqa: F401
 import core.inventory.models  # noqa: F401
 import core.media.models  # noqa: F401

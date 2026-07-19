@@ -34,7 +34,13 @@ class ReceiptPostingService:
         self._variant_repository = CatalogVariantRepository(session)
         self._inventory_service = InventoryService(session)
 
-    def post_receipt(self, receipt_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> Receipt:
+    def post_receipt(
+        self,
+        receipt_id: UUIDv7,
+        *,
+        commit: bool = True,
+        actor_id: UUIDv7 | None = None,
+    ) -> Receipt:
         """Post a draft receipt by creating one immutable receipt movement for every line."""
         try:
             receipt = self._get_draft_receipt(receipt_id)
@@ -56,8 +62,11 @@ class ReceiptPostingService:
             receipt.status = ReceiptStatus.POSTED
             if actor_id is not None:
                 receipt.updated_by_id = actor_id
-            self._session.commit()
-            self._session.refresh(receipt)
+            if commit:
+                self._session.commit()
+                self._session.refresh(receipt)
+            else:
+                self._session.flush()
             return receipt
         except Exception:
             self._session.rollback()

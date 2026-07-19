@@ -82,6 +82,7 @@ class ImageService:
         original_filename: str,
         content: bytes,
         *,
+        commit: bool = True,
         actor_id: UUIDv7 | None = None,
     ) -> Image:
         """Store validated source bytes and create matching immutable image metadata."""
@@ -107,13 +108,22 @@ class ImageService:
                 created_by_id=actor_id,
             )
             self._repository.add(image)
-            self._session.commit()
-            self._session.refresh(image)
+            if commit:
+                self._session.commit()
+                self._session.refresh(image)
+            else:
+                self._session.flush()
             return image
         except Exception:
             self._session.rollback()
             self._storage.delete_saved_source(source_key)
             raise
+
+    def discard_uncommitted_source(self, image: Image) -> None:
+        """Remove source bytes after an outer orchestration transaction rolls back."""
+        if self._storage is None:
+            raise RuntimeError("Local image storage is not configured.")
+        self._storage.delete_saved_source(image.source_key)
 
     def delete_image(self, image_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> None:
         """Soft-delete image metadata without removing physical source files."""

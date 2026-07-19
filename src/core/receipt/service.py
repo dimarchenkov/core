@@ -57,6 +57,7 @@ class ReceiptService:
         self,
         data: ReceiptCreate,
         *,
+        commit: bool = True,
         actor_id: UUIDv7 | None = None,
     ) -> Receipt:
         """Open an empty draft receipt for an active supplier."""
@@ -73,8 +74,11 @@ class ReceiptService:
             created_by_id=actor_id,
         )
         self._repository.add(receipt)
-        self._session.commit()
-        self._session.refresh(receipt)
+        if commit:
+            self._session.commit()
+            self._session.refresh(receipt)
+        else:
+            self._session.flush()
         return receipt
 
     def list_receipts(self) -> Sequence[Receipt]:
@@ -156,6 +160,7 @@ class ReceiptItemService:
         receipt_id: UUIDv7,
         data: ReceiptItemCreate,
         *,
+        commit: bool = True,
         actor_id: UUIDv7 | None = None,
     ) -> ReceiptItem:
         """Add one existing active variant to a draft receipt without changing stock."""
@@ -170,8 +175,11 @@ class ReceiptItemService:
             created_by_id=actor_id,
         )
         self._repository.add(item)
-        self._session.commit()
-        self._session.refresh(item)
+        if commit:
+            self._session.commit()
+            self._session.refresh(item)
+        else:
+            self._session.flush()
         return item
 
     def update_item(
