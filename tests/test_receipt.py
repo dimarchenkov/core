@@ -439,7 +439,9 @@ def test_receipt_posting_rolls_back_when_movement_creation_fails(
     receipt = draft_receipt_with_items(session, supplier, variant, item_count=2)
     posting_service = ReceiptPostingService(session)
     original_create_movement = posting_service._inventory_service.create_movement
+    original_rollback = session.rollback
     calls = 0
+    rollback_calls = 0
 
     def fail_second_movement(*args: object, **kwargs: object) -> StockMovement:
         nonlocal calls
@@ -448,10 +450,17 @@ def test_receipt_posting_rolls_back_when_movement_creation_fails(
             raise RuntimeError("movement creation failed")
         return original_create_movement(*args, **kwargs)
 
+    def count_rollback() -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        original_rollback()
+
     monkeypatch.setattr(posting_service._inventory_service, "create_movement", fail_second_movement)
+    monkeypatch.setattr(session, "rollback", count_rollback)
     with pytest.raises(RuntimeError, match="movement creation failed"):
         posting_service.post_receipt(receipt.id)
 
+    assert rollback_calls == 1
     session.refresh(receipt)
     assert receipt.status is ReceiptStatus.DRAFT
     assert session.query(StockMovement).count() == 0

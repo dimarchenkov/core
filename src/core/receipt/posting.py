@@ -38,39 +38,46 @@ class ReceiptPostingService:
         self,
         receipt_id: UUIDv7,
         *,
-        commit: bool = True,
         actor_id: UUIDv7 | None = None,
     ) -> Receipt:
         """Post a draft receipt by creating one immutable receipt movement for every line."""
         try:
-            receipt = self._get_draft_receipt(receipt_id)
-            self._ensure_supplier_is_active(receipt.supplier_id)
-            items = self._item_repository.list(receipt.id)
-            if not items:
-                raise ReceiptItemsRequiredError
-            for item in items:
-                self._ensure_variant_is_active(item.variant_id)
-            for item in items:
-                self._inventory_service.create_movement(
-                    item.variant_id,
-                    MovementType.RECEIPT,
-                    item.quantity,
-                    SourceType.RECEIPT,
-                    receipt.id,
-                    actor_id=actor_id,
-                )
-            receipt.status = ReceiptStatus.POSTED
-            if actor_id is not None:
-                receipt.updated_by_id = actor_id
-            if commit:
-                self._session.commit()
-                self._session.refresh(receipt)
-            else:
-                self._session.flush()
+            receipt = self.apply_posting(receipt_id, actor_id=actor_id)
+            self._session.commit()
+            self._session.refresh(receipt)
             return receipt
         except Exception:
             self._session.rollback()
             raise
+
+    def apply_posting(
+        self,
+        receipt_id: UUIDv7,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> Receipt:
+        """Apply posting inside a caller-owned transaction without finalizing it."""
+        receipt = self._get_draft_receipt(receipt_id)
+        self._ensure_supplier_is_active(receipt.supplier_id)
+        items = self._item_repository.list(receipt.id)
+        if not items:
+            raise ReceiptItemsRequiredError
+        for item in items:
+            self._ensure_variant_is_active(item.variant_id)
+        for item in items:
+            self._inventory_service.create_movement(
+                item.variant_id,
+                MovementType.RECEIPT,
+                item.quantity,
+                SourceType.RECEIPT,
+                receipt.id,
+                actor_id=actor_id,
+            )
+        receipt.status = ReceiptStatus.POSTED
+        if actor_id is not None:
+            receipt.updated_by_id = actor_id
+        self._session.flush()
+        return receipt
 
     def _get_draft_receipt(self, receipt_id: UUIDv7) -> Receipt:
         """Load a non-deleted draft receipt or raise the matching business error."""

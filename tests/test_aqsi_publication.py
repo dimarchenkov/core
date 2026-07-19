@@ -311,11 +311,21 @@ def test_processor_creates_category_good_and_verifies_projection(
     variant: CatalogVariant,
     user: User,
     aqsi_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fake end-to-end publication reaches published only after remote verification."""
+    """AQSI intentionally persists processing, accepted, and published checkpoints."""
     service = AqsiPublicationService(session, aqsi_settings)
     publication, attempt, _ = service.request_publication(variant.id, actor_id=user.id)
     gateway = FakeAqsiGateway()
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
 
     AqsiPublicationProcessor(
         session,
@@ -326,6 +336,7 @@ def test_processor_creates_category_good_and_verifies_projection(
 
     session.refresh(publication)
     session.refresh(attempt)
+    assert commit_calls == 3
     assert gateway.categories == {"core-default-goods"}
     assert len(gateway.created_goods) == 1
     assert gateway.goods[str(variant.id)]["shops"] == [{"id": "shop-1", "deletedAt": None}]

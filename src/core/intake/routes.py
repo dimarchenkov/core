@@ -12,10 +12,10 @@ from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
 from core.intake.completion import (
+    CompleteIntakeWorkflow,
     IntakeCompletionAbandonedError,
     IntakeCompletionIncompleteError,
     IntakeCompletionNotFoundError,
-    IntakeCompletionService,
 )
 from core.intake.draft_service import (
     IntakeCategoryError,
@@ -79,11 +79,11 @@ def get_intake_draft_service(
     return IntakeDraftService(session, image_service)
 
 
-def get_intake_completion_service(
+def get_complete_intake_workflow(
     session: Annotated[Session, Depends(get_session)],
-) -> IntakeCompletionService:
-    """Provide atomic intake completion coordinators."""
-    return IntakeCompletionService(session)
+) -> CompleteIntakeWorkflow:
+    """Provide the workflow that atomically completes an Intake session."""
+    return CompleteIntakeWorkflow(session)
 
 
 @router.post("", response_model=IntakeRead, status_code=status.HTTP_201_CREATED)
@@ -295,7 +295,7 @@ def abandon_intake_session(
 @router.post("/sessions/{session_id}/complete", response_model=IntakeCompletionRead)
 def complete_intake_session(
     session_id: UUIDv7,
-    service: Annotated[IntakeCompletionService, Depends(get_intake_completion_service)],
+    service: Annotated[CompleteIntakeWorkflow, Depends(get_complete_intake_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeCompletionRead:
     """Atomically materialize catalog facts, post Receipt, and complete the session."""

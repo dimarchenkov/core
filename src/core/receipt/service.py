@@ -61,6 +61,19 @@ class ReceiptService:
         actor_id: UUIDv7 | None = None,
     ) -> Receipt:
         """Open an empty draft receipt for an active supplier."""
+        receipt = self.stage_receipt(data, actor_id=actor_id)
+        if commit:
+            self._session.commit()
+            self._session.refresh(receipt)
+        return receipt
+
+    def stage_receipt(
+        self,
+        data: ReceiptCreate,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> Receipt:
+        """Validate and stage a draft receipt inside a caller-owned transaction."""
         self._ensure_supplier_is_active(data.supplier_id)
         receipt = Receipt(
             number=ReceiptNumberGenerator.generate(self._repository.reserve_next_receipt_number()),
@@ -74,11 +87,7 @@ class ReceiptService:
             created_by_id=actor_id,
         )
         self._repository.add(receipt)
-        if commit:
-            self._session.commit()
-            self._session.refresh(receipt)
-        else:
-            self._session.flush()
+        self._session.flush()
         return receipt
 
     def list_receipts(self) -> Sequence[Receipt]:
@@ -164,6 +173,20 @@ class ReceiptItemService:
         actor_id: UUIDv7 | None = None,
     ) -> ReceiptItem:
         """Add one existing active variant to a draft receipt without changing stock."""
+        item = self.stage_item(receipt_id, data, actor_id=actor_id)
+        if commit:
+            self._session.commit()
+            self._session.refresh(item)
+        return item
+
+    def stage_item(
+        self,
+        receipt_id: UUIDv7,
+        data: ReceiptItemCreate,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> ReceiptItem:
+        """Validate and stage a receipt line inside a caller-owned transaction."""
         receipt = self._receipt_service.get_receipt(receipt_id)
         self._ensure_draft(receipt)
         self._ensure_variant_is_active(data.variant_id)
@@ -175,11 +198,7 @@ class ReceiptItemService:
             created_by_id=actor_id,
         )
         self._repository.add(item)
-        if commit:
-            self._session.commit()
-            self._session.refresh(item)
-        else:
-            self._session.flush()
+        self._session.flush()
         return item
 
     def update_item(

@@ -43,7 +43,7 @@ class IntakeCompletionIncompleteError(Exception):
     """Raised when a draft no longer contains every required valid fact."""
 
 
-class IntakeCompletionService:
+class CompleteIntakeWorkflow:
     """Convert one complete operational draft into catalog, Receipt, and ledger facts."""
 
     def __init__(self, session: Session) -> None:
@@ -80,27 +80,25 @@ class IntakeCompletionService:
             active_items = [item for item in intake_session.items if item.abandoned_at is None]
             self._validate_completion(intake_session, active_items)
 
-            receipt = self._receipt_service.open_receipt(
+            receipt = self._receipt_service.stage_receipt(
                 ReceiptCreate(
                     supplier_id=intake_session.supplier_id,
                     receipt_date=date.today(),
                     notes=f"Created from IntakeSession {intake_session.id}",
                 ),
-                commit=False,
                 actor_id=actor_id,
             )
 
             completed_items: list[IntakeCompletionItemRead] = []
             for item in active_items:
                 product_id, variant_id = self._materialize_item(item, actor_id=actor_id)
-                self._receipt_item_service.add_item(
+                self._receipt_item_service.stage_item(
                     receipt.id,
                     ReceiptItemCreate(
                         variant_id=variant_id,
                         quantity=item.quantity,
                         purchase_price=item.purchase_price,
                     ),
-                    commit=False,
                     actor_id=actor_id,
                 )
                 item.product_id = product_id
@@ -114,9 +112,8 @@ class IntakeCompletionService:
                     )
                 )
 
-            self._posting_service.post_receipt(
+            self._posting_service.apply_posting(
                 receipt.id,
-                commit=False,
                 actor_id=actor_id,
             )
             intake_session.receipt_id = receipt.id
@@ -136,13 +133,6 @@ class IntakeCompletionService:
             )
             self._session.commit()
             return result
-        except (
-            IntakeCompletionNotFoundError,
-            IntakeCompletionAbandonedError,
-            IntakeCompletionIncompleteError,
-        ):
-            self._session.rollback()
-            raise
         except Exception:
             self._session.rollback()
             raise
@@ -199,14 +189,13 @@ class IntakeCompletionService:
             return variant.product_id, variant.id
 
         if item.kind is IntakeItemKind.NEW_PRODUCT:
-            product = self._product_service.create_product(
+            product = self._product_service.stage_product(
                 CatalogProductCreate(
                     title=item.product_title or "",
                     slug=f"product-{generate_uuid_v7()}",
                     description=item.product_description,
                     category_id=item.category_id,
                 ),
-                commit=False,
                 actor_id=actor_id,
             )
             product_id = product.id
@@ -215,23 +204,21 @@ class IntakeCompletionService:
                 raise IntakeCompletionIncompleteError
             product_id = item.product_id
 
-        variant = self._variant_service.create_variant(
+        variant = self._variant_service.stage_variant(
             CatalogVariantCreate(
                 product_id=product_id,
                 title=item.variant_title or "",
                 attributes=item.attributes,
             ),
-            commit=False,
             actor_id=actor_id,
         )
-        self._image_link_service.create_link(
+        self._image_link_service.stage_link(
             ImageLinkCreate(
                 image_id=item.image_id,
                 entity_type=ImageLinkEntityType.CATALOG_VARIANT,
                 entity_id=variant.id,
                 role=ImageLinkRole.PRIMARY,
             ),
-            commit=False,
             actor_id=actor_id,
         )
         return product_id, variant.id

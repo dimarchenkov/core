@@ -257,6 +257,35 @@ def test_failed_storage_write_leaves_no_partial_or_temporary_file(
     assert not [path for path in tmp_path.rglob("*") if path.is_file()]
 
 
+def test_upload_participant_failure_compensates_file_without_rolling_back_owner(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested media operation compensates its file but leaves SQL rollback to its caller."""
+    service = ImageService(session, storage=LocalImageStorage(tmp_path))
+    original_rollback = session.rollback
+    rollback_calls = 0
+
+    def fail_flush() -> None:
+        raise RuntimeError("metadata flush failed")
+
+    def count_rollback() -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        original_rollback()
+
+    monkeypatch.setattr(session, "flush", fail_flush)
+    monkeypatch.setattr(session, "rollback", count_rollback)
+
+    with pytest.raises(RuntimeError, match="metadata flush failed"):
+        service.upload_source_image("camera.jpg", image_bytes("JPEG"), commit=False)
+
+    assert rollback_calls == 0
+    assert session.query(Image).count() == 0
+    assert not [path for path in tmp_path.rglob("*") if path.is_file()]
+
+
 def test_image_link_service_enforces_one_primary_link(
     session: Session,
     product: CatalogProduct,

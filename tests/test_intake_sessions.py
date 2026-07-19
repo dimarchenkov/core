@@ -16,7 +16,7 @@ from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
-from core.intake.completion import IntakeCompletionService
+from core.intake.completion import CompleteIntakeWorkflow
 from core.intake.draft_service import IntakeDraftService
 from core.intake.models import IntakeItemDraft, IntakeSession
 from core.intake.routes import get_intake_draft_service
@@ -269,6 +269,46 @@ def test_new_product_must_start_with_photo_and_can_be_completed_later(
     assert (storage_root / image.source_key).is_file()
 
 
+def test_new_item_command_owns_single_rollback_when_image_metadata_fails(
+    client: tuple[TestClient, User, User, Path],
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Intake command, not nested Media, owns rollback and file compensation."""
+    test_client, first, _, storage_root = client
+    intake_session = _create_session(test_client)
+    service = IntakeDraftService(
+        session,
+        ImageService(session, storage=LocalImageStorage(storage_root)),
+    )
+    original_rollback = session.rollback
+    rollback_calls = 0
+
+    def fail_flush() -> None:
+        raise RuntimeError("metadata flush failed")
+
+    def count_rollback() -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        original_rollback()
+
+    monkeypatch.setattr(session, "flush", fail_flush)
+    monkeypatch.setattr(session, "rollback", count_rollback)
+
+    with pytest.raises(RuntimeError, match="metadata flush failed"):
+        service.add_new_item(
+            UUID(intake_session["id"]),
+            "failed.png",
+            _png_bytes(),
+            actor_id=first.id,
+        )
+
+    assert rollback_calls == 1
+    assert session.scalars(select(Image)).all() == []
+    assert session.scalars(select(IntakeItemDraft)).all() == []
+    assert not [path for path in storage_root.rglob("*") if path.is_file()]
+
+
 def test_new_variant_requires_photo_but_reuses_existing_product(
     client: tuple[TestClient, User, User, Path],
     catalog: tuple[Category, CatalogProduct, CatalogVariant],
@@ -438,6 +478,7 @@ def test_complete_new_product_creates_primary_image_catalog_and_stock(
     catalog: tuple[Category, CatalogProduct, CatalogVariant],
     supplier: Supplier,
     session: Session,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Photo First draft becomes one catalog position and one posted Receipt atomically."""
     test_client, first, _, _ = client
@@ -461,10 +502,20 @@ def test_complete_new_product_creates_primary_image_catalog_and_stock(
         f"/api/intake/sessions/{intake_session['id']}",
         json={"supplier_id": str(supplier.id)},
     )
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
 
     response = test_client.post(f"/api/intake/sessions/{intake_session['id']}/complete")
 
     assert response.status_code == 200
+    assert commit_calls == 1
     result = response.json()
     assert result["receipt"]["status"] == "posted"
     assert result["readiness"][0]["missing_requirements"] == ["missing_retail_price"]
@@ -535,16 +586,34 @@ def test_late_completion_failure_rolls_back_catalog_receipt_and_ledger_but_keeps
     )
     original_product_count = len(session.scalars(select(CatalogProduct)).all())
     original_variant_count = len(session.scalars(select(CatalogVariant)).all())
+    original_commit = session.commit
+    original_rollback = session.rollback
+    commit_calls = 0
+    rollback_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    def count_rollback() -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        original_rollback()
 
     def fail_readiness(*args: object, **kwargs: object) -> None:
         raise RuntimeError("simulated late completion failure")
 
-    service = IntakeCompletionService(session)
+    service = CompleteIntakeWorkflow(session)
+    monkeypatch.setattr(session, "commit", count_commit)
+    monkeypatch.setattr(session, "rollback", count_rollback)
     monkeypatch.setattr(service._readiness_service, "check_variant", fail_readiness)
 
     with pytest.raises(RuntimeError, match="simulated late completion failure"):
         service.complete(UUID(intake_session["id"]), actor_id=first.id)
 
+    assert commit_calls == 0
+    assert rollback_calls == 1
     assert len(session.scalars(select(CatalogProduct)).all()) == original_product_count
     assert len(session.scalars(select(CatalogVariant)).all()) == original_variant_count
     assert session.scalars(select(Receipt)).all() == []
@@ -557,3 +626,54 @@ def test_late_completion_failure_rolls_back_catalog_receipt_and_ledger_but_keeps
     image = session.get(Image, UUID(upload["image_id"]))
     assert image is not None
     assert (storage_root / image.source_key).is_file()
+
+
+def test_completion_owns_single_rollback_when_nested_receipt_posting_fails(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested posting propagates failure without finalizing the Intake transaction."""
+    test_client, first, _, _ = client
+    _, _, variant = catalog
+    intake_session = _create_session(test_client)
+    test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={
+            "barcode": variant.barcode,
+            "quantity": 2,
+            "purchase_price": "300",
+        },
+    )
+    test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+    workflow = CompleteIntakeWorkflow(session)
+    original_rollback = session.rollback
+    rollback_calls = 0
+
+    def fail_movement(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("nested movement failure")
+
+    def count_rollback() -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        original_rollback()
+
+    monkeypatch.setattr(
+        workflow._posting_service._inventory_service,
+        "create_movement",
+        fail_movement,
+    )
+    monkeypatch.setattr(session, "rollback", count_rollback)
+
+    with pytest.raises(RuntimeError, match="nested movement failure"):
+        workflow.complete(UUID(intake_session["id"]), actor_id=first.id)
+
+    assert rollback_calls == 1
+    assert session.scalars(select(Receipt)).all() == []
+    assert session.scalars(select(ReceiptItem)).all() == []
+    assert session.scalars(select(StockMovement)).all() == []

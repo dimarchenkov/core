@@ -115,7 +115,8 @@ class ImageService:
                 self._session.flush()
             return image
         except Exception:
-            self._session.rollback()
+            if commit:
+                self._session.rollback()
             self._storage.delete_saved_source(source_key)
             raise
 
@@ -178,16 +179,25 @@ class ImageLinkService:
         actor_id: UUIDv7 | None = None,
     ) -> ImageLink:
         """Link an existing image to an active catalog entity."""
+        link = self.stage_link(data, actor_id=actor_id)
+        if commit:
+            self._session.commit()
+            self._session.refresh(link)
+        return link
+
+    def stage_link(
+        self,
+        data: ImageLinkCreate,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> ImageLink:
+        """Validate and stage an image link inside a caller-owned transaction."""
         self._ensure_image_exists(data.image_id)
         self._ensure_entity_is_active(data.entity_type, data.entity_id)
         self._ensure_primary_available(data.entity_type, data.entity_id, data.role)
         link = ImageLink(**data.model_dump(), created_by_id=actor_id)
         self._repository.add(link)
-        if commit:
-            self._session.commit()
-            self._session.refresh(link)
-        else:
-            self._session.flush()
+        self._session.flush()
         return link
 
     def update_link(
