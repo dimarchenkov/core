@@ -145,6 +145,8 @@ holding long-lived row locks or an uncommitted transaction.
 - nested Media upload compensates its saved file but does not rollback caller-owned SQL.
 - the legacy one-shot Intake workflow and remaining conditional CRUD APIs are intentionally
   deferred to AB-003/AB-005.
+- Receipt and ReceiptItem domain commands are transaction-neutral; their HTTP adapters now own
+  one explicit commit/rollback per command.
 
 ## Consequences
 

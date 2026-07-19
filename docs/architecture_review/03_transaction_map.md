@@ -18,8 +18,8 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `PriceService` | Yes | when `commit=False` | when `commit=True` | No | No | Conditional / caller-dependent |
 | `ImageService` | Yes for metadata | upload with `commit=False` | create/delete and upload default | only when it owns upload; never as participant | Inspector + storage | Caller owns nested SQL; Media always compensates its file |
 | `ImageLinkService` | Yes | `stage_link` and `commit=False` | create default/update/delete | No | No | Explicit caller for `stage_link`; legacy conditional API remains |
-| `ReceiptService` | Yes | `stage_receipt` and `commit=False` | open default/update/archive | No | No | Explicit caller for `stage_receipt`; legacy conditional API remains |
-| `ReceiptItemService` | Yes | `stage_item` and `commit=False` | add default/update/remove | No | `ReceiptService` read/guard methods | Explicit caller for `stage_item`; legacy conditional API remains |
+| `ReceiptService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
+| `ReceiptItemService` | Yes | every write | Never | Never | `ReceiptService` read/guard methods | HTTP command or workflow caller |
 | `InventoryService` | Yes | every movement/reversal | Never | Never | No | Deliberately delegates ownership |
 | `ReceiptPostingService` | Yes | `apply_posting` plus nested inventory flushes | `post_receipt` once | `post_receipt` once; `apply_posting` never | `InventoryService` | Direct command owns; caller owns explicit participant operation |
 | `ReceiptCancellationService` | Yes | nested reversal flushes | once | once on exception | `InventoryService` | Itself |

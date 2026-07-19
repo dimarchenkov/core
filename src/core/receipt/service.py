@@ -57,15 +57,10 @@ class ReceiptService:
         self,
         data: ReceiptCreate,
         *,
-        commit: bool = True,
         actor_id: UUIDv7 | None = None,
     ) -> Receipt:
-        """Open an empty draft receipt for an active supplier."""
-        receipt = self.stage_receipt(data, actor_id=actor_id)
-        if commit:
-            self._session.commit()
-            self._session.refresh(receipt)
-        return receipt
+        """Stage an empty draft receipt for the command owner to commit."""
+        return self.stage_receipt(data, actor_id=actor_id)
 
     def stage_receipt(
         self,
@@ -125,8 +120,7 @@ class ReceiptService:
             receipt.notes = data.notes
         if actor_id is not None:
             receipt.updated_by_id = actor_id
-        self._session.commit()
-        self._session.refresh(receipt)
+        self._session.flush()
         return receipt
 
     def archive_draft(self, receipt_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> None:
@@ -134,7 +128,7 @@ class ReceiptService:
         receipt = self.get_receipt(receipt_id)
         self._ensure_draft(receipt)
         receipt.soft_delete(actor_id)
-        self._session.commit()
+        self._session.flush()
 
     def _ensure_supplier_is_active(self, supplier_id: UUIDv7 | None) -> None:
         """Require an active, non-archived supplier for a receipt."""
@@ -169,15 +163,10 @@ class ReceiptItemService:
         receipt_id: UUIDv7,
         data: ReceiptItemCreate,
         *,
-        commit: bool = True,
         actor_id: UUIDv7 | None = None,
     ) -> ReceiptItem:
-        """Add one existing active variant to a draft receipt without changing stock."""
-        item = self.stage_item(receipt_id, data, actor_id=actor_id)
-        if commit:
-            self._session.commit()
-            self._session.refresh(item)
-        return item
+        """Stage one active variant line for the command owner to commit."""
+        return self.stage_item(receipt_id, data, actor_id=actor_id)
 
     def stage_item(
         self,
@@ -223,8 +212,7 @@ class ReceiptItemService:
             item.purchase_price = self._quantize_purchase_price(data.purchase_price)
         if actor_id is not None:
             item.updated_by_id = actor_id
-        self._session.commit()
-        self._session.refresh(item)
+        self._session.flush()
         return item
 
     def remove_item(
@@ -239,7 +227,7 @@ class ReceiptItemService:
         self._ensure_draft(receipt)
         item = self._get_item(receipt_id, item_id)
         item.soft_delete(actor_id)
-        self._session.commit()
+        self._session.flush()
 
     def list_items(self, receipt_id: UUIDv7) -> Sequence[ReceiptItem]:
         """Return active lines for an existing non-deleted receipt."""

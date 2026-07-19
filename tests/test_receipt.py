@@ -153,6 +153,7 @@ def draft_receipt_with_items(
             receipt.id,
             ReceiptItemCreate(variant_id=variant.id, quantity=2, purchase_price="5.00"),
         )
+    session.commit()
     return receipt
 
 
@@ -167,6 +168,25 @@ def test_open_receipt_generates_draft_number_and_trims_source_document(
     assert receipt.status is ReceiptStatus.DRAFT
     assert receipt.source_document_number == "INV-42"
     assert receipt.created_by_id is None
+
+
+def test_receipt_domain_command_stages_without_committing(
+    session: Session,
+    supplier: Supplier,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receipt domain writes leave transaction finalization to their command boundary."""
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+
+    monkeypatch.setattr(session, "commit", count_commit)
+
+    ReceiptService(session).open_receipt(receipt_payload(supplier))
+
+    assert commit_calls == 0
 
 
 def test_receipt_schemas_forbid_public_number_and_status() -> None:
@@ -310,9 +330,19 @@ def test_authenticated_receipt_and_item_routes_attribute_writes(
     supplier: Supplier,
     user: User,
     variant: CatalogVariant,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Authenticated draft receipt and line writes record the acting user."""
     headers = authorization_header(client, user)
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
     created = client.post(
         "/api/receipts",
         headers=headers,
@@ -351,6 +381,7 @@ def test_authenticated_receipt_and_item_routes_attribute_writes(
     session.refresh(receipt)
     assert archived.status_code == 204
     assert receipt.deleted_by_id == user.id
+    assert commit_calls == 5
 
 
 def test_receipt_migration_revision_identifier_is_short() -> None:

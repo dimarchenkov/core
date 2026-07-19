@@ -160,6 +160,7 @@ workflow is left for AB-005.
 
 - **Priority:** P1
 - **Engineering name:** `remove-commit-flags`
+- **Status:** In progress — Receipt context completed on 2026-07-19
 - **Estimate:** L
 - **Dependencies:** AB-002
 
@@ -190,6 +191,16 @@ for cross-context commands, a named workflow owns it. Domain services do not fin
 
 Temporary mixed conventions are confusing; track migrated contexts in this backlog. Route tests
 must catch missing commits. Avoid one giant PR.
+
+### Progress
+
+- [x] Receipt and ReceiptItem domain commands are transaction-neutral.
+- [x] Receipt HTTP commands explicitly commit once and rollback failures.
+- [x] Direct Post/Cancel Receipt workflows retain their own clear transaction boundary.
+- [ ] Catalog command APIs and routes.
+- [ ] Media metadata/link command APIs and routes.
+- [ ] Pricing command APIs and routes.
+- [ ] Remove transitional staged aliases once no workflow needs compatibility methods.
 
 ---
 

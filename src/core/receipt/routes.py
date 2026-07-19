@@ -76,15 +76,23 @@ def list_receipts(
 def open_receipt(
     data: ReceiptCreate,
     service: Annotated[ReceiptService, Depends(get_receipt_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Receipt:
     """Open an empty draft receipt for an active supplier."""
     try:
-        return service.open_receipt(data, actor_id=current_user.id)
+        receipt = service.open_receipt(data, actor_id=current_user.id)
+        session.commit()
+        session.refresh(receipt)
+        return receipt
     except ReceiptSupplierError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Supplier is invalid."
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.post("/{receipt_id}/post", response_model=ReceiptRead, status_code=status.HTTP_200_OK)
@@ -161,42 +169,59 @@ def update_draft(
     receipt_id: UUIDv7,
     data: ReceiptUpdate,
     service: Annotated[ReceiptService, Depends(get_receipt_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Receipt:
     """Update mutable fields of a draft receipt."""
     try:
-        return service.update_draft(receipt_id, data, actor_id=current_user.id)
+        receipt = service.update_draft(receipt_id, data, actor_id=current_user.id)
+        session.commit()
+        session.refresh(receipt)
+        return receipt
     except ReceiptNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found."
         ) from exc
     except ReceiptNotDraftError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Receipt is not a draft."
         ) from exc
     except ReceiptSupplierError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Supplier is invalid."
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.delete("/{receipt_id}", status_code=status.HTTP_204_NO_CONTENT)
 def archive_draft(
     receipt_id: UUIDv7,
     service: Annotated[ReceiptService, Depends(get_receipt_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Archive a draft receipt without affecting inventory."""
     try:
         service.archive_draft(receipt_id, actor_id=current_user.id)
+        session.commit()
     except ReceiptNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found."
         ) from exc
     except ReceiptNotDraftError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Receipt is not a draft."
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -221,23 +246,33 @@ def add_item(
     receipt_id: UUIDv7,
     data: ReceiptItemCreate,
     service: Annotated[ReceiptItemService, Depends(get_receipt_item_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ReceiptItem:
     """Add an existing active variant to a draft receipt."""
     try:
-        return service.add_item(receipt_id, data, actor_id=current_user.id)
+        item = service.add_item(receipt_id, data, actor_id=current_user.id)
+        session.commit()
+        session.refresh(item)
+        return item
     except ReceiptNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Receipt not found."
         ) from exc
     except ReceiptNotDraftError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Receipt is not a draft."
         ) from exc
     except ReceiptVariantError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Variant is invalid."
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.patch("/{receipt_id}/items/{item_id}", response_model=ReceiptItemRead)
@@ -246,23 +281,33 @@ def update_item(
     item_id: UUIDv7,
     data: ReceiptItemUpdate,
     service: Annotated[ReceiptItemService, Depends(get_receipt_item_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> ReceiptItem:
     """Update one line while its receipt remains draft."""
     try:
-        return service.update_item(receipt_id, item_id, data, actor_id=current_user.id)
+        item = service.update_item(receipt_id, item_id, data, actor_id=current_user.id)
+        session.commit()
+        session.refresh(item)
+        return item
     except (ReceiptNotFoundError, ReceiptItemNotFoundError) as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Receipt item not found."
         ) from exc
     except ReceiptNotDraftError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Receipt is not a draft."
         ) from exc
     except ReceiptVariantError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Variant is invalid."
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.delete("/{receipt_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -270,17 +315,24 @@ def remove_item(
     receipt_id: UUIDv7,
     item_id: UUIDv7,
     service: Annotated[ReceiptItemService, Depends(get_receipt_item_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Archive one draft receipt line without changing stock."""
     try:
         service.remove_item(receipt_id, item_id, actor_id=current_user.id)
+        session.commit()
     except (ReceiptNotFoundError, ReceiptItemNotFoundError) as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Receipt item not found."
         ) from exc
     except ReceiptNotDraftError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Receipt is not a draft."
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
