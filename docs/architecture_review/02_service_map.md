@@ -17,9 +17,9 @@ automatically require a new class.
 | Service / component | Context | Category | Primary responsibility | Calls / uses | Architectural debt |
 | --- | --- | --- | --- | --- | --- |
 | `IdentityService` | Identity | Domain Service | User creation, authentication, privilege transitions and privilege audit | user/audit repositories, password helpers | Mixes read authentication and transactional commands; acceptable while identity remains small |
-| `CategoryService` | Catalog | Domain Service | Category invariants and CRUD | `CategoryRepository` | Also owns HTTP-command transactions |
-| `CatalogProductService` | Catalog | Domain Service | Product invariants and lifecycle | product/category repositories | `commit` flag makes transaction role conditional |
-| `CatalogVariantService` | Catalog | Domain Service | Variant lifecycle, SKU and barcode allocation | product/variant repositories, generators | `commit` flag makes transaction role conditional |
+| `CategoryService` | Catalog | Domain Service | Category invariants and CRUD | `CategoryRepository` | Transaction-neutral; route owns finalization |
+| `CatalogProductService` | Catalog | Domain Service | Product invariants and lifecycle | product/category repositories | Transaction-neutral; route or workflow owns finalization |
+| `CatalogVariantService` | Catalog | Domain Service | Variant lifecycle, SKU and barcode allocation | product/variant repositories, generators | Transaction-neutral; route or workflow owns finalization |
 | `SupplierService` | Supplier | Domain Service | Supplier lifecycle and normalization | supplier repository, code generator | Also owns command transactions |
 | `PriceService` | Pricing | Domain Service | Append price facts and enforce currency/catalog rules | price/variant repositories | Includes read methods; conditional `commit` |
 | `InventoryService` | Inventory | Domain Service | Only production writer of stock/reversal movements; quantity validation | movement/variant repositories | Also exposes balance/history reads; split only when read use grows |

@@ -31,7 +31,6 @@ class IntakeService:
                     description=data.product_description,
                     category_id=data.category_id,
                 ),
-                commit=False,
                 actor_id=actor_id,
             )
             variant = self._variant_service.create_variant(
@@ -40,7 +39,6 @@ class IntakeService:
                     title=data.variant_title,
                     attributes=data.attributes,
                 ),
-                commit=False,
                 actor_id=actor_id,
             )
             image_link = self._image_link_service.create_link(

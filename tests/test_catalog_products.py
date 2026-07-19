@@ -64,8 +64,16 @@ def active_category(session: Session) -> Category:
 def test_product_service_creates_product(
     session: Session,
     active_category: Category,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Products can be created with only catalog-family fields."""
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+
+    monkeypatch.setattr(session, "commit", count_commit)
     product = CatalogProductService(session).create_product(
         CatalogProductCreate(
             title="35mm Camera",
@@ -78,6 +86,7 @@ def test_product_service_creates_product(
     assert product.id.version == 7
     assert product.description == "Film camera body"
     assert product.is_active is True
+    assert commit_calls == 0
     assert set(CatalogProduct.__table__.columns.keys()) == {
         "title",
         "slug",
@@ -93,6 +102,36 @@ def test_product_service_creates_product(
         "created_by_id",
         "updated_by_id",
     }
+
+
+def test_product_route_owns_one_commit(
+    client: TestClient,
+    session: Session,
+    active_category: Category,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP command, not CatalogProductService, finalizes product creation."""
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
+
+    response = client.post(
+        "/api/catalog/products",
+        json={
+            "title": "Camera",
+            "slug": "camera",
+            "category_id": str(active_category.id),
+        },
+    )
+
+    assert response.status_code == 201
+    assert commit_calls == 1
 
 
 def test_product_routes_reject_inactive_category(client: TestClient, session: Session) -> None:

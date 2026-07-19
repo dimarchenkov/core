@@ -147,6 +147,8 @@ holding long-lived row locks or an uncommitted transaction.
   deferred to AB-003/AB-005.
 - Receipt and ReceiptItem domain commands are transaction-neutral; their HTTP adapters now own
   one explicit commit/rollback per command.
+- Category, Product and Variant domain commands are transaction-neutral; their HTTP adapters or
+  Intake workflows own finalization without transaction-mode flags.
 
 ## Consequences
 

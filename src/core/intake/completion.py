@@ -189,7 +189,7 @@ class CompleteIntakeWorkflow:
             return variant.product_id, variant.id
 
         if item.kind is IntakeItemKind.NEW_PRODUCT:
-            product = self._product_service.stage_product(
+            product = self._product_service.create_product(
                 CatalogProductCreate(
                     title=item.product_title or "",
                     slug=f"product-{generate_uuid_v7()}",
@@ -204,7 +204,7 @@ class CompleteIntakeWorkflow:
                 raise IntakeCompletionIncompleteError
             product_id = item.product_id
 
-        variant = self._variant_service.stage_variant(
+        variant = self._variant_service.create_variant(
             CatalogVariantCreate(
                 product_id=product_id,
                 title=item.variant_title or "",

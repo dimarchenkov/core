@@ -48,8 +48,18 @@ def client(session: Session) -> Generator[TestClient]:
     app.dependency_overrides.clear()
 
 
-def test_category_service_creates_category(session: Session) -> None:
+def test_category_service_creates_category(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = CategoryService(session)
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+
+    monkeypatch.setattr(session, "commit", count_commit)
 
     category = service.create_category(
         CategoryCreate(title="Cameras", slug="cameras", sort_order=10),
@@ -62,6 +72,7 @@ def test_category_service_creates_category(session: Session) -> None:
     assert category.sort_order == 10
     assert category.is_active is True
     assert category.created_by_id is None
+    assert commit_calls == 0
 
 
 def test_category_service_creates_child_category(session: Session) -> None:
@@ -75,7 +86,20 @@ def test_category_service_creates_child_category(session: Session) -> None:
     assert child.parent_id == parent.id
 
 
-def test_category_routes_create_and_list_categories(client: TestClient) -> None:
+def test_category_routes_create_and_list_categories(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
     create_response = client.post(
         "/api/catalog/categories",
         json={"title": "Cameras", "slug": "cameras", "sort_order": 10},
@@ -91,6 +115,7 @@ def test_category_routes_create_and_list_categories(client: TestClient) -> None:
 
     assert list_response.status_code == 200
     assert [category["slug"] for category in list_response.json()] == ["cameras"]
+    assert commit_calls == 1
 
 
 def test_category_routes_update_category(client: TestClient) -> None:

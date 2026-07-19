@@ -90,21 +90,30 @@ def list_categories(
 def create_category(
     data: CategoryCreate,
     service: Annotated[CategoryService, Depends(get_category_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Category:
     """Create a catalog category."""
     try:
-        return service.create_category(data, actor_id=_actor_id(current_user))
+        category = service.create_category(data, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(category)
+        return category
     except CategorySlugAlreadyExistsError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Category slug already exists.",
         ) from exc
     except CategoryParentError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Parent category is invalid.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.get("/{category_id}", response_model=CategoryRead)
@@ -127,42 +136,58 @@ def update_category(
     category_id: UUIDv7,
     data: CategoryUpdate,
     service: Annotated[CategoryService, Depends(get_category_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Category:
     """Update a catalog category."""
     try:
-        return service.update_category(category_id, data, actor_id=_actor_id(current_user))
+        category = service.update_category(category_id, data, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(category)
+        return category
     except CategoryNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Category not found.",
         ) from exc
     except CategorySlugAlreadyExistsError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Category slug already exists.",
         ) from exc
     except CategoryParentError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Parent category is invalid.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_category(
     category_id: UUIDv7,
     service: Annotated[CategoryService, Depends(get_category_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete a catalog category."""
     try:
         service.delete_category(category_id, actor_id=_actor_id(current_user))
+        session.commit()
     except CategoryNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Category not found.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -178,21 +203,30 @@ def list_products(
 def create_product(
     data: CatalogProductCreate,
     service: Annotated[CatalogProductService, Depends(get_catalog_product_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogProduct:
     """Create a catalog product."""
     try:
-        return service.create_product(data, actor_id=_actor_id(current_user))
+        product = service.create_product(data, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(product)
+        return product
     except CatalogProductSlugAlreadyExistsError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Product slug already exists.",
         ) from exc
     except CatalogProductCategoryError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Product category is invalid.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @product_router.get("/{product_id}", response_model=CatalogProductRead)
@@ -215,42 +249,58 @@ def update_product(
     product_id: UUIDv7,
     data: CatalogProductUpdate,
     service: Annotated[CatalogProductService, Depends(get_catalog_product_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogProduct:
     """Update a catalog product."""
     try:
-        return service.update_product(product_id, data, actor_id=_actor_id(current_user))
+        product = service.update_product(product_id, data, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(product)
+        return product
     except CatalogProductNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found.",
         ) from exc
     except CatalogProductSlugAlreadyExistsError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Product slug already exists.",
         ) from exc
     except CatalogProductCategoryError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Product category is invalid.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @product_router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_product(
     product_id: UUIDv7,
     service: Annotated[CatalogProductService, Depends(get_catalog_product_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete a catalog product."""
     try:
         service.delete_product(product_id, actor_id=_actor_id(current_user))
+        session.commit()
     except CatalogProductNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -266,21 +316,30 @@ def list_variants(
 def create_variant(
     data: CatalogVariantCreate,
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogVariant:
     """Create a catalog variant with system-generated stable identifiers."""
     try:
-        return service.create_variant(data, actor_id=_actor_id(current_user))
+        variant = service.create_variant(data, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(variant)
+        return variant
     except CatalogVariantProductError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Variant product is invalid.",
         ) from exc
     except CatalogVariantBarcodeConflictError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Generated barcode already exists.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @variant_router.get("/by-barcode/{barcode}", response_model=CatalogVariantRead)
@@ -318,35 +377,50 @@ def update_variant(
     variant_id: UUIDv7,
     data: CatalogVariantUpdate,
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogVariant:
     """Update mutable catalog fields without changing stable identifiers."""
     try:
-        return service.update_variant(variant_id, data, actor_id=_actor_id(current_user))
+        variant = service.update_variant(variant_id, data, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(variant)
+        return variant
     except CatalogVariantNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Variant not found.",
         ) from exc
     except CatalogVariantProductError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Variant product is invalid.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @variant_router.delete("/{variant_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_variant(
     variant_id: UUIDv7,
     service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     """Soft-delete a catalog variant."""
     try:
         service.delete_variant(variant_id, actor_id=_actor_id(current_user))
+        session.commit()
     except CatalogVariantNotFoundError as exc:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Variant not found.",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)

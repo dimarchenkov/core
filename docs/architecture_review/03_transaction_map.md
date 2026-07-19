@@ -11,9 +11,9 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | Service | Implicitly opens | Explicit flush | Commit | Rollback | Calls other services | Current transaction owner |
 | --- | --- | --- | --- | --- | --- | --- |
 | `IdentityService` | Yes | No | create admin; privilege transition | privilege transition only | No | Itself for commands |
-| `CategoryService` | Yes | No | every write | No | No | Itself |
-| `CatalogProductService` | Yes | `stage_product` and `commit=False` | `create_product(commit=True)` | No | No | Explicit caller for `stage_product`; legacy conditional API remains |
-| `CatalogVariantService` | Yes | `stage_variant` and `commit=False` | `create_variant(commit=True)` | No | No | Explicit caller for `stage_variant`; legacy conditional API remains |
+| `CategoryService` | Yes | every write | Never | Never | No | HTTP command caller |
+| `CatalogProductService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
+| `CatalogVariantService` | Yes | every write | Never | Never | No | HTTP command or workflow caller |
 | `SupplierService` | Yes | No | every write | No | No | Itself |
 | `PriceService` | Yes | when `commit=False` | when `commit=True` | No | No | Conditional / caller-dependent |
 | `ImageService` | Yes for metadata | upload with `commit=False` | create/delete and upload default | only when it owns upload; never as participant | Inspector + storage | Caller owns nested SQL; Media always compensates its file |
@@ -71,8 +71,8 @@ next operation, but they neither commit nor rollback the caller-owned transactio
 ### `commit=False`
 
 `commit=False` began as a pragmatic way to reuse validated Catalog/Media operations inside
-`IntakeService`. After AB-002 it remains in legacy Intake, Catalog CRUD compatibility, Media
-upload, Pricing and Receipt CRUD compatibility, but not in Complete Intake or Receipt posting.
+`IntakeService`. After the Catalog and Receipt AB-003 slices it remains in Media and Pricing,
+but not in either Intake workflow, Catalog, Receipt CRUD or Receipt posting.
 At this breadth it is still no longer merely a
 local compromise: it is a transaction-protocol encoded as optional booleans across domain APIs.
 

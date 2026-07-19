@@ -74,9 +74,17 @@ def active_product(session: Session) -> CatalogProduct:
 def test_variant_service_generates_stable_sequential_skus(
     session: Session,
     active_product: CatalogProduct,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The service creates the next stable SKU without user input."""
     service = CatalogVariantService(session)
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+
+    monkeypatch.setattr(session, "commit", count_commit)
     first = service.create_variant(
         CatalogVariantCreate(product_id=active_product.id, title="Camera body"),
     )
@@ -88,6 +96,7 @@ def test_variant_service_generates_stable_sequential_skus(
     assert second.sku == "SKU-000002"
     assert first.barcode == "2000000000015"
     assert second.barcode == "2000000000022"
+    assert commit_calls == 0
     assert set(CatalogVariant.__table__.columns.keys()) == {
         "product_id",
         "title",
@@ -104,6 +113,32 @@ def test_variant_service_generates_stable_sequential_skus(
         "created_by_id",
         "updated_by_id",
     }
+
+
+def test_variant_route_owns_one_commit(
+    client: TestClient,
+    session: Session,
+    active_product: CatalogProduct,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP command, not CatalogVariantService, finalizes variant creation."""
+    original_commit = session.commit
+    commit_calls = 0
+
+    def count_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", count_commit)
+
+    response = client.post(
+        "/api/catalog/variants",
+        json={"product_id": str(active_product.id), "title": "Camera body"},
+    )
+
+    assert response.status_code == 201
+    assert commit_calls == 1
 
 
 @pytest.mark.parametrize(
