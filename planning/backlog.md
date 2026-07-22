@@ -32,7 +32,8 @@
 ## P2 — Workflow UX
 
 - [ ] Photo-first mobile Receive Goods workflow
-- [ ] Ready for Sale employee work queue
+- [x] Derived Ready for Sale employee attention API
+- [ ] Ready for Sale employee queue interface
 - [ ] Activity feed for daily operations
 - [ ] Employee workflow timing, errors and cancellation metrics
 - [ ] Reference/history cards separated from daily workflow screens

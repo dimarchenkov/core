@@ -12,3 +12,24 @@ class ReadyForSaleRead(PydanticBaseModel):
     variant_id: UUIDv7
     is_ready: bool
     missing_requirements: list[ReadyForSaleRequirement]
+
+
+class ReadyForSaleAttentionItemRead(PydanticBaseModel):
+    """One incomplete Variant in the employee attention queue."""
+
+    variant_id: UUIDv7
+    product_id: UUIDv7
+    product_title: str
+    variant_title: str
+    sku: str
+    barcode: str
+    missing_requirements: list[ReadyForSaleRequirement]
+
+
+class ReadyForSaleAttentionPage(PydanticBaseModel):
+    """Stable paginated slice of the current derived attention queue."""
+
+    items: list[ReadyForSaleAttentionItemRead]
+    total: int
+    limit: int
+    offset: int

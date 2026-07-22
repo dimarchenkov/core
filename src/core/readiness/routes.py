@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from core.database import get_session
 from core.identity.dependencies import get_current_user
-from core.readiness.schemas import ReadyForSaleRead
+from core.readiness.enums import ReadyForSaleRequirement
+from core.readiness.read_service import ReadyForSaleReadService
+from core.readiness.schemas import ReadyForSaleAttentionPage, ReadyForSaleRead
 from core.readiness.service import ReadinessVariantNotFoundError, ReadyForSaleService
 from core.shared.db import UUIDv7
 
 router = APIRouter(
-    prefix="/api/readiness/variants",
+    prefix="/api/readiness",
     tags=["readiness"],
     dependencies=[Depends(get_current_user)],
 )
@@ -25,7 +27,25 @@ def get_ready_for_sale_service(
     return ReadyForSaleService(session)
 
 
-@router.get("/{variant_id}/ready-for-sale", response_model=ReadyForSaleRead)
+def get_ready_for_sale_read_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> ReadyForSaleReadService:
+    """Provide derived Ready for Sale queue projections."""
+    return ReadyForSaleReadService(session)
+
+
+@router.get("/attention", response_model=ReadyForSaleAttentionPage)
+def list_ready_for_sale_attention(
+    service: Annotated[ReadyForSaleReadService, Depends(get_ready_for_sale_read_service)],
+    requirement: ReadyForSaleRequirement | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ReadyForSaleAttentionPage:
+    """Return the current employee queue of Variants requiring sale preparation."""
+    return service.list_attention(requirement=requirement, limit=limit, offset=offset)
+
+
+@router.get("/variants/{variant_id}/ready-for-sale", response_model=ReadyForSaleRead)
 def check_ready_for_sale(
     variant_id: UUIDv7,
     service: Annotated[ReadyForSaleService, Depends(get_ready_for_sale_service)],

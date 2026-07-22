@@ -47,3 +47,23 @@ Machine-readable reasons:
 - `missing_retail_price`.
 
 The response reports all current problems in stable order so mobile, web and third-party interfaces can build a work queue without duplicating Core business rules.
+
+## Attention queue
+
+```text
+GET /api/readiness/attention
+```
+
+Query parameters:
+
+- `requirement` — optional machine-readable reason filter;
+- `limit` — page size from 1 to 100, default 50;
+- `offset` — zero-based page offset.
+
+The response contains incomplete Variants in stable Product/Variant order together with display
+names, identifiers, all current missing requirements and pagination metadata. The queue is a
+computed read model: it joins current Catalog, primary-image and latest effective retail-price
+facts in one bounded query. There is no readiness table or mutable `ready` flag.
+
+When an employee adds the missing photo, price or identifier, the Variant disappears from the next
+queue response automatically. A `requirement` filter changes both the returned items and `total`.

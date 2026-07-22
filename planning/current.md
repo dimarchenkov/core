@@ -76,7 +76,7 @@ The first daily workflow starts with identification. A known Variant begins with
 ### Operational visibility
 
 - [ ] Add an employee-facing activity feed
-- [ ] Add an owner-facing Ready for Sale attention queue
+- [x] Add an owner-facing Ready for Sale attention queue read API
 - [ ] Record workflow start, completion, cancellation and duration
 - [ ] Keep audit history separate from operational metrics
 

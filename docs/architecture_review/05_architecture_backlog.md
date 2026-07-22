@@ -388,6 +388,7 @@ payload hash behavior.
 
 - **Priority:** P1
 - **Engineering name:** `readiness-attention-query`
+- **Status:** Completed on 2026-07-22
 - **Estimate:** M
 - **Dependencies:** None; coordinate with phone UI
 
@@ -417,6 +418,19 @@ dismiss flag.
 
 Naive per-Variant checks will scale poorly. Avoid premature materialized views; optimize the SQL
 query first.
+
+### Completion evidence
+
+- `GET /api/readiness/attention` returns protected, paginated employee work with an optional
+  machine-readable requirement filter;
+- `ReadyForSaleReadService` loads Catalog, primary-image existence and latest effective retail
+  price facts in one bounded SQL statement without per-Variant reads;
+- single-Variant checks and the queue share one pure requirement policy and stable reason order;
+- ready and archived Variants are excluded, while inactive Variants remain actionable with an
+  explicit reason;
+- adding missing facts removes the Variant from the next response without stored readiness state;
+- tests cover ordering, filtering, pagination, authentication, automatic disappearance and query
+  count.
 
 ---
 
@@ -598,9 +612,8 @@ item without a trigger.
 
 ## Recommended next sequence
 
-1. AB-008 — add the derived Ready for Sale queue for the first-party workflow interface.
-2. AB-009 — add meaningful Activity Events inside the established transaction boundaries.
-3. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
-4. AB-007 — harden AQSI checkpoint recovery as the next integration reliability increment.
-5. Complete AB-005 removal only after its documented client and release-window checks pass.
-6. P2/P3 tasks only when their stated trigger occurs.
+1. AB-009 — add meaningful Activity Events inside the established transaction boundaries.
+2. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
+3. AB-007 — harden AQSI checkpoint recovery as the next integration reliability increment.
+4. Complete AB-005 removal only after its documented client and release-window checks pass.
+5. P2/P3 tasks only when their stated trigger occurs.

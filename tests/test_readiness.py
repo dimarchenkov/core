@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -20,6 +20,7 @@ from core.media.models import Image, ImageLink
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.readiness.enums import ReadyForSaleRequirement
+from core.readiness.read_service import ReadyForSaleReadService
 from core.readiness.service import ReadinessVariantNotFoundError, ReadyForSaleService
 from core.shared.db import Base
 
@@ -266,4 +267,142 @@ def test_readiness_api_is_authenticated_and_returns_machine_codes(
         "variant_id": str(variant.id),
         "is_ready": False,
         "missing_requirements": ["missing_primary_image", "missing_retail_price"],
+    }
+
+
+def test_attention_queue_contains_only_incomplete_variants_in_stable_order(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """Ready Variants disappear while remaining work is ordered for employees."""
+    add_primary_image(session, variant)
+    add_retail_price(session, variant)
+    earlier = CatalogVariant(
+        product_id=variant.product_id,
+        title="Amber",
+        sku="SKU-000002",
+        barcode="2000000000022",
+        attributes={},
+    )
+    later = CatalogVariant(
+        product_id=variant.product_id,
+        title="Green",
+        sku="SKU-000003",
+        barcode="2000000000039",
+        attributes={},
+    )
+    session.add_all([later, earlier])
+    session.commit()
+
+    result = ReadyForSaleReadService(session).list_attention()
+
+    assert result.total == 2
+    assert [item.variant_id for item in result.items] == [earlier.id, later.id]
+    assert result.items[0].missing_requirements == [
+        ReadyForSaleRequirement.MISSING_PRIMARY_IMAGE,
+        ReadyForSaleRequirement.MISSING_RETAIL_PRICE,
+    ]
+
+
+def test_attention_queue_supports_reason_filter_and_pagination(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """Clients can request one actionable reason without losing total metadata."""
+    add_primary_image(session, variant)
+    second = CatalogVariant(
+        product_id=variant.product_id,
+        title="Green",
+        sku="SKU-000002",
+        barcode="2000000000022",
+        attributes={},
+    )
+    session.add(second)
+    session.commit()
+
+    result = ReadyForSaleReadService(session).list_attention(
+        requirement=ReadyForSaleRequirement.MISSING_PRIMARY_IMAGE,
+        limit=1,
+        offset=0,
+    )
+
+    assert result.total == 1
+    assert result.limit == 1
+    assert result.offset == 0
+    assert [item.variant_id for item in result.items] == [second.id]
+
+
+def test_attention_queue_recomputes_and_removes_fixed_variant(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """No persisted ready flag is needed to remove completed work from the queue."""
+    service = ReadyForSaleReadService(session)
+
+    assert service.list_attention().total == 1
+
+    add_primary_image(session, variant)
+    add_retail_price(session, variant)
+
+    assert service.list_attention().total == 0
+
+
+def test_attention_queue_uses_one_bounded_select(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """Queue construction does not issue Catalog/Media/Pricing reads per Variant."""
+    statements: list[str] = []
+
+    def capture_select(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(session.bind, "before_cursor_execute", capture_select)
+    try:
+        ReadyForSaleReadService(session).list_attention()
+    finally:
+        event.remove(session.bind, "before_cursor_execute", capture_select)
+
+    assert len(statements) == 1
+
+
+def test_attention_queue_api_is_authenticated_and_filterable(
+    client: TestClient,
+    variant: CatalogVariant,
+    user: User,
+) -> None:
+    """The first-party UI receives a protected paginated attention projection."""
+    path = "/api/readiness/attention?requirement=missing_primary_image&limit=10&offset=0"
+
+    assert client.get(path).status_code == 401
+
+    response = client.get(path, headers=authorization_header(client, user))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "variant_id": str(variant.id),
+                "product_id": str(variant.product_id),
+                "product_title": "Drill",
+                "variant_title": "Blue",
+                "sku": "SKU-000001",
+                "barcode": "2000000000015",
+                "missing_requirements": [
+                    "missing_primary_image",
+                    "missing_retail_price",
+                ],
+            }
+        ],
+        "total": 1,
+        "limit": 10,
+        "offset": 0,
     }

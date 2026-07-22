@@ -36,6 +36,7 @@ automatically require a new class.
 | `AqsiPublicationProcessor` | AQSI | Application / Workflow Service | Execute remote publication state machine and persist checkpoints | AQSI gateway, payload builder, repositories | **Mixed role:** remote orchestration + persistence checkpoints + retry policy; multiple commits are intentional but undocumented |
 | `VariantLabelService` | Labels | Application / Workflow Service | Authorize and assemble one printable label request | Readiness, Catalog, Pricing, renderer | Essentially a read/application query; no material debt |
 | `ReadyForSaleService` | Readiness | Read Service | Derive readiness and exact missing requirements | Catalog, Media and Pricing repositories | Correctly stateless; must remain so |
+| `ReadyForSaleReadService` | Readiness | Read Service | Paginated incomplete-Variant attention projection with reason filtering | One bounded Catalog/Media/Pricing query and shared readiness policy | In-memory filtering/pagination is proportionate now; move it into SQL only after measured catalog growth |
 | `AqsiPayloadBuilder` | AQSI | Infrastructure Service | Anti-corruption mapping from Core reads to deterministic AQSI payload | Readiness, Catalog, Pricing, Settings | Performs cross-context reads; acceptable for integration mapping |
 | `ImageService` | Media | Infrastructure Service | Image metadata plus validated local source-file persistence | inspector, local storage, image repository | **Mixed role:** filesystem adapter and metadata operations; compensates only files it owns |
 | `ImageInspector` | Media | Infrastructure Service | Validate bytes and extract trusted image metadata | Pillow | None |
@@ -78,5 +79,5 @@ base class or engine is proposed.
 - Keep `CompleteIntakeWorkflow` cohesive while one command owns one business outcome.
 - Separate Intake draft reads from commands because the current class already has two
   independently growing reasons to change: workflow mutation and UI projection.
-- Keep `ReadyForSaleService` as one read policy; do not persist its result.
+- Keep both readiness services on one pure policy; do not persist their result.
 - Treat AQSI processor checkpoints as a remote workflow, not as one database transaction.
