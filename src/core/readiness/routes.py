@@ -38,11 +38,17 @@ def get_ready_for_sale_read_service(
 def list_ready_for_sale_attention(
     service: Annotated[ReadyForSaleReadService, Depends(get_ready_for_sale_read_service)],
     requirement: ReadyForSaleRequirement | None = None,
+    search: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ReadyForSaleAttentionPage:
     """Return the current employee queue of Variants requiring sale preparation."""
-    return service.list_attention(requirement=requirement, limit=limit, offset=offset)
+    return service.list_attention(
+        requirement=requirement,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/variants/{variant_id}/ready-for-sale", response_model=ReadyForSaleRead)

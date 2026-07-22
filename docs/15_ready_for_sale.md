@@ -57,13 +57,16 @@ GET /api/readiness/attention
 Query parameters:
 
 - `requirement` — optional machine-readable reason filter;
+- `search` — Product/Variant/SKU text or an exact barcode;
 - `limit` — page size from 1 to 100, default 50;
 - `offset` — zero-based page offset.
 
-The response contains incomplete Variants in stable Product/Variant order together with display
-names, identifiers, all current missing requirements and pagination metadata. The queue is a
-computed read model: it joins current Catalog, primary-image and latest effective retail-price
-facts in one bounded query. There is no readiness table or mutable `ready` flag.
+The response contains active incomplete Variants in oldest-created-first order together with
+display names, identifiers, an optional primary-image ID, all current missing requirements and
+pagination metadata. Intentionally inactive and archived Variants are excluded from employee work.
+The queue is a computed read model: it joins current Catalog, primary-image and latest effective
+retail-price facts in one bounded query. There is no readiness table or mutable `ready` flag.
 
 When an employee adds the missing photo, price or identifier, the Variant disappears from the next
-queue response automatically. A `requirement` filter changes both the returned items and `total`.
+queue response automatically. The `requirement` and `search` filters change both the returned
+items and `total`.

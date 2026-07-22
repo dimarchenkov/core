@@ -426,8 +426,9 @@ query first.
 - `ReadyForSaleReadService` loads Catalog, primary-image existence and latest effective retail
   price facts in one bounded SQL statement without per-Variant reads;
 - single-Variant checks and the queue share one pure requirement policy and stable reason order;
-- ready and archived Variants are excluded, while inactive Variants remain actionable with an
-  explicit reason;
+- ready, intentionally inactive and archived Variants are excluded from employee work;
+- text/SKU search, exact barcode lookup and oldest-created-first ordering support daily triage;
+- each queue item includes the primary Image ID when one is available;
 - adding missing facts removes the Variant from the next response without stored readiness state;
 - tests cover ordering, filtering, pagination, authentication, automatic disappearance and query
   count.

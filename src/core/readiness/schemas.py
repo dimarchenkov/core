@@ -23,6 +23,7 @@ class ReadyForSaleAttentionItemRead(PydanticBaseModel):
     variant_title: str
     sku: str
     barcode: str
+    primary_image_id: UUIDv7 | None
     missing_requirements: list[ReadyForSaleRequirement]
 
 

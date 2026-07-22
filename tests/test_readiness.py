@@ -277,12 +277,14 @@ def test_attention_queue_contains_only_incomplete_variants_in_stable_order(
     """Ready Variants disappear while remaining work is ordered for employees."""
     add_primary_image(session, variant)
     add_retail_price(session, variant)
+    now = datetime.now(UTC)
     earlier = CatalogVariant(
         product_id=variant.product_id,
         title="Amber",
         sku="SKU-000002",
         barcode="2000000000022",
         attributes={},
+        created_at=now - timedelta(days=1),
     )
     later = CatalogVariant(
         product_id=variant.product_id,
@@ -290,8 +292,11 @@ def test_attention_queue_contains_only_incomplete_variants_in_stable_order(
         sku="SKU-000003",
         barcode="2000000000039",
         attributes={},
+        created_at=now,
     )
-    session.add_all([later, earlier])
+    session.add(earlier)
+    session.commit()
+    session.add(later)
     session.commit()
 
     result = ReadyForSaleReadService(session).list_attention()
@@ -309,7 +314,7 @@ def test_attention_queue_supports_reason_filter_and_pagination(
     variant: CatalogVariant,
 ) -> None:
     """Clients can request one actionable reason without losing total metadata."""
-    add_primary_image(session, variant)
+    image = add_primary_image(session, variant)
     second = CatalogVariant(
         product_id=variant.product_id,
         title="Green",
@@ -330,6 +335,39 @@ def test_attention_queue_supports_reason_filter_and_pagination(
     assert result.limit == 1
     assert result.offset == 0
     assert [item.variant_id for item in result.items] == [second.id]
+
+    price_work = ReadyForSaleReadService(session).list_attention(
+        requirement=ReadyForSaleRequirement.MISSING_RETAIL_PRICE,
+    )
+    existing = next(item for item in price_work.items if item.variant_id == variant.id)
+    assert existing.primary_image_id == image.id
+
+
+def test_attention_queue_searches_text_and_exact_barcode(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """One input supports human text lookup and scanner-exact barcode lookup."""
+    service = ReadyForSaleReadService(session)
+
+    by_text = service.list_attention(search="blue")
+    by_barcode = service.list_attention(search=variant.barcode)
+    no_partial_barcode = service.list_attention(search=variant.barcode[:6])
+
+    assert [item.variant_id for item in by_text.items] == [variant.id]
+    assert [item.variant_id for item in by_barcode.items] == [variant.id]
+    assert no_partial_barcode.total == 0
+
+
+def test_attention_queue_excludes_intentionally_inactive_variant(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """Inactive catalog positions do not create employee preparation work."""
+    variant.is_active = False
+    session.commit()
+
+    assert ReadyForSaleReadService(session).list_attention().total == 0
 
 
 def test_attention_queue_recomputes_and_removes_fixed_variant(
@@ -380,7 +418,9 @@ def test_attention_queue_api_is_authenticated_and_filterable(
     user: User,
 ) -> None:
     """The first-party UI receives a protected paginated attention projection."""
-    path = "/api/readiness/attention?requirement=missing_primary_image&limit=10&offset=0"
+    path = (
+        "/api/readiness/attention?requirement=missing_primary_image&search=Blue&limit=10&offset=0"
+    )
 
     assert client.get(path).status_code == 401
 
@@ -396,6 +436,7 @@ def test_attention_queue_api_is_authenticated_and_filterable(
                 "variant_title": "Blue",
                 "sku": "SKU-000001",
                 "barcode": "2000000000015",
+                "primary_image_id": None,
                 "missing_requirements": [
                     "missing_primary_image",
                     "missing_retail_price",

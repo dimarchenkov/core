@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import exists, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from core.catalog.models import CatalogProduct, CatalogVariant
@@ -30,23 +30,27 @@ class ReadyForSaleReadService:
         self,
         *,
         requirement: ReadyForSaleRequirement | None = None,
+        search: str | None = None,
         limit: int = 50,
         offset: int = 0,
         at: datetime | None = None,
     ) -> ReadyForSaleAttentionPage:
         """Return incomplete Variants in stable order with optional reason filtering."""
         checked_at = at or datetime.now(UTC)
-        image_exists = (
-            exists()
+        primary_image = (
+            select(Image.id)
+            .join(ImageLink, ImageLink.image_id == Image.id)
             .where(
-                ImageLink.image_id == Image.id,
                 ImageLink.entity_type == ImageLinkEntityType.CATALOG_VARIANT,
                 ImageLink.entity_id == CatalogVariant.id,
                 ImageLink.role == ImageLinkRole.PRIMARY,
                 ImageLink.deleted_at.is_(None),
                 Image.deleted_at.is_(None),
             )
+            .order_by(ImageLink.created_at, ImageLink.id)
+            .limit(1)
             .correlate(CatalogVariant)
+            .scalar_subquery()
         )
         current_price = (
             select(Price)
@@ -75,25 +79,39 @@ class ReadyForSaleReadService:
                 CatalogVariant.sku,
                 CatalogVariant.barcode,
                 CatalogVariant.is_active,
-                image_exists.label("has_primary_image"),
+                primary_image.label("primary_image_id"),
                 current_amount.label("retail_amount"),
                 current_currency.label("retail_currency"),
             )
             .join(CatalogProduct, CatalogProduct.id == CatalogVariant.product_id)
-            .where(CatalogVariant.deleted_at.is_(None))
+            .where(
+                CatalogVariant.deleted_at.is_(None),
+                CatalogVariant.is_active.is_(True),
+            )
             .order_by(
-                CatalogProduct.title,
-                CatalogVariant.title,
+                CatalogVariant.created_at,
                 CatalogVariant.id,
             )
         )
+        if search is not None:
+            normalized_search = search.strip()
+            escaped_search = self._escape_like(normalized_search)
+            contains_search = f"%{escaped_search}%"
+            statement = statement.where(
+                or_(
+                    CatalogVariant.barcode == normalized_search,
+                    CatalogVariant.sku.ilike(contains_search, escape="\\"),
+                    CatalogVariant.title.ilike(contains_search, escape="\\"),
+                    CatalogProduct.title.ilike(contains_search, escape="\\"),
+                )
+            )
 
         items: list[ReadyForSaleAttentionItemRead] = []
         for row in self._session.execute(statement):
             missing = derive_ready_for_sale_requirements(
                 ReadyForSaleFacts(
                     is_active=row.is_active,
-                    has_primary_image=row.has_primary_image,
+                    has_primary_image=row.primary_image_id is not None,
                     sku=row.sku,
                     barcode=row.barcode,
                     retail_amount=(
@@ -112,6 +130,7 @@ class ReadyForSaleReadService:
                     variant_title=row.variant_title,
                     sku=row.sku,
                     barcode=row.barcode,
+                    primary_image_id=row.primary_image_id,
                     missing_requirements=missing,
                 )
             )
@@ -123,3 +142,8 @@ class ReadyForSaleReadService:
             limit=limit,
             offset=offset,
         )
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        """Treat employee search text literally instead of as SQL wildcard syntax."""
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
