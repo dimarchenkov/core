@@ -38,3 +38,13 @@ def test_openapi_schema_is_public() -> None:
 
     assert response.status_code == 200
     assert response.json()["info"]["title"] == "Core"
+
+
+def test_legacy_intake_openapi_operation_is_deprecated() -> None:
+    """Swagger directs new clients to the resumable IntakeSession workflow."""
+    client = _build_client()
+
+    operation = client.get("/openapi.json").json()["paths"]["/api/intake"]["post"]
+
+    assert operation["deprecated"] is True
+    assert "/api/intake/sessions" in operation["description"]

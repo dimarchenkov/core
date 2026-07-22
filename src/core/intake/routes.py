@@ -86,13 +86,24 @@ def get_complete_intake_workflow(
     return CompleteIntakeWorkflow(session)
 
 
-@router.post("", response_model=IntakeRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=IntakeRead,
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+    summary="Legacy one-shot intake",
+)
 def create_intake(
     data: IntakeCreate,
     service: Annotated[IntakeService, Depends(get_intake_service)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeRead:
-    """Create a product, variant, SKU, and primary image link in one transaction."""
+    """Deprecated compatibility API.
+
+    Use `POST /api/intake/sessions` and the IntakeSession item/completion commands instead.
+    The session workflow is resumable and creates the Receipt and inventory movements that this
+    one-shot endpoint intentionally does not create.
+    """
     try:
         return service.create_intake(data, actor_id=_actor_id(current_user))
     except CatalogProductCategoryError as exc:

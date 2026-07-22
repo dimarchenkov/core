@@ -141,6 +141,17 @@ The first API should support:
 
 All commands are authenticated and attributed. The API does not depend on React, SQLAdmin or another client.
 
+### Legacy compatibility API
+
+`POST /api/intake` is deprecated. It creates Product, Variant, SKU and primary ImageLink records,
+but does not create an IntakeSession, Receipt or inventory movements. New clients must start with
+`POST /api/intake/sessions` and use the session item and completion commands documented above.
+
+The legacy endpoint remains operational for compatibility. It may be removed only after the
+first-party phone workflow uses IntakeSession exclusively, production usage has been checked and
+at least one release note has announced the removal. Repository search found no client or script
+consumer; existing calls are compatibility and authorization tests.
+
 ### Implemented workflow API
 
 The first implementation slice provides persistent owned sessions, progressive item editing,

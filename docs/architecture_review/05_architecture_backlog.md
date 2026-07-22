@@ -23,7 +23,7 @@ Priority meanings:
 | Transaction ownership | Complete Intake and direct context commands have explicit owners; AB-003 is complete |
 | God services | None proven; `IntakeDraftService` has mixed command/read/infrastructure roles and is the first split candidate |
 | SQLAlchemy Session leakage | Request/job-scoped ORM reliance is widespread but acceptable; lifetime and lazy-loading policy are undocumented |
-| Legacy bypass | `POST /api/intake` creates catalog data outside the new IntakeSession/Receipt workflow |
+| Legacy bypass | `POST /api/intake` is deprecated but remains operational until usage and removal-window checks pass |
 
 ## Dependency order
 
@@ -256,6 +256,7 @@ module itself.
 
 - **Priority:** P1
 - **Engineering name:** `retire-legacy-intake`
+- **Status:** Deprecation phase completed on 2026-07-22; removal is intentionally deferred
 - **Estimate:** S
 - **Dependencies:** Confirm phone client uses IntakeSession API; AB-002 preferred
 
@@ -284,6 +285,17 @@ the first-party phone workflow uses session completion.
 ### Risks
 
 Unknown manual integrations may break. Keep migration instructions concise.
+
+### Progress
+
+- [x] Mark `POST /api/intake` deprecated in OpenAPI without changing its behavior.
+- [x] Point API consumers to the resumable IntakeSession item and completion commands.
+- [x] Replace the legacy endpoint in the primary architecture example.
+- [x] Search repository clients and scripts; only compatibility/authentication tests call it.
+- [x] Document the minimum removal window and required usage confirmation.
+- [ ] Check production access logs or known external clients before removal.
+- [ ] Announce the concrete removal release after the first-party phone workflow is active.
+- [ ] Remove the route, `IntakeService`, schemas and compatibility tests after that window.
 
 ---
 

@@ -139,7 +139,7 @@ PostgreSQL
 ```text
 POST /api/products
 GET /api/products
-POST /api/intake
+POST /api/intake/sessions
 POST /api/publications/aqsi
 ```
 
