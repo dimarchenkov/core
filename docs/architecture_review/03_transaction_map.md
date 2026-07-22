@@ -24,7 +24,8 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `ReceiptPostingService` | Yes | `apply_posting` plus nested inventory flushes | `post_receipt` once | `post_receipt` once; `apply_posting` never | `InventoryService` | Direct command owns; caller owns explicit participant operation |
 | `ReceiptCancellationService` | Yes | nested reversal flushes | once | once on exception | `InventoryService` | Itself |
 | `IntakeService` (legacy) | Yes | nested service flushes | once | once on exception | transaction-neutral Catalog + ImageLink services | Itself |
-| `IntakeDraftService` | Yes | nested image upload | each command | add-new outer rollback only | transaction-neutral `ImageService` | Itself; Media compensates only its filesystem write |
+| `IntakeDraftWorkflow` | Yes | nested image upload | each command | add-new outer rollback only | transaction-neutral `ImageService`; `IntakeDraftReadService` after successful commands | Itself; Media compensates only its filesystem write |
+| `IntakeDraftReadService` | Read transaction | No | No | No | pure completeness policy | None; read-only |
 | `CompleteIntakeWorkflow` | Yes; row lock | own final flush + explicit staged domain operations | once; also commit on idempotent retry to release lock | once on exception | Catalog, ImageLink, Receipt, Posting, Readiness | Sole owner of Complete Intake |
 | `ReadyForSaleService` | Read transaction | No | No | No | No | None; read-only |
 | `VariantLabelService` | Read transaction | No | No | No | Readiness + renderer | None; read-only |
@@ -100,7 +101,7 @@ Direct repository orchestration is not a fourth acceptable solution: it would re
 
 - `CompleteIntakeWorkflow` performs the only rollback for Complete Intake.
 - Direct `ReceiptPostingService.post_receipt` owns one rollback; nested `apply_posting` owns none.
-- `IntakeDraftService.add_new_item` owns SQL rollback while nested Media compensates only its
+- `IntakeDraftWorkflow.add_new_item` owns SQL rollback while nested Media compensates only its
   filesystem write.
 - Characterization tests cover all three boundaries.
 

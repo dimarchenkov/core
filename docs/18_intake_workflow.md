@@ -167,6 +167,10 @@ Completion is idempotent: retrying an already completed session returns its orig
 Variant mappings. A failure at any point rolls back catalog, Receipt and ledger changes while the
 persisted draft, its source photos and entered data remain available for correction and retry.
 
+Draft mutations are owned by `IntakeDraftWorkflow`. Session list/detail responses and the same
+derived completeness returned after commands are built by `IntakeDraftReadService`; a shared pure
+policy keeps the requirements computed rather than persisted as workflow state.
+
 ## Minimal mobile interface
 
 The first-party interface needs only these workflow screens:

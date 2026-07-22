@@ -21,7 +21,7 @@ Priority meanings:
 | Readiness | Fully derived; no persisted ready flag or missing-requirement state |
 | Repository business logic | No material invariant bypass; sequence reservation/fallback parsing is a mild persistence concern only |
 | Transaction ownership | Complete Intake and direct context commands have explicit owners; AB-003 is complete |
-| God services | None proven; `IntakeDraftService` has mixed command/read/infrastructure roles and is the first split candidate |
+| God services | None proven; Intake draft commands and projections are separated without fragmenting individual commands |
 | SQLAlchemy Session leakage | Request/job-scoped ORM reliance is widespread but acceptable; lifetime and lazy-loading policy are undocumented |
 | Legacy bypass | `POST /api/intake` is deprecated but remains operational until usage and removal-window checks pass |
 
@@ -303,6 +303,7 @@ Unknown manual integrations may break. Keep migration instructions concise.
 
 - **Priority:** P1
 - **Engineering name:** `intake-command-read-separation`
+- **Status:** Completed on 2026-07-22
 - **Estimate:** M
 - **Dependencies:** AB-002
 
@@ -332,6 +333,16 @@ need it. Do not split every command into a class.
 ### Risks
 
 Premature extraction can duplicate repository queries. Measure N+1 behavior and keep selectinload.
+
+### Completion evidence
+
+- `IntakeDraftWorkflow` owns create, update, add and abandon commands and their transactions;
+- `IntakeDraftReadService` exclusively owns list/detail projections and derived requirements;
+- HTTP read routes no longer construct local image-storage infrastructure;
+- item and session completeness live in a pure policy with direct unit tests;
+- referenced Catalog and Media availability is resolved in bounded bulk queries after Intake
+  items are loaded with `selectinload`;
+- API schemas, ownership behavior and resumable workflow responses remain unchanged.
 
 ---
 
@@ -587,10 +598,9 @@ item without a trigger.
 
 ## Recommended next sequence
 
-1. AB-005 — deprecate the legacy one-shot Intake API before building the phone client.
-2. AB-006 — separate Intake commands from draft projections as UI read needs grow.
-3. AB-008 — add the derived Ready for Sale queue for the first-party workflow interface.
-4. AB-009 — add meaningful Activity Events inside the established transaction boundaries.
-5. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
-6. AB-007 — harden AQSI checkpoint recovery as the next integration reliability increment.
-7. P2/P3 tasks only when their stated trigger occurs.
+1. AB-008 — add the derived Ready for Sale queue for the first-party workflow interface.
+2. AB-009 — add meaningful Activity Events inside the established transaction boundaries.
+3. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
+4. AB-007 — harden AQSI checkpoint recovery as the next integration reliability increment.
+5. Complete AB-005 removal only after its documented client and release-window checks pass.
+6. P2/P3 tasks only when their stated trigger occurs.

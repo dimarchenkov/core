@@ -27,7 +27,8 @@ automatically require a new class.
 | `ReceiptItemService` | Receipt | Domain Service | Guard item changes through Receipt draft state | `ReceiptService`, item/variant repositories | Transaction-neutral; route or workflow owns finalization |
 | `ImageLinkService` | Media | Domain Service | Image-link validity, target validity and primary-image uniqueness | media and catalog repositories | Transaction-neutral; cross-context target validation remains deliberate |
 | `IntakeService` | Intake | Application / Workflow Service | Legacy atomic Product + Variant + primary-image command | Catalog and Media services | Legacy workflow overlaps `CompleteIntakeWorkflow`; should be retired deliberately |
-| `IntakeDraftService` | Intake | Application / Workflow Service | Owned draft commands, resume, completeness and abandonment | Intake, Catalog, Supplier, Media repositories/services | **Mixed role:** commands + read projection + filesystem compensation; largest SRP debt |
+| `IntakeDraftWorkflow` | Intake | Application / Workflow Service | Owned draft creation, mutation and abandonment commands | Intake, Catalog, Supplier and Media services; `IntakeDraftReadService` for command results | Owns command transactions and source-file compensation; no read/list responsibility |
+| `IntakeDraftReadService` | Intake | Read Service | Owned session list/detail projections and derived completeness | Intake repository, bounded Catalog/Media availability queries, pure completeness policy | None; referenced facts are loaded in bounded bulk queries rather than per-item reads |
 | `CompleteIntakeWorkflow` | Intake | Application / Workflow Service | Idempotent atomic materialization into Catalog, Receipt, Inventory and Readiness | nine services/repositories across contexts | Cohesive workflow and sole transaction owner for Complete Intake |
 | `ReceiptPostingService` | Receipt | Application / Workflow Service | Draft → posted and ledger movements | Receipt/Supplier/Catalog repositories, `InventoryService` | `post_receipt` owns a direct command; `apply_posting` participates without finalizing |
 | `ReceiptCancellationService` | Receipt | Application / Workflow Service | Posted → cancelled via exact reversal movements | Receipt/Movement repositories, `InventoryService` | Explicit transaction ownership is local and clear today |
@@ -48,7 +49,8 @@ automatically require a new class.
 ```mermaid
 flowchart TD
     HTTP[HTTP / CLI / Worker]
-    HTTP --> Draft[IntakeDraftService]
+    HTTP --> Draft[IntakeDraftWorkflow]
+    HTTP --> DraftRead[IntakeDraftReadService]
     HTTP --> Complete[CompleteIntakeWorkflow]
     HTTP --> Legacy[IntakeService legacy]
     HTTP --> Post[ReceiptPostingService]
@@ -57,6 +59,7 @@ flowchart TD
     Worker[Worker] --> Process[AqsiPublicationProcessor]
 
     Complete --> Catalog[Catalog domain services]
+    Draft --> DraftRead
     Complete --> Media[Media domain/infrastructure]
     Complete --> Receipt[Receipt domain services]
     Complete --> Post

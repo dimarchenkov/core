@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -12,11 +11,10 @@ from core.catalog.repository import (
 )
 from core.intake.enums import (
     IntakeItemKind,
-    IntakeItemRequirement,
-    IntakeSessionRequirement,
     IntakeSessionStatus,
 )
 from core.intake.models import IntakeItemDraft, IntakeSession
+from core.intake.read_service import IntakeDraftReadService, IntakeSessionNotFoundError
 from core.intake.repository import IntakeItemDraftRepository, IntakeSessionRepository
 from core.intake.schemas import (
     ExistingIntakeItemCreate,
@@ -26,15 +24,10 @@ from core.intake.schemas import (
     IntakeSessionUpdate,
 )
 from core.media.models import Image
-from core.media.repository import ImageRepository
 from core.media.service import ImageService
 from core.shared.db import UUIDv7
 from core.shared.money import quantize_money
 from core.supplier.repository import SupplierRepository
-
-
-class IntakeSessionNotFoundError(Exception):
-    """Raised when a session is missing or does not belong to the actor."""
 
 
 class IntakeSessionNotDraftError(Exception):
@@ -69,8 +62,8 @@ class IntakeItemFieldError(Exception):
     """Raised when fields do not belong to an item's identification path."""
 
 
-class IntakeDraftService:
-    """Business operations for resumable employee-owned intake drafts."""
+class IntakeDraftWorkflow:
+    """Business commands for resumable employee-owned intake drafts."""
 
     def __init__(self, session: Session, image_service: ImageService) -> None:
         """Create a service from existing persistence and media capabilities."""
@@ -82,7 +75,7 @@ class IntakeDraftService:
         self._products = CatalogProductRepository(session)
         self._categories = CategoryRepository(session)
         self._suppliers = SupplierRepository(session)
-        self._images = ImageRepository(session)
+        self._reads = IntakeDraftReadService(session)
 
     def create_session(self, *, actor_id: UUIDv7) -> IntakeSessionRead:
         """Start an empty resumable workspace without requiring a Supplier."""
@@ -93,23 +86,7 @@ class IntakeDraftService:
         )
         self._sessions.add(intake_session)
         self._session.commit()
-        return self.get_session(intake_session.id, actor_id=actor_id)
-
-    def list_sessions(
-        self,
-        *,
-        actor_id: UUIDv7,
-        status: IntakeSessionStatus | None = None,
-    ) -> Sequence[IntakeSessionRead]:
-        """Return resumable work owned by the current employee."""
-        return [
-            self._build_session_read(intake_session)
-            for intake_session in self._sessions.list_owned(actor_id, status=status)
-        ]
-
-    def get_session(self, session_id: UUIDv7, *, actor_id: UUIDv7) -> IntakeSessionRead:
-        """Return one owned session with derived missing requirements."""
-        return self._build_session_read(self._get_owned_session(session_id, actor_id))
+        return self._reads.get_session(intake_session.id, actor_id=actor_id)
 
     def update_session(
         self,
@@ -126,7 +103,7 @@ class IntakeDraftService:
             intake_session.supplier_id = data.supplier_id
         intake_session.updated_by_id = actor_id
         self._session.commit()
-        return self.get_session(session_id, actor_id=actor_id)
+        return self._reads.get_session(session_id, actor_id=actor_id)
 
     def add_existing_item(
         self,
@@ -157,7 +134,7 @@ class IntakeDraftService:
         self._items.add(item)
         self._session.commit()
         self._session.refresh(item)
-        return self._build_item_read(item)
+        return self._reads.build_item_read(item)
 
     def add_new_item(
         self,
@@ -196,7 +173,7 @@ class IntakeDraftService:
             self._session.commit()
             committed = True
             self._session.refresh(item)
-            return self._build_item_read(item)
+            return self._reads.build_item_read(item)
         except Exception:
             self._session.rollback()
             if image is not None and not committed:
@@ -225,7 +202,7 @@ class IntakeDraftService:
         item.updated_by_id = actor_id
         self._session.commit()
         self._session.refresh(item)
-        return self._build_item_read(item)
+        return self._reads.build_item_read(item)
 
     def abandon_item(
         self,
@@ -243,7 +220,7 @@ class IntakeDraftService:
         item.updated_by_id = actor_id
         self._session.commit()
         self._session.refresh(item)
-        return self._build_item_read(item)
+        return self._reads.build_item_read(item)
 
     def abandon_session(
         self,
@@ -259,7 +236,7 @@ class IntakeDraftService:
         intake_session.abandonment_reason = reason
         intake_session.updated_by_id = actor_id
         self._session.commit()
-        return self.get_session(session_id, actor_id=actor_id)
+        return self._reads.get_session(session_id, actor_id=actor_id)
 
     def _get_owned_session(self, session_id: UUIDv7, actor_id: UUIDv7) -> IntakeSession:
         """Hide sessions belonging to other employees behind normal not-found semantics."""
@@ -325,59 +302,3 @@ class IntakeDraftService:
             }
         if changes.keys() - allowed:
             raise IntakeItemFieldError
-
-    def _build_item_read(self, item: IntakeItemDraft) -> IntakeItemDraftRead:
-        """Attach deterministic completeness information to a persisted item."""
-        return IntakeItemDraftRead.model_validate(item).model_copy(
-            update={"missing_requirements": self._item_requirements(item)}
-        )
-
-    def _build_session_read(self, intake_session: IntakeSession) -> IntakeSessionRead:
-        """Attach item and session completeness without persisting duplicate statuses."""
-        items = [self._build_item_read(item) for item in intake_session.items]
-        active_items = [item for item in items if item.abandoned_at is None]
-        missing: list[IntakeSessionRequirement] = []
-        if intake_session.supplier_id is None:
-            missing.append(IntakeSessionRequirement.MISSING_SUPPLIER)
-        if not active_items:
-            missing.append(IntakeSessionRequirement.MISSING_ITEMS)
-        elif any(item.missing_requirements for item in active_items):
-            missing.append(IntakeSessionRequirement.INCOMPLETE_ITEMS)
-        return IntakeSessionRead.model_validate(intake_session).model_copy(
-            update={"items": items, "missing_requirements": missing}
-        )
-
-    def _item_requirements(self, item: IntakeItemDraft) -> list[IntakeItemRequirement]:
-        """Return stable, kind-specific missing requirements for one draft."""
-        missing: list[IntakeItemRequirement] = []
-        if item.kind is IntakeItemKind.EXISTING_VARIANT:
-            variant = self._variants.get(item.variant_id) if item.variant_id is not None else None
-            if variant is None or not variant.is_active:
-                missing.append(IntakeItemRequirement.MISSING_VARIANT)
-        else:
-            if item.image_id is None or self._images.get(item.image_id) is None:
-                missing.append(IntakeItemRequirement.MISSING_IMAGE)
-
-        if item.kind is IntakeItemKind.NEW_VARIANT:
-            product = self._products.get(item.product_id) if item.product_id is not None else None
-            if product is None or not product.is_active:
-                missing.append(IntakeItemRequirement.MISSING_PRODUCT)
-        elif item.kind is IntakeItemKind.NEW_PRODUCT:
-            category = (
-                self._categories.get(item.category_id) if item.category_id is not None else None
-            )
-            if category is None or not category.is_active:
-                missing.append(IntakeItemRequirement.MISSING_CATEGORY)
-            if not (item.product_title or "").strip():
-                missing.append(IntakeItemRequirement.MISSING_PRODUCT_TITLE)
-
-        if (
-            item.kind in {IntakeItemKind.NEW_PRODUCT, IntakeItemKind.NEW_VARIANT}
-            and not (item.variant_title or "").strip()
-        ):
-            missing.append(IntakeItemRequirement.MISSING_VARIANT_TITLE)
-        if item.quantity is None:
-            missing.append(IntakeItemRequirement.MISSING_QUANTITY)
-        if item.purchase_price is None:
-            missing.append(IntakeItemRequirement.MISSING_PURCHASE_PRICE)
-        return missing

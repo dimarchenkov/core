@@ -154,7 +154,7 @@
 
 ### Verification
 
-- ✅ 199 automated tests
+- ✅ 203 automated tests
 - ✅ Docker rebuild and migration smoke test
 - ✅ Real AQSI publication of one dedicated Variant
 - ✅ Cash-register lookup by generated barcode

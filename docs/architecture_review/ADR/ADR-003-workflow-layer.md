@@ -30,7 +30,7 @@ Use a small, explicit Application/Workflow layer made of use-case-specific class
 | Current component | Effective role now | Target name when touched | Action |
 | --- | --- | --- | --- |
 | `CompleteIntakeWorkflow` | Cross-context workflow | Implemented | Keep cohesive; it owns the Complete Intake transaction |
-| `IntakeDraftService` | Workflow commands + read projection | `IntakeDraftWorkflow` plus `IntakeDraftReadService` | Separate by responsibility, not by method count |
+| `IntakeDraftWorkflow` + `IntakeDraftReadService` | Workflow commands and read projection are separated | Implemented | Keep one command workflow and one projection service; completeness remains a shared pure policy |
 | `IntakeService` | Legacy one-shot workflow | None | Deprecate after new Intake UI/API replacement is confirmed |
 | `ReceiptPostingService` | Receipt + Inventory workflow | `PostReceiptWorkflow` | Move transaction ownership here when directly invoked; participate under Intake through one boundary design |
 | `ReceiptCancellationService` | Receipt + reversal workflow | `CancelReceiptWorkflow` | Naming change may wait; behavior is already cohesive |

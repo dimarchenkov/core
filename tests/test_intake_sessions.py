@@ -17,9 +17,9 @@ from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
 from core.intake.completion import CompleteIntakeWorkflow
-from core.intake.draft_service import IntakeDraftService
+from core.intake.draft_service import IntakeDraftWorkflow
 from core.intake.models import IntakeItemDraft, IntakeSession
-from core.intake.routes import get_intake_draft_service
+from core.intake.routes import get_intake_draft_workflow
 from core.inventory.models import StockMovement
 from core.main import create_app
 from core.media.enums import ImageLinkRole
@@ -97,7 +97,7 @@ def client(
 
     app.dependency_overrides[get_session] = override_get_session
     app.dependency_overrides[get_current_user] = lambda: first
-    app.dependency_overrides[get_intake_draft_service] = lambda: IntakeDraftService(
+    app.dependency_overrides[get_intake_draft_workflow] = lambda: IntakeDraftWorkflow(
         session,
         ImageService(session, storage=LocalImageStorage(storage_root)),
     )
@@ -277,7 +277,7 @@ def test_new_item_command_owns_single_rollback_when_image_metadata_fails(
     """The Intake command, not nested Media, owns rollback and file compensation."""
     test_client, first, _, storage_root = client
     intake_session = _create_session(test_client)
-    service = IntakeDraftService(
+    service = IntakeDraftWorkflow(
         session,
         ImageService(session, storage=LocalImageStorage(storage_root)),
     )

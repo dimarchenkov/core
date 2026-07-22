@@ -19,17 +19,17 @@ from core.intake.completion import (
 )
 from core.intake.draft_service import (
     IntakeCategoryError,
-    IntakeDraftService,
+    IntakeDraftWorkflow,
     IntakeItemFieldError,
     IntakeItemNotDraftError,
     IntakeItemNotFoundError,
     IntakeProductError,
     IntakeSessionNotDraftError,
-    IntakeSessionNotFoundError,
     IntakeSupplierError,
     IntakeVariantError,
 )
 from core.intake.enums import IntakeSessionStatus
+from core.intake.read_service import IntakeDraftReadService, IntakeSessionNotFoundError
 from core.intake.schemas import (
     ExistingIntakeItemCreate,
     IntakeAbandon,
@@ -70,13 +70,20 @@ def get_intake_service(session: Annotated[Session, Depends(get_session)]) -> Int
     return IntakeService(session)
 
 
-def get_intake_draft_service(
+def get_intake_draft_workflow(
     session: Annotated[Session, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> IntakeDraftService:
-    """Provide resumable intake services with local source-image storage."""
+) -> IntakeDraftWorkflow:
+    """Provide resumable Intake commands with local source-image storage."""
     image_service = ImageService(session, storage=LocalImageStorage(settings.storage_root))
-    return IntakeDraftService(session, image_service)
+    return IntakeDraftWorkflow(session, image_service)
+
+
+def get_intake_draft_read_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> IntakeDraftReadService:
+    """Provide owned IntakeSession projections without storage dependencies."""
+    return IntakeDraftReadService(session)
 
 
 def get_complete_intake_workflow(
@@ -130,7 +137,7 @@ def create_intake(
 
 @router.post("/sessions", response_model=IntakeSessionRead, status_code=status.HTTP_201_CREATED)
 def create_intake_session(
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeSessionRead:
     """Start an employee-owned intake workspace without requiring a Supplier."""
@@ -139,7 +146,7 @@ def create_intake_session(
 
 @router.get("/sessions", response_model=list[IntakeSessionRead])
 def list_intake_sessions(
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftReadService, Depends(get_intake_draft_read_service)],
     current_user: Annotated[User, Depends(get_current_user)],
     session_status: IntakeSessionStatus | None = None,
 ) -> Sequence[IntakeSessionRead]:
@@ -150,7 +157,7 @@ def list_intake_sessions(
 @router.get("/sessions/{session_id}", response_model=IntakeSessionRead)
 def get_intake_session(
     session_id: UUIDv7,
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftReadService, Depends(get_intake_draft_read_service)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeSessionRead:
     """Return one owned intake workspace with derived missing requirements."""
@@ -164,7 +171,7 @@ def get_intake_session(
 def update_intake_session(
     session_id: UUIDv7,
     data: IntakeSessionUpdate,
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeSessionRead:
     """Set late session fields such as Supplier without changing inventory."""
@@ -186,7 +193,7 @@ def update_intake_session(
 def add_existing_intake_item(
     session_id: UUIDv7,
     data: ExistingIntakeItemCreate,
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeItemDraftRead:
     """Add a repeat delivery by Variant ID or exact scanner barcode."""
@@ -208,7 +215,7 @@ def add_existing_intake_item(
 async def add_new_intake_item(
     session_id: UUIDv7,
     file: Annotated[UploadFile, File(...)],
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
     product_id: Annotated[UUIDv7 | None, Form()] = None,
 ) -> IntakeItemDraftRead:
@@ -242,7 +249,7 @@ def update_intake_item(
     session_id: UUIDv7,
     item_id: UUIDv7,
     data: IntakeItemDraftUpdate,
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeItemDraftRead:
     """Persist progressive item form data without creating catalog records."""
@@ -266,7 +273,7 @@ def abandon_intake_item(
     session_id: UUIDv7,
     item_id: UUIDv7,
     data: IntakeAbandon,
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeItemDraftRead:
     """Abandon one item explicitly without deleting its image or history."""
@@ -287,7 +294,7 @@ def abandon_intake_item(
 def abandon_intake_session(
     session_id: UUIDv7,
     data: IntakeAbandon,
-    service: Annotated[IntakeDraftService, Depends(get_intake_draft_service)],
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> IntakeSessionRead:
     """Abandon one owned session while retaining it for recovery and audit."""
