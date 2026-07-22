@@ -214,6 +214,34 @@ def test_upload_creates_image_metadata_and_preserves_source(
     assert commit_calls == 1
 
 
+def test_authenticated_source_delivery_preserves_image_content(
+    upload_client: TestClient,
+) -> None:
+    """The workflow client can render uploaded source bytes through the media API."""
+    content = image_bytes("JPEG")
+    uploaded = upload_client.post(
+        "/api/media/images/upload",
+        files={"file": ("camera.jpg", content, "image/jpeg")},
+    ).json()
+
+    response = upload_client.get(f"/api/media/images/{uploaded['id']}/source")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == content
+
+
+def test_source_delivery_returns_not_found_for_missing_file(
+    client: TestClient,
+) -> None:
+    """Metadata without available bytes does not leak an invalid filesystem response."""
+    image = client.post("/api/media/images", json=image_payload()).json()
+
+    response = client.get(f"/api/media/images/{image['id']}/source")
+
+    assert response.status_code == 404
+
+
 def test_upload_commit_failure_rolls_back_metadata_and_removes_source(
     upload_client: TestClient,
     session: Session,
@@ -382,6 +410,28 @@ def test_image_link_service_enforces_one_primary_link(
 
     assert replacement.image_id == second_image.id
     assert ImageService(session).get_image(first_image.id).id == first_image.id
+
+
+def test_primary_image_lookup_supports_visual_item_confirmation(
+    client: TestClient,
+    product: CatalogProduct,
+) -> None:
+    """A client can resolve an entity's primary image without listing all media links."""
+    image = client.post("/api/media/images", json=image_payload()).json()
+    client.post(
+        "/api/media/image-links",
+        json={
+            "image_id": image["id"],
+            "entity_type": "catalog_product",
+            "entity_id": str(product.id),
+            "role": "primary",
+        },
+    )
+
+    response = client.get(f"/api/media/image-links/primary/catalog_product/{product.id}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == image["id"]
 
 
 def test_image_link_routes_require_active_entities_and_images(

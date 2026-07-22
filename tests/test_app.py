@@ -30,6 +30,22 @@ def test_swagger_ui_is_available() -> None:
     assert "Swagger UI" in response.text
 
 
+def test_phone_first_workflow_interface_is_available() -> None:
+    """Core delivers its first-party intake client without a separate frontend service."""
+    client = _build_client()
+
+    page = client.get("/app")
+    script = client.get("/app/assets/app.js")
+    styles = client.get("/app/assets/styles.css")
+
+    assert page.status_code == 200
+    assert "Core — Приёмка" in page.text
+    assert script.status_code == 200
+    assert "/api/intake/sessions" in script.text
+    assert styles.status_code == 200
+    assert "viewport-fit=cover" in page.text
+
+
 def test_openapi_schema_is_public() -> None:
     """OpenAPI remains available without authentication for Swagger clients."""
     client = _build_client()

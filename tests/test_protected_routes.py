@@ -109,6 +109,7 @@ def test_business_routes_reject_anonymous_requests(
 
     assert client.get("/api/catalog/categories").status_code == 401
     assert client.get("/api/media/images").status_code == 401
+    assert client.get(f"/api/media/images/{image.id}/source").status_code == 401
     assert client.post("/api/intake", json=intake_payload).status_code == 401
 
 

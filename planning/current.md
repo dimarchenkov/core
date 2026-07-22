@@ -33,8 +33,8 @@ The first daily workflow starts with identification. A known Variant begins with
 
 ### First product outcome
 
-- [ ] Start new-item intake from the phone camera or photo library
-- [ ] Start repeat delivery by barcode scan or Variant search
+- [x] Start new-item intake from the phone camera or photo library
+- [x] Start repeat delivery by barcode scan, SKU or Variant search
 - [x] Prevent a new physical product from proceeding without a photo
 - [x] Select an existing Variant or create Product and Variant data
 - [x] Capture supplier, quantity and purchase price
@@ -67,11 +67,11 @@ The first daily workflow starts with identification. A known Variant begins with
 
 ### Implementation slice 3 — First-party workflow interface
 
-- [ ] Build the phone-first start/resume screen
-- [ ] Offer scan/search and photograph-new-item as the two primary actions
-- [ ] Show the existing primary photo after a successful barcode match
-- [ ] Guide the employee using the API's derived missing requirements
-- [ ] Show completion and Ready for Sale follow-up without exposing CRUD internals
+- [x] Build the phone-first start/resume screen
+- [x] Offer scan/search and photograph-new-item as the two primary actions
+- [x] Show the existing primary photo after a successful barcode match
+- [x] Guide the employee using the API's derived missing requirements
+- [x] Show completion and Ready for Sale follow-up without exposing CRUD internals
 
 ### Operational visibility
 
@@ -79,6 +79,12 @@ The first daily workflow starts with identification. A known Variant begins with
 - [x] Add an employee-facing Ready for Sale attention queue read API
 - [x] Record workflow start, completion, cancellation and duration
 - [x] Keep audit history separate from operational metrics
+
+### Verification
+
+- [x] Run the complete automated suite: 218 tests
+- [x] Verify authenticated source-image delivery and first-party client assets
+- [ ] Complete one controlled phone smoke test through Docker and Angie
 
 ### Sprint boundary
 

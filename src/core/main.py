@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from core.activity.routes import router as activity_router
 from core.admin import setup_admin
@@ -17,6 +18,8 @@ from core.pricing.routes import router as pricing_router
 from core.readiness.routes import router as readiness_router
 from core.receipt.routes import router as receipt_router
 from core.supplier.routes import router as supplier_router
+from core.web.routes import router as web_router
+from core.web.routes import static_root as web_static_root
 
 
 def create_app() -> FastAPI:
@@ -44,6 +47,8 @@ def create_app() -> FastAPI:
     app.include_router(supplier_router)
     app.include_router(identity_router)
     app.include_router(activity_router)
+    app.include_router(web_router)
+    app.mount("/app/assets", StaticFiles(directory=web_static_root), name="workflow-assets")
 
     @app.get("/health", tags=["system"])
     def health() -> dict[str, str]:

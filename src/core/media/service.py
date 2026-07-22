@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from hashlib import sha256
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy.orm import Session
 
@@ -40,8 +40,12 @@ class ImageFileTooLargeError(Exception):
     """Raised when uploaded source bytes exceed the local upload limit."""
 
 
+class ImageSourceNotFoundError(Exception):
+    """Raised when image metadata exists but its source file is unavailable."""
+
+
 class ImageService:
-    """Business operations for image metadata without physical file handling."""
+    """Image metadata operations with optional validated local source storage."""
 
     max_source_size_bytes = 15 * 1024 * 1024
 
@@ -67,6 +71,16 @@ class ImageService:
         if image is None:
             raise ImageNotFoundError
         return image
+
+    def get_source_path(self, image_id: UUIDv7) -> tuple[Image, Path]:
+        """Resolve a stored source image for authenticated delivery."""
+        image = self.get_image(image_id)
+        if self._storage is None:
+            raise RuntimeError("Local image storage is not configured.")
+        path = self._storage.path_for_key(image.source_key)
+        if not path.is_file():
+            raise ImageSourceNotFoundError
+        return image, path
 
     def create_image(self, data: ImageCreate, *, actor_id: UUIDv7 | None = None) -> Image:
         """Stage immutable-source metadata for the command owner to commit."""
@@ -162,6 +176,20 @@ class ImageLinkService:
         if link is None:
             raise ImageLinkNotFoundError
         return link
+
+    def get_primary_image(
+        self,
+        entity_type: ImageLinkEntityType,
+        entity_id: UUIDv7,
+    ) -> Image:
+        """Return the current primary image for one supported catalog entity."""
+        link = self._repository.get_primary_for_entity(entity_type, entity_id)
+        if link is None:
+            raise ImageNotFoundError
+        image = self._image_repository.get(link.image_id)
+        if image is None:
+            raise ImageNotFoundError
+        return image
 
     def create_link(
         self,

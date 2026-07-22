@@ -4,12 +4,14 @@ from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
+from core.media.enums import ImageLinkEntityType
 from core.media.inspection import UnsupportedImageError
 from core.media.models import Image, ImageLink
 from core.media.schemas import (
@@ -27,6 +29,7 @@ from core.media.service import (
     ImageLinkService,
     ImageNotFoundError,
     ImageService,
+    ImageSourceNotFoundError,
     ImageStorageKeyError,
 )
 from core.media.storage import LocalImageStorage
@@ -142,6 +145,27 @@ def get_image(
         ) from exc
 
 
+@image_router.get("/{image_id}/source", response_class=FileResponse)
+def get_image_source(
+    image_id: UUIDv7,
+    service: Annotated[ImageService, Depends(get_image_service)],
+) -> FileResponse:
+    """Return authenticated source bytes for an existing image."""
+    try:
+        image, path = service.get_source_path(image_id)
+    except (ImageNotFoundError, ImageSourceNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image source not found.",
+        ) from exc
+    return FileResponse(
+        path,
+        media_type=image.mime_type,
+        filename=image.original_filename,
+        content_disposition_type="inline",
+    )
+
+
 @image_router.delete("/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_image(
     image_id: UUIDv7,
@@ -221,6 +245,25 @@ def get_image_link(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Image link not found.",
+        ) from exc
+
+
+@image_link_router.get(
+    "/primary/{entity_type}/{entity_id}",
+    response_model=ImageRead,
+)
+def get_primary_image(
+    entity_type: ImageLinkEntityType,
+    entity_id: UUIDv7,
+    service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+) -> Image:
+    """Return primary image metadata for a catalog entity."""
+    try:
+        return service.get_primary_image(entity_type, entity_id)
+    except ImageNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Primary image not found.",
         ) from exc
 
 

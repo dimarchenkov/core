@@ -184,6 +184,29 @@ The first-party interface needs only these workflow screens:
 
 Catalog and Receipt cards remain reference and history views, not the employee's primary workplace.
 
+### Implemented first-party client
+
+Core serves the first workflow client at `/app`. It is a small dependency-free web client delivered
+by the same FastAPI application, so deployment does not require a Node build or a separate frontend
+container. This is an implementation choice for the first operational screen, not a constraint on
+future React, native or franchise-specific clients.
+
+The client supports:
+
+- local email/password login with a token kept only for the browser session;
+- starting and resuming employee-owned drafts;
+- scanner-friendly barcode input plus SKU and Variant selection;
+- camera or photo-library upload for a new Product;
+- visual confirmation using the existing Variant or Product primary image;
+- progressive item editing driven by derived missing requirements;
+- late Supplier selection;
+- atomic completion and immediate Ready for Sale result;
+- a short employee activity feed on the start screen.
+
+Source images are delivered through an authenticated Media endpoint. The client fetches the bytes
+with its bearer token and creates a temporary browser URL; storage paths are never exposed as public
+filesystem routes.
+
 ## Outside the first implementation
 
 - a general-purpose workflow or BPM engine;

@@ -20,7 +20,7 @@
 - [x] AQSI asynchronous product publication implementation
 - [x] Controlled live AQSI smoke test with one dedicated Variant
 - [ ] Runtime versioned AQSI fiscal profile and controlled bulk republishing
-- [ ] End-to-end photo-first intake workflow from phone
+- [x] End-to-end photo-first intake workflow from phone
 
 ## Deferred — Local Printing Infrastructure
 
@@ -31,11 +31,11 @@
 
 ## P2 — Workflow UX
 
-- [ ] Photo-first mobile Receive Goods workflow
+- [x] Photo-first mobile Receive Goods workflow
 - [x] Derived Ready for Sale employee attention API
 - [ ] Ready for Sale employee queue interface
 - [x] Employee activity feed API
-- [ ] First-party activity feed interface
+- [x] First-party activity feed interface
 - [ ] Employee workflow timing, errors and cancellation metrics
 - [ ] Reference/history cards separated from daily workflow screens
 
@@ -58,7 +58,8 @@
 
 - [ ] Stock balance read API
 - [ ] Media processing: master/WebP generation
-- [ ] Media delivery: source and master download
+- [x] Authenticated source-image delivery
+- [ ] Media delivery: generated master download
 - [ ] Brand support
 - [ ] CSV import from Tilda
 - [ ] Inventory counting and adjustments
@@ -81,7 +82,7 @@
 - [ ] Subscription deployment model
 - [ ] Franchise operations guide
 - [ ] Investor and partner materials
-- [ ] Optional first-party frontend
+- [x] Optional first-party intake frontend
 - [ ] Employee activity feed and operational analytics
 - [ ] Multi Warehouse
 
