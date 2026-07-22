@@ -20,7 +20,7 @@ Priority meanings:
 | Inventory mutation | One production path through `InventoryService`; protect it |
 | Readiness | Fully derived; no persisted ready flag or missing-requirement state |
 | Repository business logic | No material invariant bypass; sequence reservation/fallback parsing is a mild persistence concern only |
-| Transaction ownership | Complete Intake has one owner; conditional CRUD modes remain for AB-003 |
+| Transaction ownership | Complete Intake and direct context commands have explicit owners; AB-003 is complete |
 | God services | None proven; `IntakeDraftService` has mixed command/read/infrastructure roles and is the first split candidate |
 | SQLAlchemy Session leakage | Request/job-scoped ORM reliance is widespread but acceptable; lifetime and lazy-loading policy are undocumented |
 | Legacy bypass | `POST /api/intake` creates catalog data outside the new IntakeSession/Receipt workflow |
@@ -575,10 +575,10 @@ item without a trigger.
 
 ## Recommended next sequence
 
-1. AB-001 — transaction characterization.
-2. AB-002 — Intake transaction ownership.
-3. In parallel after the contract: AB-004 Inventory guard and AB-008 Readiness queue.
-4. AB-005 before the phone client is declared stable.
-5. AB-006 and AB-009 as the UI/operational visibility grows.
-6. AB-007 as the next AQSI reliability increment.
+1. AB-005 — deprecate the legacy one-shot Intake API before building the phone client.
+2. AB-006 — separate Intake commands from draft projections as UI read needs grow.
+3. AB-008 — add the derived Ready for Sale queue for the first-party workflow interface.
+4. AB-009 — add meaningful Activity Events inside the established transaction boundaries.
+5. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
+6. AB-007 — harden AQSI checkpoint recovery as the next integration reliability increment.
 7. P2/P3 tasks only when their stated trigger occurs.
