@@ -222,6 +222,7 @@ core/
 │       ├── publishing/
 │       ├── integrations/
 │       ├── users/
+│       ├── activity/
 │       ├── audit/
 │       ├── shared/
 │       │

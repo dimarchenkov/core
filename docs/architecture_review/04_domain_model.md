@@ -13,7 +13,8 @@ The labels describe effective transactional boundaries, not ORM relationship sha
 | Receipt | `Receipt` | `ReceiptItem` | receipt number, quantity, purchase money, status | Receipt and ReceiptItem domain services | Item API always includes Receipt ID and enforces draft root state; boundary is sound |
 | Inventory | `StockMovement` as append-only ledger fact | None; balance is projection, not entity | signed quantity delta, `MovementType`, `SourceType` | `InventoryService` | Sound if all writes stay behind InventoryService; no stored Stock aggregate exists |
 | Pricing | `Price` as append-only fact; conceptual history keyed by Variant/type | None | money, currency, effective time, `PriceType` | `PriceService` | Sound for current scale; current price is a query, never a mutable field on Variant |
-| Intake | `IntakeSession` | `IntakeItemDraft` | item kind, missing-requirement sets, lifecycle status | Draft/completion workflows | Root boundary is sound; completeness calculation currently lives in a mixed command/read service |
+| Intake | `IntakeSession` | `IntakeItemDraft` | item kind, missing-requirement sets, lifecycle status | `IntakeDraftWorkflow`, `CompleteIntakeWorkflow` | Root boundary is sound; commands and projections are separated while completeness remains derived |
+| Activity | `ActivityEvent` as append-only fact | None | namespaced event type, entity reference, bounded operational payload | `ActivityEventService` | Events join the owning Intake transaction; no mutation/delete API or generic event bus exists |
 | AQSI publication | `Publication` | `PublicationAttempt` | channel, operation/status, canonical payload hash | publication request and processor workflows | Attempt belongs to Publication; remote checkpoints intentionally span multiple local transactions |
 | Readiness | No persisted aggregate | None | `ReadyForSaleRequirement` list and `is_ready` projection | `ReadyForSaleService` | Correctly a computed read model; persisting it would create synchronization debt |
 | Labels | No aggregate | None | `VariantLabelData`, physical 58×40 template | None; application service + renderer | Correct read/output context |
@@ -38,6 +39,7 @@ flowchart TB
     Intake -. completion .-> Product
     Intake -. completion .-> Variant
     Intake -. completion .-> Receipt
+    Intake -. appends outcome .-> Activity["ActivityEvent facts"]
 
     Publication["Publication root"] --> Attempt["PublicationAttempt entity"]
     Publication -->|projects| Variant

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from core.activity.routes import router as activity_router
 from core.admin import setup_admin
 from core.catalog.routes import product_router, variant_router
 from core.catalog.routes import router as catalog_router
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(receipt_router)
     app.include_router(supplier_router)
     app.include_router(identity_router)
+    app.include_router(activity_router)
 
     @app.get("/health", tags=["system"])
     def health() -> dict[str, str]:

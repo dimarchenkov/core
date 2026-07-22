@@ -57,6 +57,22 @@ The feed answers practical questions:
 
 The first version shows the current employee's events in reverse chronological order. Owner-wide filters and aggregated dashboards can be added without changing Intake business logic.
 
+### Implemented API
+
+```text
+GET /api/activity/me
+```
+
+The authenticated employee receives only their own events in reverse chronological order. The
+endpoint supports `event_type`, `limit` and `offset`, and returns pagination metadata. Event
+creation is not exposed as a public endpoint: only the owning Intake command may append an event
+inside its successful transaction.
+
+The five documented Intake event types are implemented. Completion records Receipt ID, item count,
+total quantity and duration; abandonment records its explicit reason and duration. Repeating an
+idempotent completion does not append another completion event, and a rolled-back workflow does
+not leave a success event.
+
 ## Owner metrics
 
 Metrics are derived from IntakeSession, IntakeItemDraft, Receipt and ActivityEvent facts:

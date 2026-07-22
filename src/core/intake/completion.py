@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy.orm import Session
 
+from core.activity.service import ActivityEventService, elapsed_seconds
 from core.catalog.repository import (
     CatalogProductRepository,
     CatalogVariantRepository,
@@ -63,6 +64,7 @@ class CompleteIntakeWorkflow:
         self._receipt_item_service = ReceiptItemService(session)
         self._posting_service = ReceiptPostingService(session)
         self._readiness_service = ReadyForSaleService(session)
+        self._activity = ActivityEventService(session)
 
     def complete(self, session_id: UUIDv7, *, actor_id: UUIDv7) -> IntakeCompletionRead:
         """Complete once and return stable mappings with current readiness on retries."""
@@ -118,8 +120,18 @@ class CompleteIntakeWorkflow:
             )
             intake_session.receipt_id = receipt.id
             intake_session.status = IntakeSessionStatus.COMPLETED
-            intake_session.completed_at = datetime.now(UTC)
+            completed_at = datetime.now(UTC)
+            intake_session.completed_at = completed_at
             intake_session.updated_by_id = actor_id
+            self._activity.record_intake_session_completed(
+                session_id=intake_session.id,
+                receipt_id=receipt.id,
+                item_count=len(active_items),
+                total_quantity=sum(item.quantity or 0 for item in active_items),
+                duration_seconds=elapsed_seconds(intake_session.created_at, completed_at),
+                actor_id=actor_id,
+                occurred_at=completed_at,
+            )
             self._session.flush()
 
             result = IntakeCompletionRead(

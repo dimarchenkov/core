@@ -26,6 +26,8 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `IntakeService` (legacy) | Yes | nested service flushes | once | once on exception | transaction-neutral Catalog + ImageLink services | Itself |
 | `IntakeDraftWorkflow` | Yes | nested image upload | each command | add-new outer rollback only | transaction-neutral `ImageService`; `IntakeDraftReadService` after successful commands | Itself; Media compensates only its filesystem write |
 | `IntakeDraftReadService` | Read transaction | No | No | No | pure completeness policy | None; read-only |
+| `ActivityEventService` | Participates in caller transaction | No | Never | Never | No | Intake command/workflow caller |
+| `ActivityReadService` | Read transaction | No | No | No | No | None; read-only |
 | `CompleteIntakeWorkflow` | Yes; row lock | own final flush + explicit staged domain operations | once; also commit on idempotent retry to release lock | once on exception | Catalog, ImageLink, Receipt, Posting, Readiness | Sole owner of Complete Intake |
 | `ReadyForSaleService` | Read transaction | No | No | No | No | None; read-only |
 | `VariantLabelService` | Read transaction | No | No | No | Readiness + renderer | None; read-only |

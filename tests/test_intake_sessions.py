@@ -12,6 +12,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.activity.enums import ActivityEventType
+from core.activity.models import ActivityEvent
 from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.database import get_session
 from core.identity.dependencies import get_current_user
@@ -56,6 +58,7 @@ def session() -> Generator[Session]:
             Price.__table__,
             IntakeSession.__table__,
             IntakeItemDraft.__table__,
+            ActivityEvent.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -156,6 +159,7 @@ def _create_session(client: TestClient) -> dict[str, object]:
 
 def test_session_starts_before_supplier_and_is_resumable(
     client: tuple[TestClient, User, User, Path],
+    session: Session,
 ) -> None:
     """An employee can start empty work and retrieve it later without Supplier data."""
     test_client, first, _, _ = client
@@ -170,6 +174,10 @@ def test_session_starts_before_supplier_and_is_resumable(
         "missing_supplier",
         "missing_items",
     ]
+    events = session.scalars(select(ActivityEvent)).all()
+    assert [event.event_type for event in events] == [ActivityEventType.INTAKE_SESSION_STARTED]
+    assert events[0].actor_id == first.id
+    assert events[0].entity_id == UUID(created["id"])
 
 
 def test_employee_cannot_see_another_employees_session(
@@ -219,6 +227,15 @@ def test_repeat_delivery_starts_from_barcode_without_new_photo(
     assert supplier_response.status_code == 200
     assert supplier_response.json()["missing_requirements"] == []
     assert session.scalars(select(Image)).all() == []
+    events = session.scalars(select(ActivityEvent).order_by(ActivityEvent.occurred_at)).all()
+    assert [event.event_type for event in events] == [
+        ActivityEventType.INTAKE_SESSION_STARTED,
+        ActivityEventType.INTAKE_ITEM_ADDED,
+    ]
+    assert events[1].data == {
+        "session_id": intake_session["id"],
+        "kind": "existing_variant",
+    }
 
 
 def test_new_product_must_start_with_photo_and_can_be_completed_later(
@@ -379,6 +396,7 @@ def test_invalid_photo_creates_neither_image_nor_item(
 def test_abandoned_session_is_preserved_but_cannot_be_changed(
     client: tuple[TestClient, User, User, Path],
     catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    session: Session,
 ) -> None:
     """Explicitly abandoned work remains visible while becoming immutable."""
     test_client, _, _, _ = client
@@ -404,6 +422,48 @@ def test_abandoned_session_is_preserved_but_cannot_be_changed(
     assert mutation.status_code == 409
     assert filtered.status_code == 200
     assert [row["id"] for row in filtered.json()] == [intake_session["id"]]
+    event = session.scalar(
+        select(ActivityEvent).where(
+            ActivityEvent.event_type == ActivityEventType.INTAKE_SESSION_ABANDONED
+        )
+    )
+    assert event is not None
+    assert event.data["reason"] == "Packaging was empty"
+    assert int(event.data["duration_seconds"]) >= 0
+
+
+def test_abandoned_item_creates_one_attributed_activity_fact(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    session: Session,
+) -> None:
+    """Explicit item abandonment is visible without recording every draft edit."""
+    test_client, first, _, _ = client
+    _, _, variant = catalog
+    intake_session = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={"variant_id": str(variant.id)},
+    ).json()
+
+    response = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/{item['id']}/abandon",
+        json={"reason": "Wrong package"},
+    )
+
+    assert response.status_code == 200
+    event = session.scalar(
+        select(ActivityEvent).where(
+            ActivityEvent.event_type == ActivityEventType.INTAKE_ITEM_ABANDONED
+        )
+    )
+    assert event is not None
+    assert event.actor_id == first.id
+    assert event.entity_id == UUID(item["id"])
+    assert event.data == {
+        "session_id": intake_session["id"],
+        "reason": "Wrong package",
+    }
 
 
 def test_existing_item_requires_exactly_one_identifier(
@@ -471,6 +531,16 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
     assert completed is not None
     assert completed.status.value == "completed"
     assert completed.receipt_id == receipts[0].id
+    completed_events = session.scalars(
+        select(ActivityEvent).where(
+            ActivityEvent.event_type == ActivityEventType.INTAKE_SESSION_COMPLETED
+        )
+    ).all()
+    assert len(completed_events) == 1
+    assert completed_events[0].data["receipt_id"] == str(receipts[0].id)
+    assert completed_events[0].data["item_count"] == 1
+    assert completed_events[0].data["total_quantity"] == 10
+    assert int(completed_events[0].data["duration_seconds"]) >= 0
 
 
 def test_complete_new_product_creates_primary_image_catalog_and_stock(
@@ -620,6 +690,14 @@ def test_late_completion_failure_rolls_back_catalog_receipt_and_ledger_but_keeps
     assert session.scalars(select(ReceiptItem)).all() == []
     assert session.scalars(select(StockMovement)).all() == []
     assert session.scalars(select(ImageLink)).all() == []
+    assert (
+        session.scalars(
+            select(ActivityEvent).where(
+                ActivityEvent.event_type == ActivityEventType.INTAKE_SESSION_COMPLETED
+            )
+        ).all()
+        == []
+    )
     persisted = session.get(IntakeSession, UUID(intake_session["id"]))
     assert persisted is not None
     assert persisted.status.value == "draft"

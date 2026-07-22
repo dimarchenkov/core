@@ -439,6 +439,7 @@ query first.
 
 - **Priority:** P1
 - **Engineering name:** `operational-activity-events`
+- **Status:** Completed on 2026-07-22
 - **Estimate:** M
 - **Dependencies:** AB-002; event specification in `docs/19_operational_visibility.md`
 
@@ -468,6 +469,19 @@ inside its transaction. No Event Bus, click tracking or generic audit copy.
 ### Risks
 
 Payload creep and personal-data duplication. Enforce a small schema and retention policy later.
+
+### Completion evidence
+
+- `ActivityEvent` is an append-only fact without update or soft-delete behavior;
+- only the five documented Intake outcomes have typed append methods;
+- start, item add/abandon and session abandon events commit with their owning draft command;
+- completion is appended inside `CompleteIntakeWorkflow` before its sole commit;
+- failed and idempotently repeated completions do not create false or duplicate success events;
+- `GET /api/activity/me` returns only the authenticated employee's events with type filtering and
+  pagination;
+- duration, item count and quantity are recorded without clicks, image bytes, secrets or copied
+  database rows;
+- migration `0016_create_activity_events` creates the bounded event stream.
 
 ---
 
@@ -613,8 +627,7 @@ item without a trigger.
 
 ## Recommended next sequence
 
-1. AB-009 — add meaningful Activity Events inside the established transaction boundaries.
-2. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
-3. AB-007 — harden AQSI checkpoint recovery as the next integration reliability increment.
-4. Complete AB-005 removal only after its documented client and release-window checks pass.
-5. P2/P3 tasks only when their stated trigger occurs.
+1. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
+2. AB-007 — harden AQSI checkpoint recovery as the next integration reliability increment.
+3. Complete AB-005 removal only after its documented client and release-window checks pass.
+4. P2/P3 tasks only when their stated trigger occurs.

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
+from core.activity.service import ActivityEventService, elapsed_seconds
 from core.catalog.repository import (
     CatalogProductRepository,
     CatalogVariantRepository,
@@ -76,6 +77,7 @@ class IntakeDraftWorkflow:
         self._categories = CategoryRepository(session)
         self._suppliers = SupplierRepository(session)
         self._reads = IntakeDraftReadService(session)
+        self._activity = ActivityEventService(session)
 
     def create_session(self, *, actor_id: UUIDv7) -> IntakeSessionRead:
         """Start an empty resumable workspace without requiring a Supplier."""
@@ -85,6 +87,11 @@ class IntakeDraftWorkflow:
             created_by_id=actor_id,
         )
         self._sessions.add(intake_session)
+        self._session.flush()
+        self._activity.record_intake_session_started(
+            session_id=intake_session.id,
+            actor_id=actor_id,
+        )
         self._session.commit()
         return self._reads.get_session(intake_session.id, actor_id=actor_id)
 
@@ -132,6 +139,13 @@ class IntakeDraftWorkflow:
             created_by_id=actor_id,
         )
         self._items.add(item)
+        self._session.flush()
+        self._activity.record_intake_item_added(
+            session_id=session_id,
+            item_id=item.id,
+            kind=item.kind.value,
+            actor_id=actor_id,
+        )
         self._session.commit()
         self._session.refresh(item)
         return self._reads.build_item_read(item)
@@ -170,6 +184,13 @@ class IntakeDraftWorkflow:
                 created_by_id=actor_id,
             )
             self._items.add(item)
+            self._session.flush()
+            self._activity.record_intake_item_added(
+                session_id=session_id,
+                item_id=item.id,
+                kind=item.kind.value,
+                actor_id=actor_id,
+            )
             self._session.commit()
             committed = True
             self._session.refresh(item)
@@ -218,6 +239,12 @@ class IntakeDraftWorkflow:
         item.abandoned_at = datetime.now(UTC)
         item.abandonment_reason = reason
         item.updated_by_id = actor_id
+        self._activity.record_intake_item_abandoned(
+            session_id=session_id,
+            item_id=item.id,
+            reason=reason,
+            actor_id=actor_id,
+        )
         self._session.commit()
         self._session.refresh(item)
         return self._reads.build_item_read(item)
@@ -231,10 +258,18 @@ class IntakeDraftWorkflow:
     ) -> IntakeSessionRead:
         """Explicitly close unfinished work while preserving it for history."""
         intake_session = self._get_owned_draft(session_id, actor_id)
+        abandoned_at = datetime.now(UTC)
         intake_session.status = IntakeSessionStatus.ABANDONED
-        intake_session.abandoned_at = datetime.now(UTC)
+        intake_session.abandoned_at = abandoned_at
         intake_session.abandonment_reason = reason
         intake_session.updated_by_id = actor_id
+        self._activity.record_intake_session_abandoned(
+            session_id=session_id,
+            reason=reason,
+            duration_seconds=elapsed_seconds(intake_session.created_at, abandoned_at),
+            actor_id=actor_id,
+            occurred_at=abandoned_at,
+        )
         self._session.commit()
         return self._reads.get_session(session_id, actor_id=actor_id)
 
