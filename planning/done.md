@@ -159,3 +159,49 @@
 - ✅ Real AQSI publication of one dedicated Variant
 - ✅ Cash-register lookup by generated barcode
 - ✅ Repeated publication command verified idempotent
+
+## Sprint 8 — Workflow UX
+
+### Architecture and workflow boundaries
+
+- ✅ Architecture Backlog v1 with module, service, transaction and domain maps
+- ✅ Explicit transaction ownership across Catalog, Media, Receipt and Intake commands
+- ✅ Workflow layer documented without a generic BPM engine
+- ✅ Legacy one-shot Intake API deprecated in favor of resumable sessions
+- ✅ Ready for Sale remains derived rather than persisted workflow state
+
+### Resumable mobile intake
+
+- ✅ Employee-owned `IntakeSession` and `IntakeItemDraft`
+- ✅ Identification-first flow without mandatory early Supplier selection
+- ✅ Photo First for a new Product or Variant
+- ✅ Barcode, SKU and Variant selection for repeat delivery without a mandatory new photo
+- ✅ Progressive quantity, purchase-price and Supplier capture
+- ✅ Resume and explicit abandonment rules
+- ✅ Derived missing requirements for every item and session
+
+### Atomic completion and operational visibility
+
+- ✅ Atomic Product, Variant, primary image, Receipt and inventory completion
+- ✅ Idempotent retry and rollback behavior
+- ✅ Employee activity events and personal activity feed API
+- ✅ Derived Ready for Sale attention queue API
+- ✅ Authenticated source-image delivery
+
+### First-party workflow interface
+
+- ✅ Mobile `/app` entry point with local authentication
+- ✅ Start and resume screen
+- ✅ Scanner/search and photograph-new-item actions
+- ✅ Existing primary photo confirmation
+- ✅ Guided forms and late Supplier selection
+- ✅ Receipt completion with explicit Ready for Sale follow-up reasons
+- ✅ Draft fields preserved across workflow transitions
+
+### Verification
+
+- ✅ 218 automated tests
+- ✅ Docker rebuild and migrations through `0016_create_activity_events`
+- ✅ Controlled phone smoke test through Angie
+- ✅ Real `REC-000007` posting with one immutable `+200` inventory movement
+- ✅ API logs, completed IntakeSession and database state verified
