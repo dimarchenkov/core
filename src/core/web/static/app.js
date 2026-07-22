@@ -28,6 +28,12 @@ const requirementLabels = {
   missing_variant_title: "Введите вариант",
   missing_quantity: "Укажите количество",
   missing_purchase_price: "Укажите закупочную цену",
+  inactive_variant: "Вариант неактивен",
+  missing_primary_image: "Нет основного фото",
+  missing_sku: "Нет SKU",
+  missing_barcode: "Нет штрихкода",
+  invalid_barcode: "Некорректный штрихкод",
+  missing_retail_price: "Укажите розничную цену",
 };
 
 const activityLabels = {
@@ -193,7 +199,12 @@ function topbar(back = false) {
 
 function bindTopbar() {
   document.querySelector("#logout")?.addEventListener("click", logout);
-  document.querySelector("#back-home")?.addEventListener("click", loadHome);
+  document.querySelector("#back-home")?.addEventListener("click", async () => {
+    try {
+      await saveAllItemForms();
+      await loadHome();
+    } catch (error) { showToast(error.message, true); }
+  });
 }
 
 async function startSession() {
@@ -258,7 +269,7 @@ function renderWorkspace() {
   root.innerHTML = `
     <div class="shell">
       ${topbar(true)}
-      <p class="eyebrow">Черновик сохраняется автоматически</p>
+      <p class="eyebrow">Черновик сохраняется по шагам</p>
       <h1>Что приехало?</h1>
       <p class="muted">Отсканируйте знакомый товар или сразу сфотографируйте новый.</p>
       <div class="actions">
@@ -271,8 +282,16 @@ function renderWorkspace() {
       ${renderSessionFinish()}
     </div>`;
   bindTopbar();
-  document.querySelector("#known-action").addEventListener("click", () => { state.mode = "known"; renderWorkspace(); });
-  document.querySelector("#photo-action").addEventListener("click", () => document.querySelector("#photo-input").click());
+  document.querySelector("#known-action").addEventListener("click", async () => {
+    try {
+      await saveAllItemForms();
+      state.mode = "known";
+      renderWorkspace();
+    } catch (error) { showToast(error.message, true); }
+  });
+  document.querySelector("#photo-action").addEventListener("click", () => {
+    document.querySelector("#photo-input").click();
+  });
   document.querySelector("#photo-input")?.addEventListener("change", uploadNewPhoto);
   document.querySelector("#known-form")?.addEventListener("submit", addKnownItem);
   document.querySelectorAll("[data-item-form]").forEach((form) => form.addEventListener("submit", saveItem));
@@ -359,6 +378,7 @@ async function uploadNewPhoto(event) {
   data.append("file", file);
   showToast("Сохраняем фото…");
   try {
+    await saveAllItemForms();
     await api(`/api/intake/sessions/${state.session.id}/items/new`, { method: "POST", body: data });
     state.mode = null;
     await refreshSession();
@@ -390,32 +410,60 @@ async function addKnownItem(event) {
 
 async function saveItem(event) {
   event.preventDefault();
-  const data = new FormData(event.currentTarget);
-  const item = state.session.items.find((value) => value.id === event.currentTarget.dataset.itemForm);
-  const payload = {
-    quantity: Number(data.get("quantity")),
-    purchase_price: String(data.get("purchase_price")),
-  };
-  if (item.kind !== "existing_variant") {
-    Object.assign(payload, {
-      category_id: data.get("category_id"),
-      product_title: data.get("product_title"),
-      variant_title: data.get("variant_title"),
-      product_description: data.get("product_description") || null,
-    });
-  }
   try {
-    await api(`/api/intake/sessions/${state.session.id}/items/${item.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+    await persistItemForm(event.currentTarget);
     await refreshSession();
     showToast("Позиция сохранена");
   } catch (error) { showToast(error.message, true); }
 }
 
+function nullableText(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function buildItemPayload(form, item) {
+  const data = new FormData(form);
+  const quantity = nullableText(data.get("quantity"));
+  const purchasePrice = nullableText(data.get("purchase_price"));
+  const payload = {
+    quantity: quantity === null ? null : Number(quantity),
+    purchase_price: purchasePrice,
+  };
+  if (item.kind !== "existing_variant") {
+    Object.assign(payload, {
+      category_id: nullableText(data.get("category_id")),
+      product_title: nullableText(data.get("product_title")),
+      variant_title: nullableText(data.get("variant_title")),
+      product_description: nullableText(data.get("product_description")),
+    });
+  }
+  return payload;
+}
+
+async function persistItemForm(form) {
+  const item = state.session.items.find((value) => value.id === form.dataset.itemForm);
+  if (!item) return;
+  const updated = await api(`/api/intake/sessions/${state.session.id}/items/${item.id}`, {
+    method: "PATCH",
+    body: JSON.stringify(buildItemPayload(form, item)),
+  });
+  state.session.items = state.session.items.map((value) => value.id === updated.id ? updated : value);
+}
+
+async function saveAllItemForms() {
+  if (!state.session || state.session.status !== "draft") return;
+  const forms = [...document.querySelectorAll("[data-item-form]")];
+  await Promise.all(forms.map(persistItemForm));
+}
+
 async function saveSupplier(event) {
+  const supplierId = event.target.value || null;
   try {
+    await saveAllItemForms();
     state.session = await api(`/api/intake/sessions/${state.session.id}`, {
       method: "PATCH",
-      body: JSON.stringify({ supplier_id: event.target.value || null }),
+      body: JSON.stringify({ supplier_id: supplierId }),
     });
     renderWorkspace();
   } catch (error) { showToast(error.message, true); }
@@ -426,6 +474,7 @@ async function completeSession() {
   button.disabled = true;
   button.innerHTML = '<span class="spinner"></span> Проводим';
   try {
+    await saveAllItemForms();
     state.result = await api(`/api/intake/sessions/${state.session.id}/complete`, { method: "POST" });
     renderResult();
   } catch (error) {
@@ -437,7 +486,17 @@ async function completeSession() {
 
 function renderResult() {
   const readyCount = state.result.readiness.filter((item) => item.is_ready).length;
-  const pending = state.result.readiness.length - readyCount;
+  const pendingItems = state.result.readiness.filter((item) => !item.is_ready);
+  const pending = pendingItems.length;
+  const attention = pendingItems.map((readiness) => {
+    const mapping = state.result.items.find((item) => item.variant_id === readiness.variant_id);
+    const source = state.session.items.find((item) => item.id === mapping?.item_id);
+    const display = source ? state.itemDisplay.get(source.id) : null;
+    const title = source?.product_title || display?.product?.title || "Товар";
+    const variant = source?.variant_title || display?.variant?.title || "";
+    const reasons = readiness.missing_requirements.map((value) => `<span class="chip warn">${escapeHtml(requirementLabels[value] || value)}</span>`).join("");
+    return `<div class="attention-row"><strong>${escapeHtml(title)}${variant ? ` · ${escapeHtml(variant)}` : ""}</strong><div class="chips">${reasons}</div></div>`;
+  }).join("");
   root.innerHTML = `<div class="shell">
     ${topbar()}
     <div class="result" style="margin-top:36px">
@@ -448,6 +507,7 @@ function renderResult() {
         <span class="chip good">Готово к продаже: ${readyCount}</span>
         ${pending ? `<span class="chip warn">Требует внимания: ${pending}</span>` : ""}
       </div>
+      ${attention ? `<div class="attention-list"><h3>Что нужно сделать дальше</h3>${attention}</div>` : ""}
       <button class="button full" id="finish-home" style="margin-top:20px">Готово</button>
     </div>
   </div>`;

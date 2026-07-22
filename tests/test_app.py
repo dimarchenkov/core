@@ -42,6 +42,8 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Core — Приёмка" in page.text
     assert script.status_code == 200
     assert "/api/intake/sessions" in script.text
+    assert "saveAllItemForms" in script.text
+    assert "missing_retail_price" in script.text
     assert styles.status_code == 200
     assert "viewport-fit=cover" in page.text
 
