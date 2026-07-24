@@ -316,6 +316,10 @@ function renderActionPanel() {
           <div class="field"><label for="known-quantity">Количество</label><input id="known-quantity" name="quantity" type="number" inputmode="numeric" min="1" required></div>
           <div class="field"><label for="known-price">Закупочная цена, ₽</label><input id="known-price" name="purchase_price" type="number" inputmode="decimal" min="0" step="0.01" required></div>
         </div>
+        <div class="rental-allocation">
+          <div class="field"><label for="known-rental-quantity">Из них в аренду, шт.</label><input id="known-rental-quantity" name="rental_quantity" type="number" inputmode="numeric" min="0" value="0"></div>
+          <p class="muted small">Оставьте 0, если вся партия предназначена для продажи.</p>
+        </div>
         <button class="button full" type="submit">Добавить позицию</button>
       </form>
     </section>`;
@@ -337,6 +341,7 @@ function renderItem(item) {
         <div class="item-main">
           <h3 class="item-title">${escapeHtml(title)}</h3>
           <div class="muted small">${escapeHtml(subtitle)}${display?.variant ? ` · ${escapeHtml(display.variant.sku)}` : ""}</div>
+          ${item.rental_quantity ? `<div class="rental-summary">В аренду: ${item.rental_quantity} шт.</div>` : ""}
           <div class="chips">${requirements}</div>
         </div>
       </div>
@@ -345,6 +350,10 @@ function renderItem(item) {
         <div class="field-row">
           <div class="field"><label>Количество</label><input name="quantity" type="number" inputmode="numeric" min="1" value="${item.quantity ?? ""}" required></div>
           <div class="field"><label>Закупочная цена, ₽</label><input name="purchase_price" type="number" inputmode="decimal" min="0" step="0.01" value="${item.purchase_price ?? ""}" required></div>
+        </div>
+        <div class="rental-allocation">
+          <div class="field"><label>Из них в аренду, шт.</label><input name="rental_quantity" type="number" inputmode="numeric" min="0" ${item.quantity === null ? "" : `max="${item.quantity}"`} value="${item.rental_quantity ?? 0}"></div>
+          <p class="muted small">Каждая единица получит собственный номер RentalAsset.</p>
         </div>
         <button class="button secondary full" type="submit">Сохранить позицию</button>
       </form>
@@ -398,6 +407,7 @@ async function addKnownItem(event) {
   const payload = {
     ...(variant ? { variant_id: variant.id } : { barcode: query }),
     quantity: Number(data.get("quantity")),
+    rental_quantity: Number(data.get("rental_quantity") || 0),
     purchase_price: String(data.get("purchase_price")),
   };
   try {
@@ -425,9 +435,11 @@ function nullableText(value) {
 function buildItemPayload(form, item) {
   const data = new FormData(form);
   const quantity = nullableText(data.get("quantity"));
+  const rentalQuantity = nullableText(data.get("rental_quantity"));
   const purchasePrice = nullableText(data.get("purchase_price"));
   const payload = {
     quantity: quantity === null ? null : Number(quantity),
+    rental_quantity: rentalQuantity === null ? 0 : Number(rentalQuantity),
     purchase_price: purchasePrice,
   };
   if (item.kind !== "existing_variant") {

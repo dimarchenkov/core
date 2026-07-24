@@ -44,6 +44,8 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "/api/intake/sessions" in script.text
     assert "saveAllItemForms" in script.text
     assert "missing_retail_price" in script.text
+    assert 'name="rental_quantity"' in script.text
+    assert "Из них в аренду" in script.text
     assert styles.status_code == 200
     assert "viewport-fit=cover" in page.text
 

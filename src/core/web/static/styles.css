@@ -83,6 +83,10 @@ p { line-height: 1.45; }
 .field { display: grid; gap: 7px; margin: 14px 0; }
 .field label { font-size: .82rem; font-weight: 750; color: #414a44; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.rental-allocation { margin: 12px 0 16px; padding: 12px 14px; background: #eef5f0; border: 1px solid #d2e4d8; border-radius: 15px; }
+.rental-allocation .field { margin: 0; }
+.rental-allocation p { margin: 8px 0 0; }
+.rental-summary { margin-top: 7px; color: var(--green); font-size: .8rem; font-weight: 750; }
 
 input, select, textarea {
   width: 100%;
