@@ -81,6 +81,11 @@ class IntakeItemDraft(BaseModel):
             name="ck_intake_item_drafts_purchase_price_nonnegative",
         ),
         CheckConstraint(
+            "rental_quantity >= 0 AND "
+            "(quantity IS NULL OR rental_quantity <= quantity)",
+            name="ck_intake_item_drafts_rental_quantity_valid",
+        ),
+        CheckConstraint(
             "kind != 'existing_variant' OR variant_id IS NOT NULL",
             name="ck_intake_item_drafts_existing_variant_required",
         ),
@@ -134,6 +139,12 @@ class IntakeItemDraft(BaseModel):
         server_default="{}",
     )
     quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rental_quantity: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     purchase_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     abandonment_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

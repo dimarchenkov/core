@@ -53,6 +53,7 @@ class ExistingIntakeItemCreate(PydanticBaseModel):
     variant_id: UUIDv7 | None = None
     barcode: str | None = Field(default=None, min_length=1, max_length=22)
     quantity: int | None = Field(default=None, gt=0)
+    rental_quantity: int = Field(default=0, ge=0)
     purchase_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
 
     @model_validator(mode="after")
@@ -60,6 +61,8 @@ class ExistingIntakeItemCreate(PydanticBaseModel):
         """Require either Variant ID or barcode without ambiguous precedence."""
         if (self.variant_id is None) == (self.barcode is None):
             raise ValueError("Provide exactly one of variant_id or barcode.")
+        if self.quantity is not None and self.rental_quantity > self.quantity:
+            raise ValueError("Rental quantity cannot exceed received quantity.")
         return self
 
     @field_validator("barcode")
@@ -88,6 +91,7 @@ class IntakeItemDraftUpdate(PydanticBaseModel):
     variant_title: str | None = Field(default=None, min_length=1, max_length=255)
     attributes: dict[str, str | int | bool] | None = None
     quantity: int | None = Field(default=None, gt=0)
+    rental_quantity: int | None = Field(default=None, ge=0)
     purchase_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
 
     @field_validator("purchase_price", mode="before")
@@ -139,6 +143,7 @@ class IntakeItemDraftRead(PydanticBaseModel):
     variant_title: str | None
     attributes: dict[str, str | int | bool]
     quantity: int | None
+    rental_quantity: int
     purchase_price: Decimal | None
     abandoned_at: datetime | None
     abandonment_reason: str | None

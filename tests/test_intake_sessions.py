@@ -30,6 +30,8 @@ from core.media.service import ImageService
 from core.media.storage import LocalImageStorage
 from core.pricing.models import Price
 from core.receipt.models import Receipt, ReceiptItem
+from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
+from core.rental.models import RentalAssetRecord
 from core.shared.db import Base
 from core.supplier.models import Supplier
 
@@ -58,6 +60,7 @@ def session() -> Generator[Session]:
             Price.__table__,
             IntakeSession.__table__,
             IntakeItemDraft.__table__,
+            RentalAssetRecord.__table__,
             ActivityEvent.__table__,
         ],
     )
@@ -498,6 +501,7 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
         json={
             "barcode": variant.barcode,
             "quantity": 10,
+            "rental_quantity": 2,
             "purchase_price": "125.50",
         },
     )
@@ -523,10 +527,20 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
     receipts = session.scalars(select(Receipt)).all()
     receipt_items = session.scalars(select(ReceiptItem)).all()
     movements = session.scalars(select(StockMovement)).all()
+    rental_assets = session.scalars(
+        select(RentalAssetRecord).order_by(RentalAssetRecord.asset_number)
+    ).all()
     assert len(receipts) == len(receipt_items) == len(movements) == 1
+    assert len(rental_assets) == 2
     assert receipt_items[0].quantity == 10
     assert movements[0].quantity_delta == 10
     assert movements[0].created_by_id == first.id
+    assert [asset.asset_number for asset in rental_assets] == ["RENT-000001", "RENT-000002"]
+    assert all(asset.variant_id == variant.id for asset in rental_assets)
+    assert all(asset.purpose is AssetPurpose.RENTAL for asset in rental_assets)
+    assert all(asset.condition is AssetCondition.NEW for asset in rental_assets)
+    assert all(asset.availability is RentalAvailability.AVAILABLE for asset in rental_assets)
+    assert all(asset.created_by_id == first.id for asset in rental_assets)
     completed = session.get(IntakeSession, UUID(intake_session["id"]))
     assert completed is not None
     assert completed.status.value == "completed"
@@ -541,6 +555,41 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
     assert completed_events[0].data["item_count"] == 1
     assert completed_events[0].data["total_quantity"] == 10
     assert int(completed_events[0].data["duration_seconds"]) >= 0
+
+
+def test_intake_rejects_rental_quantity_above_received_quantity(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+) -> None:
+    """A draft cannot allocate more physical assets than the units received."""
+    test_client, _, _, _ = client
+    _, _, variant = catalog
+    intake_session = _create_session(test_client)
+
+    create_response = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={
+            "variant_id": str(variant.id),
+            "quantity": 2,
+            "rental_quantity": 3,
+        },
+    )
+
+    assert create_response.status_code == 422
+
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={"variant_id": str(variant.id), "quantity": 3},
+    ).json()
+    update_response = test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}/items/{item['id']}",
+        json={"rental_quantity": 4},
+    )
+
+    assert update_response.status_code == 400
+    assert update_response.json()["detail"] == (
+        "Rental quantity cannot exceed received quantity."
+    )
 
 
 def test_complete_new_product_creates_primary_image_catalog_and_stock(
@@ -647,6 +696,7 @@ def test_late_completion_failure_rolls_back_catalog_receipt_and_ledger_but_keeps
             "product_title": "Rollback product",
             "variant_title": "Rollback variant",
             "quantity": 2,
+            "rental_quantity": 1,
             "purchase_price": "300",
         },
     )
@@ -689,6 +739,7 @@ def test_late_completion_failure_rolls_back_catalog_receipt_and_ledger_but_keeps
     assert session.scalars(select(Receipt)).all() == []
     assert session.scalars(select(ReceiptItem)).all() == []
     assert session.scalars(select(StockMovement)).all() == []
+    assert session.scalars(select(RentalAssetRecord)).all() == []
     assert session.scalars(select(ImageLink)).all() == []
     assert (
         session.scalars(

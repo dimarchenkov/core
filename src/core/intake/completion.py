@@ -28,6 +28,7 @@ from core.receipt.posting import ReceiptPostingService
 from core.receipt.repository import ReceiptRepository
 from core.receipt.schemas import ReceiptCreate, ReceiptItemCreate, ReceiptRead
 from core.receipt.service import ReceiptItemService, ReceiptService
+from core.rental.service import RentalAssetService
 from core.shared.db import UUIDv7, generate_uuid_v7
 from core.supplier.repository import SupplierRepository
 
@@ -64,6 +65,7 @@ class CompleteIntakeWorkflow:
         self._receipt_item_service = ReceiptItemService(session)
         self._posting_service = ReceiptPostingService(session)
         self._readiness_service = ReadyForSaleService(session)
+        self._rental_service = RentalAssetService(session)
         self._activity = ActivityEventService(session)
 
     def complete(self, session_id: UUIDv7, *, actor_id: UUIDv7) -> IntakeCompletionRead:
@@ -106,6 +108,12 @@ class CompleteIntakeWorkflow:
                 item.product_id = product_id
                 item.variant_id = variant_id
                 item.updated_by_id = actor_id
+                self._rental_service.create_from_intake(
+                    variant_id=variant_id,
+                    intake_item_id=item.id,
+                    quantity=item.rental_quantity,
+                    actor_id=actor_id,
+                )
                 completed_items.append(
                     IntakeCompletionItemRead(
                         item_id=item.id,
@@ -164,6 +172,8 @@ class CompleteIntakeWorkflow:
             raise IntakeCompletionIncompleteError
         for item in items:
             if item.quantity is None or item.purchase_price is None:
+                raise IntakeCompletionIncompleteError
+            if item.rental_quantity < 0 or item.rental_quantity > item.quantity:
                 raise IntakeCompletionIncompleteError
             if item.kind is IntakeItemKind.EXISTING_VARIANT:
                 variant = self._variants.get(item.variant_id) if item.variant_id else None

@@ -24,6 +24,7 @@ from core.intake.draft_service import (
     IntakeItemNotDraftError,
     IntakeItemNotFoundError,
     IntakeProductError,
+    IntakeRentalQuantityError,
     IntakeSessionNotDraftError,
     IntakeSupplierError,
     IntakeVariantError,
@@ -263,6 +264,11 @@ def update_intake_item(
         raise HTTPException(status_code=400, detail="Intake Category is invalid.") from exc
     except IntakeItemFieldError as exc:
         raise HTTPException(status_code=400, detail="Fields do not match item kind.") from exc
+    except IntakeRentalQuantityError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Rental quantity cannot exceed received quantity.",
+        ) from exc
 
 
 @router.post(

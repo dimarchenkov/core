@@ -63,6 +63,10 @@ class IntakeItemFieldError(Exception):
     """Raised when fields do not belong to an item's identification path."""
 
 
+class IntakeRentalQuantityError(Exception):
+    """Raised when rental units exceed the total received quantity."""
+
+
 class IntakeDraftWorkflow:
     """Business commands for resumable employee-owned intake drafts."""
 
@@ -133,6 +137,7 @@ class IntakeDraftWorkflow:
             kind=IntakeItemKind.EXISTING_VARIANT,
             variant_id=variant.id,
             quantity=data.quantity,
+            rental_quantity=data.rental_quantity,
             purchase_price=(
                 quantize_money(data.purchase_price) if data.purchase_price is not None else None
             ),
@@ -214,6 +219,7 @@ class IntakeDraftWorkflow:
         item = self._get_draft_item(session_id, item_id)
         changes = data.model_dump(exclude_unset=True)
         self._ensure_fields_match_kind(item.kind, changes)
+        self._ensure_rental_quantity_is_valid(item, changes)
         if "category_id" in changes and data.category_id is not None:
             self._ensure_category_is_active(data.category_id)
         if "purchase_price" in changes and data.purchase_price is not None:
@@ -322,7 +328,7 @@ class IntakeDraftWorkflow:
         changes: dict[str, object],
     ) -> None:
         """Prevent one identification path from accumulating unrelated fields."""
-        common = {"quantity", "purchase_price"}
+        common = {"quantity", "rental_quantity", "purchase_price"}
         if kind is IntakeItemKind.EXISTING_VARIANT:
             allowed = common
         elif kind is IntakeItemKind.NEW_VARIANT:
@@ -337,3 +343,18 @@ class IntakeDraftWorkflow:
             }
         if changes.keys() - allowed:
             raise IntakeItemFieldError
+
+    def _ensure_rental_quantity_is_valid(
+        self,
+        item: IntakeItemDraft,
+        changes: dict[str, object],
+    ) -> None:
+        """Keep rental allocation within the final received quantity."""
+        quantity = changes.get("quantity", item.quantity)
+        rental_quantity = changes.get("rental_quantity", item.rental_quantity)
+        if (
+            isinstance(quantity, int)
+            and isinstance(rental_quantity, int)
+            and rental_quantity > quantity
+        ):
+            raise IntakeRentalQuantityError

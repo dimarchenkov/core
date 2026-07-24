@@ -13,6 +13,7 @@ import core.inventory.models  # noqa: F401
 import core.media.models  # noqa: F401
 import core.pricing.models  # noqa: F401
 import core.receipt.models  # noqa: F401
+import core.rental.models  # noqa: F401
 import core.supplier.models  # noqa: F401
 from core.config import get_settings
 from core.shared.db import Base
