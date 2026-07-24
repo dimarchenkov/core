@@ -368,10 +368,46 @@ Variant имеет SKU, штрихкод, цены, остатки и публи
 Правило:
 
 ```text
-В аренду выдается Asset, а не Product и не Variant.
+В аренду выдается RentalAsset, а не Product и не Variant.
 ```
 
 Rental является первоклассным доменом. Он использует общую основу каталога, изображений, пользователей, аудита и физических идентификаторов, но имеет собственный повторяемый жизненный цикл выдачи, возврата, осмотра и обслуживания.
+
+```text
+Product
+└── Variant
+    └── RentalAsset
+```
+
+Один `RentalAsset` представляет одну физическую вещь и не содержит `quantity`. Inventory
+продолжает отвечать за количественный учет и immutable ledger на уровне `Variant`.
+
+### Intake и границы транзакции
+
+Rental и Inventory не координируют друг друга напрямую.
+
+При завершении Intake создание отдельных `RentalAsset` для арендуемого `Variant` выполняет
+`CompleteIntakeWorkflow`. Он координирует Catalog, Receipt, Inventory и Rental и является
+единственным владельцем общей SQL-транзакции.
+
+Доменные сервисы и репозитории Rental и Inventory:
+
+- не вызывают `commit()` или `rollback()` внутри caller-owned transaction;
+- выполняют только относящиеся к своему контексту проверки и изменения;
+- не импортируют workflow-классы.
+
+Inventory не зависит от Rental. Межконтекстная координация находится в Application/Workflow
+layer согласно ADR-002 и ADR-003.
+
+```mermaid
+flowchart LR
+    Intake["CompleteIntakeWorkflow"] --> Inventory["Inventory"]
+    Intake --> Rental["Rental"]
+```
+
+Связь с будущим Sales пока не является действующей зависимостью. В Sprint 9 Rental может только
+вывести экземпляр из прокатного фонда с назначением `SALE`; фактическая продажа будет
+координироваться отдельным будущим workflow.
 
 ---
 
@@ -627,7 +663,7 @@ ER-диаграмма должна описать только основные 
 - Variant → Price;
 - Variant → Stock;
 - Variant → StockMovement;
-- Product → Asset;
-- Asset → RentalContract;
+- Variant → RentalAsset;
+- RentalAsset → будущие Rental operations;
 - Image → ImageLink;
 - Variant → Publication.
