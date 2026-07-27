@@ -47,6 +47,30 @@
 - [ ] Seals, maintenance and damage history
 - [ ] Rental pricing and deposits
 
+### Epic — Rental Operations and Economics
+
+#### Rental operations
+
+- [ ] Issue a `RentalAsset` to a customer.
+- [ ] Accept a returned `RentalAsset` and record its resulting condition.
+- [ ] Record the actual rental amount attributed to each `RentalAsset`.
+- [ ] Preserve the append-only history of completed rentals.
+- [ ] Send an available asset to maintenance and return it to operation.
+- [ ] Record before/after condition photos, damage and seal changes.
+
+#### Rental analytics
+
+- [ ] Define the source of `acquisition_cost` for each `RentalAsset`.
+- [ ] Define how `preparation_cost` is recorded.
+- [ ] Derive `invested_cost` from acquisition and preparation costs.
+- [ ] Calculate `completed_rentals_count` from completed rental history.
+- [ ] Calculate `lifetime_revenue` from actual attributed rental income.
+- [ ] Calculate `payback_percent` and `is_paid_back`.
+- [ ] Identify the `first_profitable_rental` after payback.
+- [ ] Show the statuses «Окупается», «Окупился» and «Окупился + одна аренда».
+- [ ] Define allocation rules for discounts, delivery and shared order amounts before financial analytics.
+- [ ] Aggregate Rental economics by `Variant` and `Product`.
+
 ## P4 — Sell
 
 - [ ] Sales document and lifecycle
