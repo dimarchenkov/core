@@ -16,6 +16,7 @@ Core
 ├── Barcode
 ├── Suppliers
 ├── Warehouse
+├── Customers
 ├── Rental
 ├── Publishing
 ├── Messaging
@@ -150,6 +151,37 @@ Core
 
 Создание RentalAsset во время завершения Intake координирует workflow-слой. Rental не управляет
 Inventory напрямую.
+
+---
+
+# Customers
+
+Учет актуальных карточек клиентов.
+
+Отвечает за:
+
+- карточки клиентов;
+- контактные данные;
+- поиск;
+- историю изменения актуальных данных клиента.
+
+Не отвечает за:
+
+- аренду;
+- `RentalAsset`;
+- платежи;
+- пользовательские аккаунты Core.
+
+Customers передает Rental идентичность и актуальные данные клиента. Rental сохраняет собственный
+snapshot этих данных в заказе и координирует операции с Inventory только через workflow-слой.
+
+```text
+Customers
+    ↓
+Rental
+    ↓
+Inventory
+```
 
 ---
 

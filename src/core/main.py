@@ -8,6 +8,7 @@ from core.admin import setup_admin
 from core.catalog.routes import product_router, variant_router
 from core.catalog.routes import router as catalog_router
 from core.config import get_settings
+from core.customers.routes import router as customer_router
 from core.identity.routes import router as identity_router
 from core.intake.routes import router as intake_router
 from core.integrations.aqsi.routes import router as aqsi_router
@@ -17,6 +18,7 @@ from core.media.routes import image_link_router, image_router
 from core.pricing.routes import router as pricing_router
 from core.readiness.routes import router as readiness_router
 from core.receipt.routes import router as receipt_router
+from core.rental.order_routes import router as rental_order_router
 from core.supplier.routes import router as supplier_router
 from core.web.routes import router as web_router
 from core.web.routes import static_root as web_static_root
@@ -45,6 +47,8 @@ def create_app() -> FastAPI:
     app.include_router(readiness_router)
     app.include_router(receipt_router)
     app.include_router(supplier_router)
+    app.include_router(customer_router)
+    app.include_router(rental_order_router)
     app.include_router(identity_router)
     app.include_router(activity_router)
     app.include_router(web_router)

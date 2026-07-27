@@ -1,9 +1,19 @@
 # Current Sprint
 
-No implementation sprint is active.
+## Sprint 10 — Customers & Rental Operations
 
-Sprint 8 — Workflow UX is complete and released as `v0.5.0`.
+Sprint 10 открыт для проектирования и реализации полного операционного цикла аренды.
 
-The next business sprint will be agreed after the release checkpoint. The current roadmap candidate
-is Sprint 9 — Rental Foundation; remaining intake-interface refinements stay in the normal product
-backlog and do not block the completed Receive Goods workflow.
+Основные цели:
+
+- `Customer`;
+- `RentalOrder`;
+- `RentalOrderItem`;
+- Checkout Workflow;
+- Return Workflow;
+- аудит операторов выдачи и возврата;
+- история аренды клиента и `RentalAsset`;
+- подготовка исходных данных для экономики аренды и расчета окупаемости.
+
+Работа начинается с синхронизации архитектурной документации. Реализация должна следовать
+утвержденной модели в `docs/domain/customers_and_rental_orders.md`.

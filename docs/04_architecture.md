@@ -106,6 +106,7 @@ FastAPI Application
         +-- Inventory
         +-- Pricing
         +-- Media
+        +-- Customers
         +-- Rental
         +-- Publishing
         +-- ImportExport
@@ -218,6 +219,7 @@ core/
 │       ├── inventory/
 │       ├── pricing/
 │       ├── media/
+│       ├── customers/
 │       ├── rental/
 │       ├── publishing/
 │       ├── integrations/
@@ -373,14 +375,36 @@ Variant имеет SKU, штрихкод, цены, остатки и публи
 
 Rental является первоклассным доменом. Он использует общую основу каталога, изображений, пользователей, аудита и физических идентификаторов, но имеет собственный повторяемый жизненный цикл выдачи, возврата, осмотра и обслуживания.
 
+Customers и Rental являются разными bounded context. `Customer` — получатель имущества, а
+`User` — сотрудник или пользователь Core. `Customer != User`.
+
 ```text
 Product
-└── Variant
-    └── RentalAsset
+    ↓
+Variant
+    ↓
+InventoryItem
+    ↓
+RentalAsset
+    ↑
+RentalOrderItem
+    ↓
+RentalOrder
+    ↓
+Customer
 ```
 
 Один `RentalAsset` представляет одну физическую вещь и не содержит `quantity`. Inventory
 продолжает отвечать за количественный учет и immutable ledger на уровне `Variant`.
+
+`RentalOrder` и `RentalAsset` имеют независимые state machine. Application workflow координирует
+их изменения и владеет общей транзакцией.
+
+### Customers
+
+Customers владеет актуальной карточкой и контактами клиента. Rental хранит ссылку на клиента и
+snapshot данных, необходимых для исторического представления заказа. Customers не управляет
+заказами, экземплярами, платежами или пользовательскими аккаунтами.
 
 ### Intake и границы транзакции
 

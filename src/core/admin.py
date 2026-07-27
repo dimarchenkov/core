@@ -4,12 +4,14 @@ from fastapi import FastAPI
 from sqladmin import Admin
 
 from core.catalog.admin import CatalogProductAdmin, CatalogVariantAdmin, CategoryAdmin
+from core.customers.admin import CustomerAdmin
 from core.database import engine
 from core.identity.admin import PrivilegeAuditEventAdmin, UserAdmin
 from core.integrations.aqsi.admin import PublicationAdmin, PublicationAttemptAdmin
 from core.media.admin import ImageAdmin, ImageLinkAdmin
 from core.pricing.admin import PriceAdmin
 from core.receipt.admin import ReceiptAdmin, ReceiptItemAdmin
+from core.rental.order_admin import RentalOrderAdmin, RentalOrderItemAdmin
 from core.supplier.admin import SupplierAdmin
 
 
@@ -29,4 +31,7 @@ def setup_admin(app: FastAPI) -> Admin:
     admin.add_view(ReceiptAdmin)
     admin.add_view(ReceiptItemAdmin)
     admin.add_view(SupplierAdmin)
+    admin.add_view(CustomerAdmin)
+    admin.add_view(RentalOrderAdmin)
+    admin.add_view(RentalOrderItemAdmin)
     return admin
