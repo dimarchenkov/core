@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID
@@ -28,6 +29,7 @@ from core.media.enums import ImageLinkRole
 from core.media.models import Image, ImageLink
 from core.media.service import ImageService
 from core.media.storage import LocalImageStorage
+from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.receipt.models import Receipt, ReceiptItem
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
@@ -555,6 +557,46 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
     assert completed_events[0].data["item_count"] == 1
     assert completed_events[0].data["total_quantity"] == 10
     assert int(completed_events[0].data["duration_seconds"]) >= 0
+
+
+def test_optional_retail_price_is_created_atomically_during_intake(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """An entered sale price becomes a Pricing fact while omission remains valid elsewhere."""
+    test_client, first, _, _ = client
+    _, _, variant = catalog
+    intake_session = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={
+            "variant_id": str(variant.id),
+            "quantity": 1,
+            "purchase_price": "500",
+            "retail_price": "999.90",
+        },
+    )
+    test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+
+    response = test_client.post(f"/api/intake/sessions/{intake_session['id']}/complete")
+
+    assert item.status_code == 201
+    assert item.json()["retail_price"] == "999.90"
+    assert response.status_code == 200
+    assert response.json()["readiness"][0]["missing_requirements"] == [
+        "missing_primary_image"
+    ]
+    prices = session.scalars(select(Price)).all()
+    assert len(prices) == 1
+    assert prices[0].variant_id == variant.id
+    assert prices[0].price_type is PriceType.RETAIL
+    assert prices[0].amount == Decimal("999.90")
+    assert prices[0].created_by_id == first.id
 
 
 def test_intake_rejects_rental_quantity_above_received_quantity(

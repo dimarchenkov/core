@@ -22,6 +22,12 @@ const state = {
     assets: [],
     returnAssets: new Map(),
   },
+  operations: {
+    products: [],
+    product: null,
+    assets: [],
+    asset: null,
+  },
 };
 
 const requirementLabels = {
@@ -62,7 +68,8 @@ function escapeHtml(value = "") {
 }
 
 function showToast(message, error = false) {
-  toast.textContent = message;
+  const text = message instanceof Event ? "Действие не удалось. Повторите ещё раз." : String(message ?? "");
+  toast.textContent = text;
   toast.className = `toast show${error ? " error" : ""}`;
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => { toast.className = "toast"; }, 3200);
@@ -89,6 +96,25 @@ async function api(path, options = {}) {
   }
   if (response.status === 204) return null;
   return response.json();
+}
+
+async function openAuthenticatedFile(path, print = false) {
+  const popup = window.open("", "_blank");
+  try {
+    const response = await fetch(path, {
+      headers: state.token ? { Authorization: `Bearer ${state.token}` } : {},
+    });
+    if (!response.ok) throw new Error(`Не удалось открыть документ (${response.status})`);
+    const url = URL.createObjectURL(await response.blob());
+    if (popup) {
+      popup.location = url;
+      if (print) popup.addEventListener("load", () => popup.print(), { once: true });
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (error) {
+    popup?.close();
+    showToast(error.message, true);
+  }
 }
 
 function logout() {
@@ -184,8 +210,8 @@ function renderHome(activity) {
       <p class="muted">Выберите операцию.</p>
       <div class="actions">
         <button class="action-card" id="open-intake"><span class="action-icon">＋</span><strong>Приёмка</strong><span class="muted small">Принять товар</span></button>
-        <button class="action-card" id="open-rental"><span class="action-icon">↗</span><strong>Выдача аренды</strong><span class="muted small">Найти клиента и оформить заказ</span></button>
-        <button class="action-card" id="open-rental-return"><span class="action-icon">↙</span><strong>Возврат аренды</strong><span class="muted small">Осмотреть и принять экземпляры</span></button>
+        <button class="action-card" id="open-catalog"><span class="action-icon">▦</span><strong>Каталог</strong><span class="muted small">Товары и варианты</span></button>
+        <button class="action-card" id="open-rental"><span class="action-icon">↔</span><strong>Аренда</strong><span class="muted small">Активные, выдача и возврат</span></button>
       </div>
       <section id="intake-home" class="hidden">
       <p class="muted">Сначала определяем товар. Поставщика и цены добавим после.</p>
@@ -201,9 +227,9 @@ function renderHome(activity) {
     document.querySelector("#intake-home").classList.remove("hidden");
     document.querySelector("#open-intake").scrollIntoView({ behavior: "smooth" });
   });
-  document.querySelector("#open-rental").addEventListener("click", openRentalHome);
-  document.querySelector("#open-rental-return").addEventListener("click", openRentalReturnHome);
-  document.querySelector("#start-session").addEventListener("click", startSession);
+  document.querySelector("#open-catalog").addEventListener("click", () => openOperationsCatalog());
+  document.querySelector("#open-rental").addEventListener("click", () => openRentalHub());
+  document.querySelector("#start-session").addEventListener("click", () => startSession());
   document.querySelectorAll("[data-resume]").forEach((button) => {
     button.addEventListener("click", () => openSession(button.dataset.resume));
   });
@@ -338,6 +364,7 @@ function renderActionPanel() {
           <div class="field"><label for="known-quantity">Количество</label><input id="known-quantity" name="quantity" type="number" inputmode="numeric" min="1" required></div>
           <div class="field"><label for="known-price">Закупочная цена, ₽</label><input id="known-price" name="purchase_price" type="number" inputmode="decimal" min="0" step="0.01" required></div>
         </div>
+        <div class="field"><label for="known-retail-price">Цена продажи, ₽ <span class="muted">(необязательно)</span></label><input id="known-retail-price" name="retail_price" type="number" inputmode="decimal" min="0" step="0.01"></div>
         <div class="rental-allocation">
           <div class="field"><label for="known-rental-quantity">Из них в аренду, шт.</label><input id="known-rental-quantity" name="rental_quantity" type="number" inputmode="numeric" min="0" value="0"></div>
           <p class="muted small">Оставьте 0, если вся партия предназначена для продажи.</p>
@@ -373,9 +400,10 @@ function renderItem(item) {
           <div class="field"><label>Количество</label><input name="quantity" type="number" inputmode="numeric" min="1" value="${item.quantity ?? ""}" required></div>
           <div class="field"><label>Закупочная цена, ₽</label><input name="purchase_price" type="number" inputmode="decimal" min="0" step="0.01" value="${item.purchase_price ?? ""}" required></div>
         </div>
+        <div class="field"><label>Цена продажи, ₽ <span class="muted">(необязательно)</span></label><input name="retail_price" type="number" inputmode="decimal" min="0" step="0.01" value="${item.retail_price ?? ""}"></div>
         <div class="rental-allocation">
           <div class="field"><label>Из них в аренду, шт.</label><input name="rental_quantity" type="number" inputmode="numeric" min="0" ${item.quantity === null ? "" : `max="${item.quantity}"`} value="${item.rental_quantity ?? 0}"></div>
-          <p class="muted small">Каждая единица получит собственный номер RentalAsset.</p>
+          <p class="muted small">Каждый предмет аренды получит собственный инвентарный номер.</p>
         </div>
         <button class="button secondary full" type="submit">Сохранить позицию</button>
       </form>
@@ -431,6 +459,7 @@ async function addKnownItem(event) {
     quantity: Number(data.get("quantity")),
     rental_quantity: Number(data.get("rental_quantity") || 0),
     purchase_price: String(data.get("purchase_price")),
+    retail_price: nullableText(data.get("retail_price")),
   };
   try {
     await api(`/api/intake/sessions/${state.session.id}/items/existing`, { method: "POST", body: JSON.stringify(payload) });
@@ -459,10 +488,12 @@ function buildItemPayload(form, item) {
   const quantity = nullableText(data.get("quantity"));
   const rentalQuantity = nullableText(data.get("rental_quantity"));
   const purchasePrice = nullableText(data.get("purchase_price"));
+  const retailPrice = nullableText(data.get("retail_price"));
   const payload = {
     quantity: quantity === null ? null : Number(quantity),
     rental_quantity: rentalQuantity === null ? 0 : Number(rentalQuantity),
     purchase_price: purchasePrice,
+    retail_price: retailPrice,
   };
   if (item.kind !== "existing_variant") {
     Object.assign(payload, {
@@ -547,6 +578,247 @@ function renderResult() {
   </div>`;
   bindTopbar();
   document.querySelector("#finish-home").addEventListener("click", loadHome);
+}
+
+async function openOperationsCatalog(query = "", productFilter = "all") {
+  try {
+    const params = new URLSearchParams({ product_filter: productFilter });
+    if (query) params.set("query", query);
+    state.operations.products = await api(`/api/operations/catalog/products?${params}`);
+    renderOperationsCatalog(query, productFilter);
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderOperationsCatalog(query, productFilter) {
+  const rows = state.operations.products.length
+    ? state.operations.products.map((product) => `
+      <button class="catalog-row catalog-product-row" data-product-id="${product.id}">
+        ${product.primary_image_id ? `<img class="catalog-photo" data-image-id="${product.primary_image_id}" alt="${escapeHtml(product.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
+        <span><strong>${escapeHtml(product.title)}</strong><br><span class="muted small">${escapeHtml(product.skus.join(", ") || "Без SKU")}</span></span>
+        <span class="catalog-counts"><span>${product.variant_count} вар.</span><span>${product.rental_asset_count} арендных ед.</span><span class="${product.available_asset_count ? "available-text" : "muted"}">${product.available_asset_count} доступно</span>${product.needs_initial_price ? '<span class="chip warn">Нужно указать цену</span>' : ""}</span>
+      </button>`).join("")
+    : '<div class="empty">Товары не найдены</div>';
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Каталог</p>
+    <h1>Товары</h1>
+    <form class="search-row" id="operations-product-search">
+      <input name="query" value="${escapeHtml(query)}" placeholder="Название, SKU или штрихкод" autocomplete="off">
+      <button class="button" type="submit">Найти</button>
+    </form>
+    <div class="filter-bar" data-product-filters>
+      ${operationsFilterButton("all", "Все", productFilter)}
+      ${operationsFilterButton("rental", "Для аренды", productFilter)}
+      ${operationsFilterButton("available", "Есть доступные", productFilter)}
+      ${operationsFilterButton("needs_price", "Нужно указать цену", productFilter)}
+    </div>
+    <div class="session-list">${rows}</div>
+  </div>`;
+  bindTopbar();
+  hydrateImages();
+  document.querySelector("#operations-product-search").addEventListener("submit", (event) => {
+    event.preventDefault();
+    openOperationsCatalog(String(new FormData(event.currentTarget).get("query") || "").trim(), productFilter);
+  });
+  document.querySelectorAll("[data-product-filter]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsCatalog(query, button.dataset.productFilter));
+  });
+  document.querySelectorAll("[data-product-id]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsProduct(button.dataset.productId));
+  });
+}
+
+function operationsFilterButton(value, label, active) {
+  return `<button class="filter-chip ${value === active ? "active" : ""}" data-product-filter="${value}">${label}</button>`;
+}
+
+async function openOperationsProduct(productId) {
+  try {
+    state.operations.product = await api(`/api/operations/catalog/products/${productId}`);
+    renderOperationsProduct();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderOperationsProduct() {
+  const product = state.operations.product;
+  const variants = product.variants.length
+    ? product.variants.map((variant) => `<article class="variant-commercial-card card">
+        ${variant.primary_image_id ? `<img class="catalog-photo" data-image-id="${variant.primary_image_id}" alt="${escapeHtml(variant.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
+        <span class="variant-commercial-main"><strong>${escapeHtml(variant.title)}</strong><span class="muted small">${escapeHtml(variant.sku)}</span><span class="barcode-value">${escapeHtml(variant.barcode)}</span></span>
+        <span class="catalog-counts"><strong>${variant.current_retail_price === null ? "Цена не указана" : `${escapeHtml(variant.current_retail_price)} ₽`}</strong><span>${variant.rental_asset_count} арендных ед.</span><span class="available-text">${variant.available_asset_count} доступно</span></span>
+        <span class="variant-actions">
+          ${variant.current_retail_price === null ? `<button class="button secondary compact" data-set-price="${variant.id}">Указать цену</button>` : ""}
+          ${variant.current_retail_price !== null && variant.primary_image_id ? `<button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button><button class="button compact" data-print-label="${variant.id}">Печать</button>` : ""}
+        </span>
+      </article>`).join("")
+    : '<div class="empty">У товара пока нет вариантов</div>';
+  const assets = product.rental_assets.length
+    ? product.rental_assets.map(renderOperationsAssetRow).join("")
+    : '<div class="empty">У товара нет предметов аренды</div>';
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Карточка товара</p>
+    <h1>${escapeHtml(product.title)}</h1>
+    ${product.description ? `<p>${escapeHtml(product.description)}</p>` : '<p class="muted">Описание не заполнено.</p>'}
+    <section class="card order-facts">
+      <div><span class="muted small">SKU</span><strong>${escapeHtml(product.skus.join(", ") || "—")}</strong></div>
+      <div><span class="muted small">Варианты</span><strong>${product.variant_count}</strong></div>
+      <div><span class="muted small">Арендные единицы</span><strong>${product.rental_asset_count}</strong></div>
+      <div><span class="muted small">Доступно</span><strong>${product.available_asset_count}</strong></div>
+    </section>
+    <div class="section-heading"><h2>Варианты</h2><span class="muted small">${product.variant_count}</span></div>
+    <div class="session-list">${variants}</div>
+    <div class="section-heading"><h2>Предметы аренды</h2></div>
+    <div class="session-list">${assets}</div>
+  </div>`;
+  bindTopbar();
+  bindOperationsAssetRows();
+  hydrateImages();
+  document.querySelectorAll("[data-set-price]").forEach((button) => button.addEventListener("click", () => showToast("Управление ценами будет добавлено в Catalog Management.")));
+  document.querySelectorAll("[data-open-label]").forEach((button) => button.addEventListener("click", () => openAuthenticatedFile(`/api/labels/variants/${button.dataset.openLabel}/58x40.pdf`)));
+  document.querySelectorAll("[data-print-label]").forEach((button) => button.addEventListener("click", () => openAuthenticatedFile(`/api/labels/variants/${button.dataset.printLabel}/58x40.pdf`, true)));
+}
+
+async function openOperationsAssets(query = "", assetFilter = "all", sort = "asset_number") {
+  try {
+    const params = new URLSearchParams({ asset_filter: assetFilter, sort });
+    if (query) params.set("query", query);
+    state.operations.assets = await api(`/api/operations/rental/assets?${params}`);
+    renderOperationsAssets(query, assetFilter, sort);
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderOperationsAssets(query, assetFilter, sort) {
+  const rows = state.operations.assets.length
+    ? state.operations.assets.map(renderOperationsAssetRow).join("")
+    : '<div class="empty">Предметы аренды не найдены</div>';
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Каталог</p>
+    <h1>Предметы аренды</h1>
+    <form class="search-row" id="operations-asset-search">
+      <input name="query" value="${escapeHtml(query)}" placeholder="RENT-, товар, вариант или SKU" autocomplete="off">
+      <button class="button" type="submit">Найти</button>
+    </form>
+    <div class="filter-bar">
+      ${assetFilterButton("all", "Все", assetFilter)}
+      ${assetFilterButton("available", "Available", assetFilter)}
+      ${assetFilterButton("rented", "Rented", assetFilter)}
+      ${assetFilterButton("maintenance", "Maintenance", assetFilter)}
+      ${assetFilterButton("lost", "Lost", assetFilter)}
+    </div>
+    <div class="field sort-field"><label>Сортировка</label><select id="operations-asset-sort">
+      <option value="asset_number" ${sort === "asset_number" ? "selected" : ""}>По инвентарному номеру</option>
+      <option value="product" ${sort === "product" ? "selected" : ""}>По товару</option>
+      <option value="status" ${sort === "status" ? "selected" : ""}>По статусу</option>
+    </select></div>
+    <div class="session-list">${rows}</div>
+  </div>`;
+  bindTopbar();
+  bindOperationsAssetRows();
+  document.querySelector("#operations-asset-search").addEventListener("submit", (event) => {
+    event.preventDefault();
+    openOperationsAssets(String(new FormData(event.currentTarget).get("query") || "").trim(), assetFilter, sort);
+  });
+  document.querySelectorAll("[data-asset-filter]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsAssets(query, button.dataset.assetFilter, sort));
+  });
+  document.querySelector("#operations-asset-sort").addEventListener("change", (event) => openOperationsAssets(query, assetFilter, event.target.value));
+}
+
+function assetFilterButton(value, label, active) {
+  return `<button class="filter-chip ${value === active ? "active" : ""}" data-asset-filter="${value}">${label}</button>`;
+}
+
+function renderOperationsAssetRow(asset) {
+  return `<article class="asset-catalog-row">
+    <button class="asset-main" data-operations-asset="${asset.id}">
+      <span><strong>${escapeHtml(asset.product_title)} · ${escapeHtml(asset.variant_title)}</strong><br><span class="muted small">${escapeHtml(asset.asset_number)} · ${escapeHtml(asset.sku)}</span></span>
+      <span class="chips compact-chips"><span class="chip ${asset.availability === "available" ? "good" : asset.is_lost ? "warn" : ""}">${asset.is_lost ? "LOST" : escapeHtml(availabilityLabel(asset.availability))}</span></span>
+    </button>
+    ${asset.current_order_id ? `<button class="button ghost compact" data-asset-order="${asset.current_order_id}">${escapeHtml(asset.current_order_number)} →</button>` : ""}
+  </article>`;
+}
+
+function bindOperationsAssetRows() {
+  document.querySelectorAll("[data-operations-asset]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsAsset(button.dataset.operationsAsset));
+  });
+  document.querySelectorAll("[data-asset-order]").forEach((button) => {
+    button.addEventListener("click", () => openRentalReturnOrder(button.dataset.assetOrder));
+  });
+}
+
+async function openOperationsAsset(assetId) {
+  let asset = state.operations.assets.find((item) => item.id === assetId)
+    || state.operations.product?.rental_assets.find((item) => item.id === assetId);
+  if (!asset) {
+    const matches = await api(`/api/operations/rental/assets?query=${encodeURIComponent(assetId)}`);
+    asset = matches.find((item) => item.id === assetId);
+  }
+  if (!asset) return showToast("Предмет аренды не найден", true);
+  state.operations.asset = asset;
+  renderOperationsAsset();
+}
+
+function renderOperationsAsset() {
+  const asset = state.operations.asset;
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Предмет аренды</p>
+    <h1>${escapeHtml(asset.asset_number)}</h1>
+    <h2>${escapeHtml(asset.product_title)} · ${escapeHtml(asset.variant_title)}</h2>
+    <section class="card order-facts">
+      <div><span class="muted small">SKU</span><strong>${escapeHtml(asset.sku)}</strong></div>
+      <div><span class="muted small">Состояние</span><strong>${escapeHtml(conditionLabel(asset.condition))}</strong></div>
+      <div><span class="muted small">Доступность</span><strong>${asset.is_lost ? "LOST" : escapeHtml(availabilityLabel(asset.availability))}</strong></div>
+      <div><span class="muted small">Текущая аренда</span><strong>${escapeHtml(asset.current_order_number || "Нет")}</strong></div>
+    </section>
+    <div class="actions horizontal-actions">
+      <button class="button secondary" id="asset-open-product">← К товару</button>
+      ${asset.current_order_id ? `<button class="button" id="asset-open-order">Открыть аренду →</button>` : ""}
+    </div>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#asset-open-product").addEventListener("click", () => openOperationsProduct(asset.product_id));
+  document.querySelector("#asset-open-order")?.addEventListener("click", () => openRentalReturnOrder(asset.current_order_id));
+}
+
+async function openRentalHub() {
+  try {
+    state.rental.drafts = await api("/rental/orders?order_status=issued");
+    renderRentalHub();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalHub() {
+  const activeRows = state.rental.drafts.length
+    ? state.rental.drafts.map((order) => `
+      <button class="session-row" data-hub-order="${order.id}">
+        <span><strong>${escapeHtml(order.order_number)}</strong>${order.is_overdue ? '<span class="chip warn inline-chip">Просрочен</span>' : ""}<br><span class="muted small">${escapeHtml(order.customer_name_snapshot)} · возврат ${formatShortDate(order.planned_return_at)}</span></span>
+        <span aria-hidden="true">→</span>
+      </button>`).join("")
+    : '<div class="empty">Активных аренд нет. Можно оформить новую.</div>';
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Операции</p>
+    <h1>Аренда</h1>
+    <p class="muted">Выдача и возврат остаются отдельными процессами, но доступны из одного раздела.</p>
+    <div class="actions rental-actions">
+      <button class="action-card" id="hub-active"><span class="action-icon">●</span><strong>Активные аренды</strong><span class="muted small">${state.rental.drafts.length} договоров</span></button>
+      <button class="action-card" id="hub-new"><span class="action-icon">↗</span><strong>Новая аренда</strong><span class="muted small">Клиент и предметы аренды</span></button>
+      <button class="action-card" id="hub-return"><span class="action-icon">↙</span><strong>Возврат</strong><span class="muted small">Осмотр и завершение</span></button>
+    </div>
+    <div class="section-heading" id="active-rentals"><h2>Активные аренды</h2><span class="muted small">${state.rental.drafts.length}</span></div>
+    <div class="session-list">${activeRows}</div>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#hub-active").addEventListener("click", () => document.querySelector("#active-rentals").scrollIntoView({ behavior: "smooth" }));
+  document.querySelector("#hub-new").addEventListener("click", openRentalHome);
+  document.querySelector("#hub-return").addEventListener("click", () => openRentalReturnHome());
+  document.querySelectorAll("[data-hub-order]").forEach((button) => {
+    button.addEventListener("click", () => openRentalReturnOrder(button.dataset.hubOrder));
+  });
 }
 
 async function openRentalHome() {
@@ -701,6 +973,7 @@ async function createRentalDraft(event) {
         note: nullableText(data.get("note")),
       }),
     });
+    await loadDefaultRentalAssets();
     renderRentalDraft();
   } catch (error) { showToast(error.message, true); }
 }
@@ -709,7 +982,7 @@ async function openRentalDraft(orderId) {
   try {
     state.rental.order = await api(`/rental/orders/${orderId}`);
     state.rental.customer = await api(`/api/customers/${state.rental.order.customer_id}`);
-    state.rental.assets = [];
+    await loadDefaultRentalAssets();
     renderRentalDraft();
   } catch (error) { showToast(error.message, true); }
 }
@@ -724,7 +997,7 @@ function renderRentalDraft() {
     <article class="session-row rental-line">
       <span><strong>${escapeHtml(item.title_snapshot)}</strong><br><span class="muted small">${escapeHtml(item.asset_number_snapshot)} · ${formatMoney(Number(item.agreed_price) - Number(item.discount))}</span></span>
       <button class="button danger compact" data-remove-rental-item="${item.id}" type="button">Удалить</button>
-    </article>`).join("") : '<div class="empty">Добавьте первый экземпляр</div>';
+    </article>`).join("") : '<div class="empty">Добавьте первый предмет аренды</div>';
   root.innerHTML = `<div class="shell">
     ${topbar(true)}
     <p class="eyebrow">Черновик · ${escapeHtml(order.order_number)}</p>
@@ -741,7 +1014,7 @@ function renderRentalDraft() {
       <button class="button secondary full" type="submit">Сохранить условия</button>
     </form>
     <section class="card">
-      <h2>Добавить экземпляр</h2>
+      <h2>Добавить предмет аренды</h2>
       <p class="muted small">Отсканируйте RENT-номер или найдите по товару, варианту либо SKU.</p>
       <form class="search-row" id="rental-asset-search-form">
         <input name="query" autocomplete="off" placeholder="RENT-000001 или название" required>
@@ -749,7 +1022,7 @@ function renderRentalDraft() {
       </form>
       <div id="rental-asset-results">${renderRentalAssetResults()}</div>
     </section>
-    <h2>Экземпляры · ${order.items.length}</h2>
+    <h2>Предметы аренды · ${order.items.length}</h2>
     <div class="session-list">${items}</div>
     <section class="checkout-summary">
       <div><span class="muted small">Стоимость</span><strong>${formatMoney(total)}</strong></div>
@@ -789,9 +1062,13 @@ async function searchRentalAssets(event) {
   event.preventDefault();
   const query = new FormData(event.currentTarget).get("query");
   try {
-    state.rental.assets = await api(`/api/rental/assets?query=${encodeURIComponent(String(query))}`);
+    const matches = await api(`/api/rental/assets?query=${encodeURIComponent(String(query))}`);
+    state.rental.assets = [
+      ...state.rental.assets,
+      ...matches.filter((match) => !state.rental.assets.some((asset) => asset.id === match.id)),
+    ];
     document.querySelector("#rental-asset-results").innerHTML = renderRentalAssetResults()
-      || '<div class="empty" style="margin-top:14px">Экземпляр не найден</div>';
+      || '<div class="empty" style="margin-top:14px">Предмет аренды не найден</div>';
     bindRentalAssetResults();
   } catch (error) { showToast(error.message, true); }
 }
@@ -827,10 +1104,14 @@ async function addRentalAsset(assetId) {
         discount: "0",
       }),
     });
-    state.rental.assets = [];
+    await loadDefaultRentalAssets();
     renderRentalDraft();
-    showToast("Экземпляр добавлен");
+    showToast("Предмет аренды добавлен");
   } catch (error) { showToast(error.message, true); }
+}
+
+async function loadDefaultRentalAssets() {
+  state.rental.assets = await api("/api/rental/assets?availability=available&limit=100");
 }
 
 async function removeRentalItem(itemId) {
@@ -867,7 +1148,7 @@ function renderRentalIssued() {
       <h1>${escapeHtml(order.order_number)}</h1>
       <p><strong>${escapeHtml(order.customer_name_snapshot)}</strong><br>${escapeHtml(order.customer_phone_snapshot)}</p>
       <div class="chips" style="justify-content:center">
-        <span class="chip good">Экземпляров: ${order.items.length}</span>
+        <span class="chip good">Предметов аренды: ${order.items.length}</span>
         <span class="chip">Возврат: ${formatShortDate(order.planned_return_at)}</span>
       </div>
       <button class="button full" id="rental-issued-done" style="margin-top:20px">Готово</button>
@@ -904,7 +1185,7 @@ function renderRentalReturnHome(query = "") {
     ${topbar(true)}
     <p class="eyebrow">Rental return</p>
     <h1>Возврат аренды</h1>
-    <p class="muted">Поиск по договору, клиенту, телефону или номеру экземпляра.</p>
+    <p class="muted">Поиск по договору, клиенту, телефону или инвентарному номеру.</p>
     <form class="search-row" id="return-order-search-form">
       <input name="query" value="${escapeHtml(query)}" autocomplete="off" placeholder="RORD-, RENT-, имя или телефон">
       <button class="button" type="submit">Найти</button>
@@ -925,10 +1206,14 @@ async function openRentalReturnOrder(orderId) {
   try {
     state.rental.order = await api(`/rental/orders/${orderId}`);
     const assetRows = await Promise.all(state.rental.order.items.map(async (item) => {
-      const matches = await api(`/api/rental/assets?query=${encodeURIComponent(item.asset_number_snapshot)}`);
+      const matches = await api(`/api/operations/rental/assets?query=${encodeURIComponent(item.asset_number_snapshot)}`);
       return [item.rental_asset_id, matches.find((asset) => asset.id === item.rental_asset_id)];
     }));
     state.rental.returnAssets = new Map(assetRows);
+    state.operations.assets = [
+      ...state.operations.assets,
+      ...assetRows.map(([, asset]) => asset).filter((asset) => asset && !state.operations.assets.some((current) => current.id === asset.id)),
+    ];
     renderRentalReturnOrder();
   } catch (error) { showToast(error.message, true); }
 }
@@ -950,6 +1235,7 @@ function renderRentalReturnOrder() {
           <h3>${escapeHtml(item.title_snapshot)}</h3>
           <div class="muted small">${escapeHtml(item.asset_number_snapshot)} · ${escapeHtml(itemStatusLabel(item.status))}${asset ? ` · ${escapeHtml(availabilityLabel(asset.availability))}` : ""}</div>
         </div>
+        ${asset ? `<button class="button ghost compact" data-return-open-asset="${asset.id}">Предмет аренды →</button>` : ""}
       </div>
       ${completed ? `<div class="chips"><span class="chip ${item.status === "lost" ? "warn" : "good"}">${escapeHtml(itemStatusLabel(item.status))}</span></div>` : `
       <div class="field-row">
@@ -981,7 +1267,7 @@ function renderRentalReturnOrder() {
       <div><span class="muted small">Залог</span><strong>${formatMoney(Number(order.deposit_amount))}</strong></div>
       <div><span class="muted small">Статус</span><strong>${order.is_overdue ? "Просрочен" : "Активен"}</strong></div>
     </section>
-    <div class="section-heading"><h2>Экземпляры · ${order.items.length}</h2><span class="muted small">Ожидают: ${activeItems.length}</span></div>
+    <div class="section-heading"><h2>Предметы аренды · ${order.items.length}</h2><span class="muted small">Ожидают: ${activeItems.length}</span></div>
     <div>${itemCards}</div>
     ${activeItems.length ? `<section class="checkout-summary">
       <button class="button secondary" id="complete-selected-items" disabled>Завершить выбранные</button>
@@ -994,6 +1280,9 @@ function renderRentalReturnOrder() {
   });
   document.querySelectorAll("[data-return-outcome]").forEach((select) => {
     select.addEventListener("change", () => updateReturnOutcome(select.dataset.returnOutcome));
+  });
+  document.querySelectorAll("[data-return-open-asset]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsAsset(button.dataset.returnOpenAsset));
   });
   document.querySelector("#complete-selected-items")?.addEventListener("click", () => completeRentalItems(false));
   document.querySelector("#complete-all-items")?.addEventListener("click", () => completeRentalItems(true));

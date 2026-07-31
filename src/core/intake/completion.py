@@ -23,6 +23,9 @@ from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.repository import ImageRepository
 from core.media.schemas import ImageLinkCreate
 from core.media.service import ImageLinkService
+from core.pricing.enums import PriceType
+from core.pricing.schemas import PriceCreate
+from core.pricing.service import PriceService
 from core.readiness.service import ReadyForSaleService
 from core.receipt.posting import ReceiptPostingService
 from core.receipt.repository import ReceiptRepository
@@ -66,6 +69,7 @@ class CompleteIntakeWorkflow:
         self._posting_service = ReceiptPostingService(session)
         self._readiness_service = ReadyForSaleService(session)
         self._rental_service = RentalAssetService(session)
+        self._price_service = PriceService(session)
         self._activity = ActivityEventService(session)
 
     def complete(self, session_id: UUIDv7, *, actor_id: UUIDv7) -> IntakeCompletionRead:
@@ -114,6 +118,16 @@ class CompleteIntakeWorkflow:
                     quantity=item.rental_quantity,
                     actor_id=actor_id,
                 )
+                if item.retail_price is not None:
+                    self._price_service.set_price(
+                        variant_id,
+                        PriceCreate(
+                            price_type=PriceType.RETAIL,
+                            amount=item.retail_price,
+                            reason=f"IntakeSession {intake_session.id}",
+                        ),
+                        actor_id=actor_id,
+                    )
                 completed_items.append(
                     IntakeCompletionItemRead(
                         item_id=item.id,

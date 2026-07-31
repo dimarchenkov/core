@@ -49,6 +49,13 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Возврат аренды" in script.text
     assert "/complete-items" in script.text
     assert "Просрочен" in script.text
+    assert "/api/operations/catalog/products" in script.text
+    assert "/api/operations/rental/assets" in script.text
+    assert "Каталог" in script.text
+    assert "Экземпляры" not in script.text
+    assert "Цена продажи" in script.text
+    assert "Нужно указать цену" in script.text
+    assert "/api/labels/variants/" in script.text
     assert styles.status_code == 200
     assert "viewport-fit=cover" in page.text
 

@@ -22,6 +22,9 @@ from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
 from core.main import create_app
+from core.media.models import Image, ImageLink
+from core.pricing.enums import PriceType
+from core.pricing.models import Price
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
 from core.rental.exceptions import RentalDomainError
 from core.rental.mapper import rental_order_from_record, rental_order_to_record
@@ -59,6 +62,9 @@ def session() -> Generator[Session]:
             CustomerRecord.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            Image.__table__,
+            ImageLink.__table__,
+            Price.__table__,
             RentalAssetRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
@@ -469,6 +475,103 @@ def test_api_searches_rental_assets_for_checkout(
             "availability": "available",
         }
     ]
+
+
+def test_operational_catalog_links_product_asset_and_current_rental(
+    client: TestClient,
+    session: Session,
+    customer: Customer,
+    asset: RentalAssetRecord,
+) -> None:
+    """First-party read projections connect Product, RentalAsset, and active order."""
+    user = IdentityService(session).create_admin(
+        "operations@example.com",
+        "Operations",
+        "long enough password",
+    )
+    service = RentalOrderService(session)
+    order = service.issue(
+        _add_asset(service, _draft(service, customer.id), asset).id,
+        actor_id=user.id,
+    )
+    variant = session.get(CatalogVariant, asset.variant_id)
+    assert variant is not None
+    login = client.post(
+        "/api/auth/login",
+        data={"username": user.email, "password": "long enough password"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    products = client.get(
+        "/api/operations/catalog/products?product_filter=rental",
+        headers=headers,
+    )
+    product = client.get(
+        f"/api/operations/catalog/products/{variant.product_id}",
+        headers=headers,
+    )
+    rented = client.get(
+        "/api/operations/rental/assets?asset_filter=rented",
+        headers=headers,
+    )
+
+    assert products.status_code == 200
+    assert products.json()[0]["variant_count"] == 1
+    assert products.json()[0]["rental_asset_count"] == 1
+    assert products.json()[0]["available_asset_count"] == 0
+    assert products.json()[0]["needs_initial_price"] is True
+    assert products.json()[0]["primary_image_id"] is None
+    assert product.status_code == 200
+    assert product.json()["rental_assets"][0]["asset_number"] == asset.asset_number
+    assert rented.status_code == 200
+    assert rented.json()[0]["current_order_id"] == str(order.id)
+    assert rented.json()[0]["current_order_number"] == order.order_number
+
+    session.add(
+        Price(
+            variant_id=variant.id,
+            price_type=PriceType.RETAIL,
+            amount=Decimal("1500"),
+            currency="RUB",
+            effective_from=NOW + timedelta(days=30),
+        )
+    )
+    session.commit()
+    needs_price = client.get(
+        "/api/operations/catalog/products?product_filter=needs_price",
+        headers=headers,
+    )
+    refreshed_product = client.get(
+        f"/api/operations/catalog/products/{variant.product_id}",
+        headers=headers,
+    )
+
+    assert needs_price.status_code == 200
+    assert needs_price.json() == []
+    assert refreshed_product.json()["variants"][0]["current_retail_price"] is None
+    assert refreshed_product.json()["variants"][0]["has_ever_retail_price"] is True
+
+    service.complete_items(
+        order.id,
+        RentalOrderItemsComplete(
+            items=[
+                RentalOrderItemCompletion(
+                    item_id=order.items[0].id,
+                    outcome=RentalOrderItemOutcome.LOST,
+                    charged_amount=Decimal("0"),
+                )
+            ]
+        ),
+        actor_id=user.id,
+    )
+    lost = client.get(
+        "/api/operations/rental/assets?asset_filter=lost",
+        headers=headers,
+    )
+
+    assert lost.status_code == 200
+    assert lost.json()[0]["is_lost"] is True
+    assert lost.json()[0]["current_order_id"] is None
 
 
 def test_rental_order_routes_require_authentication(client: TestClient) -> None:

@@ -28,7 +28,7 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `IntakeDraftReadService` | Read transaction | No | No | No | pure completeness policy | None; read-only |
 | `ActivityEventService` | Participates in caller transaction | No | Never | Never | No | Intake command/workflow caller |
 | `ActivityReadService` | Read transaction | No | No | No | No | None; read-only |
-| `CompleteIntakeWorkflow` | Yes; row lock | own final flush + explicit staged domain operations | once; also commit on idempotent retry to release lock | once on exception | Catalog, ImageLink, Receipt, Posting, Readiness | Sole owner of Complete Intake |
+| `CompleteIntakeWorkflow` | Yes; row lock | own final flush + explicit staged domain operations | once; also commit on idempotent retry to release lock | once on exception | Catalog, ImageLink, optional Pricing, Receipt, Posting, Readiness | Sole owner of Complete Intake |
 | `RentalOrderService` | Yes; locks order and affected assets | No explicit flush | once per command or atomic item batch | once on checkout/return exception | Customer, Catalog Variant and Rental repositories | Sole owner of RentalOrder checkout and return commands |
 | `ReadyForSaleService` | Read transaction | No | No | No | No | None; read-only |
 | `VariantLabelService` | Read transaction | No | No | No | Readiness + renderer | None; read-only |

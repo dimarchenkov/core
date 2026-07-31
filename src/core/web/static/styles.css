@@ -139,6 +139,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 }
 .action-card strong { display: block; margin-top: 14px; font-size: 1rem; }
 .action-icon { font-size: 1.65rem; }
+.rental-actions { grid-template-columns: repeat(3, 1fr); }
 
 .session-list { display: grid; gap: 10px; margin: 18px 0; }
 .session-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 15px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
@@ -175,6 +176,23 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .return-item-head { display: flex; align-items: flex-start; gap: 12px; }
 .return-check { width: 24px; min-height: 24px; margin: 1px 0 0; accent-color: var(--green); }
 .return-item.completed-item { background: #efede5; box-shadow: none; }
+.filter-bar { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 10px; scrollbar-width: none; }
+.filter-chip { flex: 0 0 auto; min-height: 38px; padding: 8px 12px; color: var(--muted); background: #e7e4da; border: 0; border-radius: 99px; font-weight: 730; }
+.filter-chip.active { color: white; background: var(--green); }
+.catalog-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; width: 100%; padding: 16px; text-align: left; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
+.catalog-photo { width: 72px; height: 82px; object-fit: cover; border-radius: 13px; background: #e5e2d8; }
+.variant-commercial-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; }
+.variant-commercial-main { display: grid; gap: 4px; min-width: 0; }
+.barcode-value { display: inline-block; width: fit-content; padding: 5px 8px; color: #27332b; background: #eeeae0; border-radius: 7px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; letter-spacing: .08em; }
+.variant-actions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.catalog-counts { display: grid; justify-items: end; gap: 2px; color: var(--muted); font-size: .75rem; font-weight: 720; }
+.available-text { color: var(--green); }
+.asset-catalog-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
+.asset-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; min-width: 0; padding: 4px; text-align: left; color: var(--ink); background: transparent; border: 0; }
+.compact-chips { margin: 0; }
+.sort-field { grid-template-columns: auto minmax(180px, 280px); align-items: center; justify-content: end; }
+.sort-field select { min-height: 42px; }
+.horizontal-actions { grid-template-columns: 1fr 1fr; }
 
 .item { display: grid; grid-template-columns: 92px 1fr; gap: 14px; }
 .item-photo { width: 92px; height: 108px; object-fit: cover; border-radius: 15px; background: #e5e2d8; }
@@ -216,8 +234,15 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 520px) {
-  .actions, .field-row, .search-row, .order-facts { grid-template-columns: 1fr; }
+  .actions, .field-row, .search-row, .order-facts, .rental-actions { grid-template-columns: 1fr; }
   .action-card { min-height: 112px; }
+  .catalog-row { grid-template-columns: auto 1fr; }
+  .catalog-row .catalog-counts { grid-column: 1 / -1; }
+  .variant-commercial-card { grid-template-columns: auto 1fr; }
+  .variant-commercial-card .catalog-counts, .variant-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .catalog-counts { grid-template-columns: repeat(3, auto); justify-content: start; gap: 10px; }
+  .asset-catalog-row { grid-template-columns: 1fr; }
+  .sort-field { grid-template-columns: 1fr; }
   .item { grid-template-columns: 76px 1fr; }
   .item-photo, .photo-placeholder { width: 76px; height: 92px; }
 }

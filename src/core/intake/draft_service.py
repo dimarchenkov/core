@@ -141,6 +141,9 @@ class IntakeDraftWorkflow:
             purchase_price=(
                 quantize_money(data.purchase_price) if data.purchase_price is not None else None
             ),
+            retail_price=(
+                quantize_money(data.retail_price) if data.retail_price is not None else None
+            ),
             created_by_id=actor_id,
         )
         self._items.add(item)
@@ -224,6 +227,8 @@ class IntakeDraftWorkflow:
             self._ensure_category_is_active(data.category_id)
         if "purchase_price" in changes and data.purchase_price is not None:
             changes["purchase_price"] = quantize_money(data.purchase_price)
+        if "retail_price" in changes and data.retail_price is not None:
+            changes["retail_price"] = quantize_money(data.retail_price)
         for field, value in changes.items():
             setattr(item, field, value)
         item.updated_by_id = actor_id
@@ -328,7 +333,7 @@ class IntakeDraftWorkflow:
         changes: dict[str, object],
     ) -> None:
         """Prevent one identification path from accumulating unrelated fields."""
-        common = {"quantity", "rental_quantity", "purchase_price"}
+        common = {"quantity", "rental_quantity", "purchase_price", "retail_price"}
         if kind is IntakeItemKind.EXISTING_VARIANT:
             allowed = common
         elif kind is IntakeItemKind.NEW_VARIANT:

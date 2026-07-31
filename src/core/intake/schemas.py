@@ -55,6 +55,7 @@ class ExistingIntakeItemCreate(PydanticBaseModel):
     quantity: int | None = Field(default=None, gt=0)
     rental_quantity: int = Field(default=0, ge=0)
     purchase_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
+    retail_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
 
     @model_validator(mode="after")
     def require_exactly_one_identifier(self) -> ExistingIntakeItemCreate:
@@ -71,7 +72,7 @@ class ExistingIntakeItemCreate(PydanticBaseModel):
         """Trim a scanner value while preserving exact barcode semantics."""
         return value.strip() if value is not None else None
 
-    @field_validator("purchase_price", mode="before")
+    @field_validator("purchase_price", "retail_price", mode="before")
     @classmethod
     def reject_binary_float(cls, value: object) -> object:
         """Require decimal-safe money input."""
@@ -93,8 +94,9 @@ class IntakeItemDraftUpdate(PydanticBaseModel):
     quantity: int | None = Field(default=None, gt=0)
     rental_quantity: int | None = Field(default=None, ge=0)
     purchase_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
+    retail_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
 
-    @field_validator("purchase_price", mode="before")
+    @field_validator("purchase_price", "retail_price", mode="before")
     @classmethod
     def reject_binary_float(cls, value: object) -> object:
         """Require decimal-safe money input."""
@@ -145,6 +147,7 @@ class IntakeItemDraftRead(PydanticBaseModel):
     quantity: int | None
     rental_quantity: int
     purchase_price: Decimal | None
+    retail_price: Decimal | None
     abandoned_at: datetime | None
     abandonment_reason: str | None
     created_at: datetime
