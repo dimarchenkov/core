@@ -167,3 +167,74 @@ class RentalOrderItemRecord(BaseModel):
     def restore(self) -> None:
         """Reject restoration because order items cannot be soft-deleted."""
         raise RuntimeError("Rental order items cannot be restored.")
+
+
+class RentalMaintenanceRecord(BaseModel):
+    """Append-only service journal entry for one physical rental asset."""
+
+    __tablename__ = "rental_maintenance_records"
+
+    rental_asset_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("rental_assets.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    performed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    service_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    performer_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    result: Mapped[str] = mapped_column(Text, nullable=False)
+
+    def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
+        """Reject deletion because maintenance history is permanent."""
+        del actor_id
+        raise RuntimeError("Rental maintenance records cannot be deleted.")
+
+
+class RentalDamageRecord(BaseModel):
+    """Append-only observed damage linked to a physical asset and optional rental item."""
+
+    __tablename__ = "rental_damage_records"
+
+    rental_asset_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("rental_assets.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    order_item_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("rental_order_items.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    recorded_by_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
+        """Reject deletion because damage observations are permanent."""
+        del actor_id
+        raise RuntimeError("Rental damage records cannot be deleted.")
+
+
+class RentalConditionPhotoRecord(BaseModel):
+    """Link a Media image to a before/after observation of one rental asset."""
+
+    __tablename__ = "rental_condition_photos"
+
+    rental_asset_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("rental_assets.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    order_item_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("rental_order_items.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    image_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("images.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    stage: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    recorded_by_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
+        """Reject deletion because condition evidence is permanent."""
+        del actor_id
+        raise RuntimeError("Rental condition photos cannot be deleted.")

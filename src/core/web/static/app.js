@@ -17,6 +17,7 @@ const state = {
   rental: {
     customers: [],
     customer: null,
+    customerHistory: null,
     drafts: [],
     order: null,
     assets: [],
@@ -750,19 +751,26 @@ function bindOperationsAssetRows() {
 }
 
 async function openOperationsAsset(assetId) {
-  let asset = state.operations.assets.find((item) => item.id === assetId)
-    || state.operations.product?.rental_assets.find((item) => item.id === assetId);
-  if (!asset) {
-    const matches = await api(`/api/operations/rental/assets?query=${encodeURIComponent(assetId)}`);
-    asset = matches.find((item) => item.id === assetId);
-  }
-  if (!asset) return showToast("Предмет аренды не найден", true);
-  state.operations.asset = asset;
-  renderOperationsAsset();
+  try {
+    state.operations.asset = await api(`/api/operations/rental/assets/${assetId}/passport`);
+    renderOperationsAsset();
+  } catch (error) { showToast(error.message, true); }
 }
 
 function renderOperationsAsset() {
   const asset = state.operations.asset;
+  const timeline = asset.timeline.length ? asset.timeline.map((event) => `
+    <article class="timeline-row">
+      <span class="timeline-dot"></span>
+      <div><strong>${escapeHtml(event.title)}</strong><div class="muted small">${formatDate(event.occurred_at)}${event.detail ? ` · ${escapeHtml(event.detail)}` : ""}</div>
+      <div class="inline-actions">${event.order_id ? `<button class="link-button" data-passport-order="${event.order_id}">${escapeHtml(event.order_number)} →</button>` : ""}${event.customer_id ? `<button class="link-button" data-passport-customer="${event.customer_id}">${escapeHtml(event.customer_name)} →</button>` : ""}</div></div>
+    </article>`).join("") : '<div class="empty">История пока пуста</div>';
+  const maintenance = asset.maintenance.length ? asset.maintenance.map((record) => `
+    <article class="session-row"><span><strong>${escapeHtml(maintenanceTypeLabel(record.service_type))}</strong><br><span class="muted small">${formatDate(record.performed_at)} · ${escapeHtml(record.performer_name || "Исполнитель не указан")}</span><br>${escapeHtml(record.result)}${record.comment ? `<br><span class="muted small">${escapeHtml(record.comment)}</span>` : ""}</span></article>`).join("") : '<div class="empty">Обслуживаний пока нет</div>';
+  const damages = asset.damages.length ? asset.damages.map((record) => `
+    <article class="session-row"><span><strong>${escapeHtml(damageSeverityLabel(record.severity))}: ${escapeHtml(record.description)}</strong><br><span class="muted small">${formatDate(record.created_at)} · ${escapeHtml(record.recorded_by_name || "Автор не указан")}${record.order_number ? ` · ${escapeHtml(record.order_number)}` : ""}</span>${record.comment ? `<br>${escapeHtml(record.comment)}` : ""}</span></article>`).join("") : '<div class="empty">Повреждений не зафиксировано</div>';
+  const photos = asset.condition_photos.length ? asset.condition_photos.map((photo) => `
+    <figure class="condition-photo"><img data-image-id="${photo.image_id}" alt="Состояние ${photo.stage === "before" ? "до" : "после"} аренды"><figcaption>${photo.stage === "before" ? "До аренды" : "После аренды"} · ${formatDate(photo.created_at)}</figcaption></figure>`).join("") : '<div class="empty">Фотографий состояния пока нет</div>';
   root.innerHTML = `<div class="shell">
     ${topbar(true)}
     <p class="eyebrow">Предмет аренды</p>
@@ -771,17 +779,87 @@ function renderOperationsAsset() {
     <section class="card order-facts">
       <div><span class="muted small">SKU</span><strong>${escapeHtml(asset.sku)}</strong></div>
       <div><span class="muted small">Состояние</span><strong>${escapeHtml(conditionLabel(asset.condition))}</strong></div>
-      <div><span class="muted small">Доступность</span><strong>${asset.is_lost ? "LOST" : escapeHtml(availabilityLabel(asset.availability))}</strong></div>
+      <div><span class="muted small">Доступность</span><strong>${escapeHtml(availabilityLabel(asset.availability))}</strong></div>
       <div><span class="muted small">Текущая аренда</span><strong>${escapeHtml(asset.current_order_number || "Нет")}</strong></div>
+      <div><span class="muted small">Завершённых аренд</span><strong>${asset.completed_rental_count}</strong></div>
+      <div><span class="muted small">Поступил</span><strong>${formatDate(asset.created_at)}</strong></div>
     </section>
     <div class="actions horizontal-actions">
       <button class="button secondary" id="asset-open-product">← К товару</button>
       ${asset.current_order_id ? `<button class="button" id="asset-open-order">Открыть аренду →</button>` : ""}
     </div>
+    <div class="section-heading"><h2>История</h2><span class="muted small">Сдавался: ${asset.rental_count}</span></div>
+    <div class="timeline">${timeline}</div>
+    <div class="section-heading"><h2>Обслуживание</h2></div>
+    <div class="session-list">${maintenance}</div>
+    <form class="card" id="asset-maintenance-form">
+      <h3>Добавить обслуживание</h3>
+      <div class="field-row"><div class="field"><label>Тип</label><select name="service_type"><option value="preventive">Профилактика</option><option value="repair">Ремонт</option><option value="cleaning">Чистка</option><option value="part_replacement">Замена деталей</option></select></div><div class="field"><label>Результат</label><input name="result" required></div></div>
+      <div class="field"><label>Комментарий</label><textarea name="comment"></textarea></div>
+      <button class="button secondary full" type="submit">Сохранить обслуживание</button>
+    </form>
+    <div class="section-heading"><h2>Повреждения</h2></div>
+    <div class="session-list">${damages}</div>
+    <form class="card" id="asset-damage-form">
+      <h3>Зафиксировать повреждение</h3>
+      <div class="field"><label>Описание</label><textarea name="description" required></textarea></div>
+      <div class="field-row"><div class="field"><label>Серьёзность</label><select name="severity"><option value="minor">Незначительное</option><option value="moderate">Среднее</option><option value="major">Серьёзное</option><option value="critical">Критическое</option></select></div><div class="field"><label>Комментарий</label><input name="comment"></div></div>
+      <button class="button secondary full" type="submit">Сохранить повреждение</button>
+    </form>
+    <div class="section-heading"><h2>Фото состояния</h2></div>
+    <div class="condition-photos">${photos}</div>
+    <form class="card" id="asset-photo-form">
+      <div class="field-row"><div class="field"><label>Момент</label><select name="stage"><option value="before">До аренды</option><option value="after">После аренды</option></select></div><div class="field"><label>Фото</label><input name="file" type="file" accept="image/*" capture="environment" required></div></div>
+      <button class="button secondary full" type="submit">Добавить фото</button>
+    </form>
   </div>`;
   bindTopbar();
+  hydrateImages();
   document.querySelector("#asset-open-product").addEventListener("click", () => openOperationsProduct(asset.product_id));
   document.querySelector("#asset-open-order")?.addEventListener("click", () => openRentalReturnOrder(asset.current_order_id));
+  document.querySelectorAll("[data-passport-order]").forEach((button) => button.addEventListener("click", () => openRentalReturnOrder(button.dataset.passportOrder)));
+  document.querySelectorAll("[data-passport-customer]").forEach((button) => button.addEventListener("click", () => selectRentalCustomer(button.dataset.passportCustomer)));
+  document.querySelector("#asset-maintenance-form").addEventListener("submit", addAssetMaintenance);
+  document.querySelector("#asset-damage-form").addEventListener("submit", addAssetDamage);
+  document.querySelector("#asset-photo-form").addEventListener("submit", addAssetConditionPhoto);
+}
+
+async function addAssetMaintenance(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/maintenance`, { method: "POST", body: JSON.stringify({ service_type: data.get("service_type"), result: data.get("result"), comment: nullableText(data.get("comment")) }) });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast("Обслуживание сохранено");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addAssetDamage(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/damages`, { method: "POST", body: JSON.stringify({ description: data.get("description"), severity: data.get("severity"), comment: nullableText(data.get("comment")) }) });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast("Повреждение сохранено");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addAssetConditionPhoto(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/condition-photos`, { method: "POST", body: data });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast("Фото состояния сохранено");
+  } catch (error) { showToast(error.message, true); }
+}
+
+function maintenanceTypeLabel(value) {
+  return ({ preventive: "Профилактика", repair: "Ремонт", cleaning: "Чистка", part_replacement: "Замена деталей" })[value] || value;
+}
+
+function damageSeverityLabel(value) {
+  return ({ minor: "Незначительное", moderate: "Среднее", major: "Серьёзное", critical: "Критическое" })[value] || value;
 }
 
 async function openRentalHub() {
@@ -919,6 +997,7 @@ async function createRentalCustomer(event) {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    state.rental.customerHistory = null;
     renderRentalCustomer();
     showToast("Клиент создан");
   } catch (error) { showToast(error.message, true); }
@@ -926,13 +1005,17 @@ async function createRentalCustomer(event) {
 
 async function selectRentalCustomer(customerId) {
   try {
-    state.rental.customer = await api(`/api/customers/${customerId}`);
+    [state.rental.customer, state.rental.customerHistory] = await Promise.all([
+      api(`/api/customers/${customerId}`),
+      api(`/api/operations/rental/customers/${customerId}/history`),
+    ]);
     renderRentalCustomer();
   } catch (error) { showToast(error.message, true); }
 }
 
 function renderRentalCustomer() {
   const customer = state.rental.customer;
+  const history = state.rental.customerHistory;
   const now = new Date();
   const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   root.innerHTML = `<div class="shell">
@@ -944,6 +1027,7 @@ function renderRentalCustomer() {
       <p><a href="tel:${escapeHtml(customer.phone)}">${escapeHtml(customer.phone)}</a>${customer.email ? ` · ${escapeHtml(customer.email)}` : ""}</p>
       ${customer.note ? `<p class="muted">${escapeHtml(customer.note)}</p>` : ""}
     </section>
+    ${history ? renderCustomerRentalHistory(history) : ""}
     <form class="card" id="rental-create-form">
       <h2>Новый договор</h2>
       <div class="field-row">
@@ -957,6 +1041,23 @@ function renderRentalCustomer() {
   </div>`;
   bindTopbar();
   document.querySelector("#rental-create-form").addEventListener("submit", createRentalDraft);
+  document.querySelectorAll("[data-customer-order]").forEach((button) => {
+    button.addEventListener("click", () => openRentalReturnOrder(button.dataset.customerOrder));
+  });
+}
+
+function renderCustomerRentalHistory(history) {
+  const rows = [...history.active_rentals, ...history.completed_rentals];
+  const contracts = rows.length ? rows.map((order) => `
+    <button class="session-row" data-customer-order="${order.order_id}">
+      <span><strong>${escapeHtml(order.order_number)}</strong><br><span class="muted small">${order.status === "issued" ? "Активна" : "Завершена"} · ${order.item_count} поз.</span></span><span>→</span>
+    </button>`).join("") : '<div class="empty">Аренд пока нет</div>';
+  return `<section class="card">
+    <div class="section-heading"><h2>История аренд</h2><span class="chip">Всего: ${history.rental_count}</span></div>
+    <div class="chips"><span class="chip good">Активные: ${history.active_rentals.length}</span><span class="chip">Завершённые: ${history.completed_rentals.length}</span></div>
+    <p class="muted small">${history.current_debt_amount === null ? "Учёт задолженности пока не ведётся." : `Текущая задолженность: ${escapeHtml(history.current_debt_amount)} ₽`}</p>
+    <div class="session-list">${contracts}</div>
+  </section>`;
 }
 
 async function createRentalDraft(event) {
@@ -1253,6 +1354,10 @@ function renderRentalReturnOrder() {
       <div class="field-row">
         <div class="field"><label>Итоговая сумма, ₽</label><input data-return-charge="${item.id}" type="number" inputmode="decimal" min="0" step="0.01" value="${Number(item.agreed_price) - Number(item.discount)}" required></div>
         <div class="field"><label>Комментарий</label><input data-return-note="${item.id}" placeholder="Необязательно"></div>
+      </div>
+      <div class="damage-capture" data-return-damage-block="${item.id}">
+        <div class="field"><label>Повреждение <span class="muted">(если обнаружено)</span></label><textarea data-return-damage-description="${item.id}" placeholder="Опишите повреждение"></textarea></div>
+        <div class="field-row"><div class="field"><label>Серьёзность</label><select data-return-damage-severity="${item.id}"><option value="minor">Незначительное</option><option value="moderate">Среднее</option><option value="major">Серьёзное</option><option value="critical">Критическое</option></select></div><div class="field"><label>Комментарий</label><input data-return-damage-comment="${item.id}" placeholder="Необязательно"></div></div>
       </div>`}
     </article>`;
   }).join("");
@@ -1261,6 +1366,7 @@ function renderRentalReturnOrder() {
     <p class="eyebrow">Активная аренда · ${escapeHtml(order.order_number)}</p>
     <h1>${escapeHtml(order.customer_name_snapshot)}</h1>
     <p class="muted">${escapeHtml(order.customer_phone_snapshot)}</p>
+    <button class="button ghost compact" id="return-open-customer">Клиент →</button>
     <section class="card order-facts">
       <div><span class="muted small">Срок</span><strong>${formatShortDate(order.planned_start_at)} — ${formatShortDate(order.planned_return_at)}</strong></div>
       <div><span class="muted small">Стоимость</span><strong>${formatMoney(total)}</strong></div>
@@ -1284,6 +1390,7 @@ function renderRentalReturnOrder() {
   document.querySelectorAll("[data-return-open-asset]").forEach((button) => {
     button.addEventListener("click", () => openOperationsAsset(button.dataset.returnOpenAsset));
   });
+  document.querySelector("#return-open-customer").addEventListener("click", () => selectRentalCustomer(order.customer_id));
   document.querySelector("#complete-selected-items")?.addEventListener("click", () => completeRentalItems(false));
   document.querySelector("#complete-all-items")?.addEventListener("click", () => completeRentalItems(true));
 }
@@ -1301,6 +1408,8 @@ function updateReturnOutcome(itemId) {
   const outcome = document.querySelector(`[data-return-outcome="${itemId}"]`).value;
   const condition = document.querySelector(`[data-return-condition="${itemId}"]`);
   condition.disabled = outcome === "lost";
+  const damageBlock = document.querySelector(`[data-return-damage-block="${itemId}"]`);
+  if (damageBlock) damageBlock.classList.toggle("hidden", outcome === "lost");
 }
 
 function buildReturnCompletion(itemId) {
@@ -1326,16 +1435,32 @@ async function completeRentalItems(all) {
   const prompt = all ? "Завершить все оставшиеся позиции?" : `Завершить выбранные позиции: ${itemIds.length}?`;
   if (!window.confirm(`${prompt}${hasLost ? " Среди них есть LOST." : ""}`)) return;
   try {
+    const damageEntries = itemIds.map((itemId) => {
+      const description = nullableText(document.querySelector(`[data-return-damage-description="${itemId}"]`)?.value);
+      const item = state.rental.order.items.find((value) => value.id === itemId);
+      return description && item ? {
+        assetId: item.rental_asset_id,
+        payload: {
+          order_item_id: itemId,
+          description,
+          severity: document.querySelector(`[data-return-damage-severity="${itemId}"]`).value,
+          comment: nullableText(document.querySelector(`[data-return-damage-comment="${itemId}"]`).value),
+        },
+      } : null;
+    }).filter(Boolean);
     state.rental.order = await api(`/rental/orders/${state.rental.order.id}/complete-items`, {
       method: "POST",
       body: JSON.stringify({ items: itemIds.map(buildReturnCompletion) }),
     });
+    const damageResults = await Promise.allSettled(damageEntries.map((entry) => api(`/api/operations/rental/assets/${entry.assetId}/damages`, { method: "POST", body: JSON.stringify(entry.payload) })));
+    const damageFailed = damageResults.some((result) => result.status === "rejected");
     if (state.rental.order.status === "closed") {
       renderRentalReturnCompleted();
+      if (damageFailed) showToast("Возврат завершён, но часть повреждений не сохранилась.", true);
       return;
     }
     await openRentalReturnOrder(state.rental.order.id);
-    showToast("Частичный возврат сохранён. Договор остаётся активным.");
+    showToast(damageFailed ? "Возврат сохранён, но часть повреждений не сохранилась." : "Частичный возврат сохранён. Договор остаётся активным.", damageFailed);
   } catch (error) { showToast(error.message, true); }
 }
 

@@ -51,6 +51,11 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Просрочен" in script.text
     assert "/api/operations/catalog/products" in script.text
     assert "/api/operations/rental/assets" in script.text
+    assert "/passport" in script.text
+    assert "/maintenance" in script.text
+    assert "/damages" in script.text
+    assert "/condition-photos" in script.text
+    assert "/history" in script.text
     assert "Каталог" in script.text
     assert "Экземпляры" not in script.text
     assert "Цена продажи" in script.text

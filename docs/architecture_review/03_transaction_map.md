@@ -30,6 +30,8 @@ transaction. The table distinguishes this from an explicit architectural owner.
 | `ActivityReadService` | Read transaction | No | No | No | No | None; read-only |
 | `CompleteIntakeWorkflow` | Yes; row lock | own final flush + explicit staged domain operations | once; also commit on idempotent retry to release lock | once on exception | Catalog, ImageLink, optional Pricing, Receipt, Posting, Readiness | Sole owner of Complete Intake |
 | `RentalOrderService` | Yes; locks order and affected assets | No explicit flush | once per command or atomic item batch | once on checkout/return exception | Customer, Catalog Variant and Rental repositories | Sole owner of RentalOrder checkout and return commands |
+| `RentalLifecycleService.add_maintenance/add_damage` | Yes | append-only Rental journal facts | once per command | request rollback on failure | RentalAsset/order-item reference validation | Lifecycle command itself |
+| `RentalLifecycleService.add_condition_photo` | Yes | nested transaction-neutral Media upload | once | outer rollback plus owned-file compensation | Media source image and Rental-owned condition link | Lifecycle command itself |
 | `ReadyForSaleService` | Read transaction | No | No | No | No | None; read-only |
 | `VariantLabelService` | Read transaction | No | No | No | Readiness + renderer | None; read-only |
 | `AqsiPayloadBuilder` | Read transaction | No | No | No | Readiness | None; read-only |

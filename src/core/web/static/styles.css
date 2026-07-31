@@ -193,6 +193,18 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .sort-field { grid-template-columns: auto minmax(180px, 280px); align-items: center; justify-content: end; }
 .sort-field select { min-height: 42px; }
 .horizontal-actions { grid-template-columns: 1fr 1fr; }
+.timeline { display: grid; gap: 0; margin: 14px 0 24px; }
+.timeline-row { position: relative; display: grid; grid-template-columns: 18px 1fr; gap: 10px; padding: 10px 0 16px; }
+.timeline-row::before { content: ""; position: absolute; top: 22px; bottom: -8px; left: 6px; width: 2px; background: var(--line); }
+.timeline-row:last-child::before { display: none; }
+.timeline-dot { position: relative; z-index: 1; width: 14px; height: 14px; margin-top: 3px; border: 3px solid var(--card); border-radius: 50%; background: var(--green); box-shadow: 0 0 0 1px var(--green); }
+.inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 5px; }
+.link-button { padding: 0; color: var(--green); background: none; border: 0; font-weight: 750; }
+.condition-photos { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.condition-photo { margin: 0; padding: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
+.condition-photo img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 11px; background: #e5e2d8; }
+.condition-photo figcaption { padding: 8px 3px 2px; color: var(--muted); font-size: .78rem; }
+.damage-capture { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 
 .item { display: grid; grid-template-columns: 92px 1fr; gap: 14px; }
 .item-photo { width: 92px; height: 108px; object-fit: cover; border-radius: 15px; background: #e5e2d8; }
@@ -240,6 +252,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
   .catalog-row .catalog-counts { grid-column: 1 / -1; }
   .variant-commercial-card { grid-template-columns: auto 1fr; }
   .variant-commercial-card .catalog-counts, .variant-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .condition-photos { grid-template-columns: 1fr; }
   .catalog-counts { grid-template-columns: repeat(3, auto); justify-content: start; gap: 10px; }
   .asset-catalog-row { grid-template-columns: 1fr; }
   .sort-field { grid-template-columns: 1fr; }

@@ -4,11 +4,13 @@ import re
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image as PillowImage
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -23,12 +25,22 @@ from core.identity.models import User
 from core.identity.service import IdentityService
 from core.main import create_app
 from core.media.models import Image, ImageLink
+from core.media.service import ImageService
+from core.media.storage import LocalImageStorage
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
 from core.rental.exceptions import RentalDomainError
+from core.rental.lifecycle_routes import get_lifecycle_image_service
 from core.rental.mapper import rental_order_from_record, rental_order_to_record
-from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
+from core.rental.models import (
+    RentalAssetRecord,
+    RentalConditionPhotoRecord,
+    RentalDamageRecord,
+    RentalMaintenanceRecord,
+    RentalOrderItemRecord,
+    RentalOrderRecord,
+)
 from core.rental.order import RentalOrder
 from core.rental.order_admin import RentalOrderAdmin, RentalOrderItemAdmin
 from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus
@@ -68,6 +80,9 @@ def session() -> Generator[Session]:
             RentalAssetRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
+            RentalMaintenanceRecord.__table__,
+            RentalDamageRecord.__table__,
+            RentalConditionPhotoRecord.__table__,
         ],
     )
     factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -572,6 +587,113 @@ def test_operational_catalog_links_product_asset_and_current_rental(
     assert lost.status_code == 200
     assert lost.json()[0]["is_lost"] is True
     assert lost.json()[0]["current_order_id"] is None
+
+
+def test_rental_asset_passport_journals_and_customer_history(
+    client: TestClient,
+    session: Session,
+    customer: Customer,
+    asset: RentalAssetRecord,
+    tmp_path: Path,
+) -> None:
+    """Lifecycle projections combine immutable orders with append-only service evidence."""
+    user = IdentityService(session).create_admin(
+        "passport@example.com",
+        "Passport Operator",
+        "long enough password",
+    )
+    service = RentalOrderService(session)
+    order = service.issue(
+        _add_asset(service, _draft(service, customer.id), asset).id,
+        actor_id=user.id,
+    )
+    item = order.items[0]
+    login = client.post(
+        "/api/auth/login",
+        data={"username": user.email, "password": "long enough password"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    client.app.dependency_overrides[get_lifecycle_image_service] = lambda: ImageService(
+        session,
+        storage=LocalImageStorage(tmp_path / "storage"),
+    )
+
+    maintenance = client.post(
+        f"/api/operations/rental/assets/{asset.id}/maintenance",
+        headers=headers,
+        json={
+            "service_type": "cleaning",
+            "result": "Ready for use",
+            "comment": "Routine cleaning",
+        },
+    )
+    damage = client.post(
+        f"/api/operations/rental/assets/{asset.id}/damages",
+        headers=headers,
+        json={
+            "order_item_id": str(item.id),
+            "description": "Scratched housing",
+            "severity": "minor",
+        },
+    )
+    photo_bytes = BytesIO()
+    PillowImage.new("RGB", (8, 6), color="green").save(photo_bytes, format="PNG")
+    photo = client.post(
+        f"/api/operations/rental/assets/{asset.id}/condition-photos",
+        headers=headers,
+        data={"stage": "after", "order_item_id": str(item.id)},
+        files={"file": ("after.png", photo_bytes.getvalue(), "image/png")},
+    )
+    completed = service.complete_items(
+        order.id,
+        RentalOrderItemsComplete(
+            items=[
+                RentalOrderItemCompletion(
+                    item_id=item.id,
+                    outcome=RentalOrderItemOutcome.RETURNED,
+                    condition=AssetCondition.GOOD,
+                    charged_amount=Decimal("700"),
+                )
+            ]
+        ),
+        actor_id=user.id,
+    )
+    passport = client.get(
+        f"/api/operations/rental/assets/{asset.id}/passport",
+        headers=headers,
+    )
+    customer_history = client.get(
+        f"/api/operations/rental/customers/{customer.id}/history",
+        headers=headers,
+    )
+
+    assert maintenance.status_code == 201
+    assert maintenance.json()["performer_name"] == user.full_name
+    assert damage.status_code == 201
+    assert damage.json()["order_number"] == order.order_number
+    assert photo.status_code == 201
+    assert photo.json()["stage"] == "after"
+    assert completed.status is RentalOrderStatus.CLOSED
+    assert passport.status_code == 200
+    body = passport.json()
+    assert body["completed_rental_count"] == 1
+    assert {event["event_type"] for event in body["timeline"]} == {
+        "intake",
+        "issued",
+        "maintenance",
+        "damage",
+        "returned",
+    }
+    assert [event["occurred_at"] for event in body["timeline"]] == sorted(
+        event["occurred_at"] for event in body["timeline"]
+    )
+    assert body["maintenance"][0]["service_type"] == "cleaning"
+    assert body["damages"][0]["description"] == "Scratched housing"
+    assert body["condition_photos"][0]["stage"] == "after"
+    assert customer_history.status_code == 200
+    assert customer_history.json()["rental_count"] == 1
+    assert customer_history.json()["active_rentals"] == []
+    assert customer_history.json()["completed_rentals"][0]["order_id"] == str(order.id)
 
 
 def test_rental_order_routes_require_authentication(client: TestClient) -> None:

@@ -159,8 +159,8 @@ Engine.
 
 **Sprints:** Sprint 9 — Rental Foundation; Sprint 10A — Customers Foundation; Sprint 10B —
 Rental Orders; Sprint 10C — Rental Checkout Workflow ✅; Sprint 10D — Rental Return Workflow ✅;
-**Sprint 10E — Catalog & Rental Operations UX (current)**; Sprint 10F — Rental History &
-Maintenance; Sprint 10G — Rental Economics.
+Sprint 10E — Catalog & Rental Operations UX ✅; **Sprint 10F — Rental History & Maintenance
+(current)**; Sprint 10G — Rental Economics.
 
 После первого полноценного пользовательского тестирования ежедневный UX каталога и аренды
 выделен в отдельный Sprint до расширения истории, обслуживания и экономики.
@@ -185,10 +185,10 @@ Maintenance; Sprint 10G — Rental Economics.
 - [x] Явный аудит оператора выдачи.
 - [x] Явный аудит операторов возврата.
 - [x] Завершение позиции как LOST без имитации физического возврата.
-- [ ] История аренд клиента и RentalAsset.
-- [ ] Фото состояния до и после аренды.
-- [ ] История пломб, повреждений и обслуживания.
-- [ ] Полный цикл обслуживания экземпляра.
+- [x] История аренд клиента и RentalAsset.
+- [x] Фото состояния до и после аренды.
+- [x] История повреждений и обслуживания.
+- [x] Журнал обслуживания экземпляра.
 - [ ] Арендные тарифы и правила расчёта.
 - [ ] Источник стоимости приобретения и расходов на подготовку экземпляра.
 - [ ] Расчёт количества завершённых аренд и фактического дохода экземпляра.
