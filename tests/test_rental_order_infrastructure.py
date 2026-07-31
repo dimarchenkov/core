@@ -31,8 +31,11 @@ from core.rental.order_admin import RentalOrderAdmin, RentalOrderItemAdmin
 from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus
 from core.rental.order_schemas import (
     RentalOrderCreate,
+    RentalOrderItemCompletion,
     RentalOrderItemCreate,
+    RentalOrderItemOutcome,
     RentalOrderItemReturn,
+    RentalOrderItemsComplete,
 )
 from core.rental.order_service import RentalOrderService
 from core.rental.repository import RentalOrderRepository
@@ -187,18 +190,21 @@ def test_mapper_round_trip_restores_complete_aggregate(customer: Customer) -> No
 def test_repository_supports_business_number_and_search(
     session: Session,
     customer: Customer,
+    asset: RentalAssetRecord,
 ) -> None:
     """Repository reads aggregate projections without committing."""
     service = RentalOrderService(session)
-    order = _draft(service, customer.id)
+    order = _add_asset(service, _draft(service, customer.id), asset)
     repository = RentalOrderRepository(session)
 
     by_number = repository.get_by_number(order.order_number)
     found = repository.search("Иван")
+    found_by_asset = repository.search("RENT-000001")
 
     assert by_number is not None
     assert by_number.id == order.id
     assert [record.id for record in found] == [order.id]
+    assert [record.id for record in found_by_asset] == [order.id]
 
 
 def test_service_issues_and_returns_order_atomically(
@@ -247,6 +253,120 @@ def test_service_rejects_unavailable_asset_before_adding_item(
     assert service.get(order.id).items == ()
 
 
+def test_service_completes_partial_return_and_lost_atomically(
+    session: Session,
+    customer: Customer,
+    asset: RentalAssetRecord,
+) -> None:
+    """Batch return preserves partial state and LOST never makes an asset available."""
+    second_asset = RentalAssetRecord(
+        id=generate_uuid_v7(),
+        asset_number="RENT-000002",
+        variant_id=asset.variant_id,
+        intake_item_id=generate_uuid_v7(),
+        purpose=AssetPurpose.RENTAL,
+        condition=AssetCondition.NEW,
+        availability=RentalAvailability.AVAILABLE,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    session.add(second_asset)
+    session.commit()
+    operator = IdentityService(session).create_admin(
+        "return-operator@example.com",
+        "Return Operator",
+        "long enough password",
+    )
+    service = RentalOrderService(session)
+    order = _add_asset(service, _draft(service, customer.id), asset)
+    order = _add_asset(service, order, second_asset)
+    issued = service.issue(order.id, actor_id=operator.id)
+
+    partial = service.complete_items(
+        order.id,
+        RentalOrderItemsComplete(
+            items=[
+                RentalOrderItemCompletion(
+                    item_id=issued.items[0].id,
+                    outcome=RentalOrderItemOutcome.RETURNED,
+                    condition=AssetCondition.DAMAGED,
+                    charged_amount=Decimal("650"),
+                    completed_at=NOW + timedelta(days=2),
+                    note="Повреждён корпус",
+                )
+            ]
+        ),
+        actor_id=operator.id,
+    )
+
+    session.refresh(asset)
+    first_item_record = session.get(RentalOrderItemRecord, issued.items[0].id)
+    assert partial.status is RentalOrderStatus.ISSUED
+    assert asset.availability is RentalAvailability.MAINTENANCE
+    assert first_item_record is not None
+    assert first_item_record.completed_by_id == operator.id
+
+    completed = service.complete_items(
+        order.id,
+        RentalOrderItemsComplete(
+            items=[
+                RentalOrderItemCompletion(
+                    item_id=issued.items[1].id,
+                    outcome=RentalOrderItemOutcome.LOST,
+                    charged_amount=Decimal("5000"),
+                    completed_at=NOW + timedelta(days=3),
+                    note="Не возвращён клиентом",
+                )
+            ]
+        ),
+        actor_id=operator.id,
+    )
+
+    session.refresh(second_asset)
+    second_item_record = session.get(RentalOrderItemRecord, issued.items[1].id)
+    assert completed.status is RentalOrderStatus.CLOSED
+    assert completed.items[1].status is RentalOrderItemStatus.LOST
+    assert second_asset.availability is RentalAvailability.RENTED
+    assert second_item_record is not None
+    assert second_item_record.completed_by_id == operator.id
+
+
+def test_batch_return_rolls_back_every_item_when_one_command_fails(
+    session: Session,
+    customer: Customer,
+    asset: RentalAssetRecord,
+) -> None:
+    """A bad item in a batch cannot leave a physical asset partially returned."""
+    service = RentalOrderService(session)
+    issued = service.issue(_add_asset(service, _draft(service, customer.id), asset).id)
+
+    with pytest.raises(RentalDomainError):
+        service.complete_items(
+            issued.id,
+            RentalOrderItemsComplete(
+                items=[
+                    RentalOrderItemCompletion(
+                        item_id=issued.items[0].id,
+                        outcome=RentalOrderItemOutcome.RETURNED,
+                        condition=AssetCondition.GOOD,
+                        charged_amount=Decimal("650"),
+                    ),
+                    RentalOrderItemCompletion(
+                        item_id=generate_uuid_v7(),
+                        outcome=RentalOrderItemOutcome.LOST,
+                        charged_amount=Decimal("0"),
+                    ),
+                ]
+            ),
+        )
+
+    session.refresh(asset)
+    persisted = service.get(issued.id)
+    assert persisted.status is RentalOrderStatus.ISSUED
+    assert persisted.items[0].status is RentalOrderItemStatus.ISSUED
+    assert asset.availability is RentalAvailability.RENTED
+
+
 def test_api_supports_authenticated_rental_order_workflow(
     client: TestClient,
     session: Session,
@@ -291,17 +411,30 @@ def test_api_supports_authenticated_rental_order_workflow(
     issued = client.post(f"/rental/orders/{order_id}/issue", headers=headers)
     assert issued.status_code == 200
     assert issued.json()["status"] == "issued"
+    assert issued.json()["is_overdue"] is True
     persisted_order = session.get(RentalOrderRecord, UUID(order_id))
     assert persisted_order is not None
     assert persisted_order.issued_by_id == user.id
 
     returned = client.post(
-        f"/rental/orders/{order_id}/items/{item_id}/return",
+        f"/rental/orders/{order_id}/complete-items",
         headers=headers,
-        json={"condition": "good", "charged_amount": "650"},
+        json={
+            "items": [
+                {
+                    "item_id": item_id,
+                    "outcome": "returned",
+                    "condition": "good",
+                    "charged_amount": "650",
+                }
+            ]
+        },
     )
     assert returned.status_code == 200
     assert returned.json()["status"] == "closed"
+    persisted_item = session.get(RentalOrderItemRecord, UUID(item_id))
+    assert persisted_item is not None
+    assert persisted_item.completed_by_id == user.id
     assert client.get(f"/rental/orders/{order_id}", headers=headers).status_code == 200
 
 

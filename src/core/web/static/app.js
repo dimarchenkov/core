@@ -20,6 +20,7 @@ const state = {
     drafts: [],
     order: null,
     assets: [],
+    returnAssets: new Map(),
   },
 };
 
@@ -184,6 +185,7 @@ function renderHome(activity) {
       <div class="actions">
         <button class="action-card" id="open-intake"><span class="action-icon">＋</span><strong>Приёмка</strong><span class="muted small">Принять товар</span></button>
         <button class="action-card" id="open-rental"><span class="action-icon">↗</span><strong>Выдача аренды</strong><span class="muted small">Найти клиента и оформить заказ</span></button>
+        <button class="action-card" id="open-rental-return"><span class="action-icon">↙</span><strong>Возврат аренды</strong><span class="muted small">Осмотреть и принять экземпляры</span></button>
       </div>
       <section id="intake-home" class="hidden">
       <p class="muted">Сначала определяем товар. Поставщика и цены добавим после.</p>
@@ -200,6 +202,7 @@ function renderHome(activity) {
     document.querySelector("#open-intake").scrollIntoView({ behavior: "smooth" });
   });
   document.querySelector("#open-rental").addEventListener("click", openRentalHome);
+  document.querySelector("#open-rental-return").addEventListener("click", openRentalReturnHome);
   document.querySelector("#start-session").addEventListener("click", startSession);
   document.querySelectorAll("[data-resume]").forEach((button) => {
     button.addEventListener("click", () => openSession(button.dataset.resume));
@@ -549,7 +552,14 @@ function renderResult() {
 async function openRentalHome() {
   try {
     const drafts = await api("/rental/orders?order_status=draft");
-    state.rental = { customers: [], customer: null, drafts, order: null, assets: [] };
+    state.rental = {
+      customers: [],
+      customer: null,
+      drafts,
+      order: null,
+      assets: [],
+      returnAssets: new Map(),
+    };
     renderRentalHome();
   } catch (error) { showToast(error.message, true); }
 }
@@ -867,6 +877,199 @@ function renderRentalIssued() {
   document.querySelector("#rental-issued-done").addEventListener("click", loadHome);
 }
 
+async function openRentalReturnHome(query = "") {
+  try {
+    const suffix = query ? `&query=${encodeURIComponent(query)}` : "";
+    const orders = await api(`/rental/orders?order_status=issued${suffix}`);
+    state.rental.drafts = orders;
+    state.rental.order = null;
+    state.rental.returnAssets = new Map();
+    renderRentalReturnHome(query);
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalReturnHome(query = "") {
+  const rows = state.rental.drafts.length
+    ? state.rental.drafts.map((order) => `
+      <button class="session-row" data-return-order="${order.id}">
+        <span>
+          <strong>${escapeHtml(order.order_number)}</strong>
+          ${order.is_overdue ? '<span class="chip warn inline-chip">Просрочен</span>' : ""}
+          <br><span class="muted small">${escapeHtml(order.customer_name_snapshot)} · ${escapeHtml(order.customer_phone_snapshot)} · возврат ${formatShortDate(order.planned_return_at)}</span>
+        </span>
+        <span aria-hidden="true">→</span>
+      </button>`).join("")
+    : '<div class="empty">Активные аренды не найдены</div>';
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Rental return</p>
+    <h1>Возврат аренды</h1>
+    <p class="muted">Поиск по договору, клиенту, телефону или номеру экземпляра.</p>
+    <form class="search-row" id="return-order-search-form">
+      <input name="query" value="${escapeHtml(query)}" autocomplete="off" placeholder="RORD-, RENT-, имя или телефон">
+      <button class="button" type="submit">Найти</button>
+    </form>
+    <div class="session-list">${rows}</div>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#return-order-search-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    openRentalReturnHome(String(new FormData(event.currentTarget).get("query") || "").trim());
+  });
+  document.querySelectorAll("[data-return-order]").forEach((button) => {
+    button.addEventListener("click", () => openRentalReturnOrder(button.dataset.returnOrder));
+  });
+}
+
+async function openRentalReturnOrder(orderId) {
+  try {
+    state.rental.order = await api(`/rental/orders/${orderId}`);
+    const assetRows = await Promise.all(state.rental.order.items.map(async (item) => {
+      const matches = await api(`/api/rental/assets?query=${encodeURIComponent(item.asset_number_snapshot)}`);
+      return [item.rental_asset_id, matches.find((asset) => asset.id === item.rental_asset_id)];
+    }));
+    state.rental.returnAssets = new Map(assetRows);
+    renderRentalReturnOrder();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalReturnOrder() {
+  const order = state.rental.order;
+  const total = order.items.reduce(
+    (sum, item) => sum + Number(item.agreed_price) - Number(item.discount),
+    0,
+  );
+  const activeItems = order.items.filter((item) => item.status === "issued");
+  const itemCards = order.items.map((item) => {
+    const asset = state.rental.returnAssets.get(item.rental_asset_id);
+    const completed = item.status !== "issued";
+    return `<article class="card return-item ${completed ? "completed-item" : ""}" data-return-item="${item.id}">
+      <div class="return-item-head">
+        ${completed ? "" : `<input class="return-check" type="checkbox" data-return-select="${item.id}" aria-label="Выбрать ${escapeHtml(item.asset_number_snapshot)}">`}
+        <div>
+          <h3>${escapeHtml(item.title_snapshot)}</h3>
+          <div class="muted small">${escapeHtml(item.asset_number_snapshot)} · ${escapeHtml(itemStatusLabel(item.status))}${asset ? ` · ${escapeHtml(availabilityLabel(asset.availability))}` : ""}</div>
+        </div>
+      </div>
+      ${completed ? `<div class="chips"><span class="chip ${item.status === "lost" ? "warn" : "good"}">${escapeHtml(itemStatusLabel(item.status))}</span></div>` : `
+      <div class="field-row">
+        <div class="field"><label>Результат</label><select data-return-outcome="${item.id}">
+          <option value="returned">Возвращён</option>
+          <option value="lost">LOST — не возвращён</option>
+        </select></div>
+        <div class="field"><label>Осмотр</label><select data-return-condition="${item.id}">
+          <option value="good">Без замечаний</option>
+          <option value="fair">Имеются замечания</option>
+          <option value="damaged">Повреждён</option>
+          <option value="unusable">Непригоден</option>
+        </select></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Итоговая сумма, ₽</label><input data-return-charge="${item.id}" type="number" inputmode="decimal" min="0" step="0.01" value="${Number(item.agreed_price) - Number(item.discount)}" required></div>
+        <div class="field"><label>Комментарий</label><input data-return-note="${item.id}" placeholder="Необязательно"></div>
+      </div>`}
+    </article>`;
+  }).join("");
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Активная аренда · ${escapeHtml(order.order_number)}</p>
+    <h1>${escapeHtml(order.customer_name_snapshot)}</h1>
+    <p class="muted">${escapeHtml(order.customer_phone_snapshot)}</p>
+    <section class="card order-facts">
+      <div><span class="muted small">Срок</span><strong>${formatShortDate(order.planned_start_at)} — ${formatShortDate(order.planned_return_at)}</strong></div>
+      <div><span class="muted small">Стоимость</span><strong>${formatMoney(total)}</strong></div>
+      <div><span class="muted small">Залог</span><strong>${formatMoney(Number(order.deposit_amount))}</strong></div>
+      <div><span class="muted small">Статус</span><strong>${order.is_overdue ? "Просрочен" : "Активен"}</strong></div>
+    </section>
+    <div class="section-heading"><h2>Экземпляры · ${order.items.length}</h2><span class="muted small">Ожидают: ${activeItems.length}</span></div>
+    <div>${itemCards}</div>
+    ${activeItems.length ? `<section class="checkout-summary">
+      <button class="button secondary" id="complete-selected-items" disabled>Завершить выбранные</button>
+      <button class="button" id="complete-all-items">Завершить все</button>
+    </section>` : ""}
+  </div>`;
+  bindTopbar();
+  document.querySelectorAll("[data-return-select]").forEach((checkbox) => {
+    checkbox.addEventListener("change", updateReturnSelection);
+  });
+  document.querySelectorAll("[data-return-outcome]").forEach((select) => {
+    select.addEventListener("change", () => updateReturnOutcome(select.dataset.returnOutcome));
+  });
+  document.querySelector("#complete-selected-items")?.addEventListener("click", () => completeRentalItems(false));
+  document.querySelector("#complete-all-items")?.addEventListener("click", () => completeRentalItems(true));
+}
+
+function updateReturnSelection() {
+  const count = document.querySelectorAll("[data-return-select]:checked").length;
+  const button = document.querySelector("#complete-selected-items");
+  if (button) {
+    button.disabled = count === 0;
+    button.textContent = count ? `Завершить выбранные · ${count}` : "Завершить выбранные";
+  }
+}
+
+function updateReturnOutcome(itemId) {
+  const outcome = document.querySelector(`[data-return-outcome="${itemId}"]`).value;
+  const condition = document.querySelector(`[data-return-condition="${itemId}"]`);
+  condition.disabled = outcome === "lost";
+}
+
+function buildReturnCompletion(itemId) {
+  const outcome = document.querySelector(`[data-return-outcome="${itemId}"]`).value;
+  const note = nullableText(document.querySelector(`[data-return-note="${itemId}"]`).value);
+  return {
+    item_id: itemId,
+    outcome,
+    ...(outcome === "returned"
+      ? { condition: document.querySelector(`[data-return-condition="${itemId}"]`).value }
+      : {}),
+    charged_amount: document.querySelector(`[data-return-charge="${itemId}"]`).value,
+    note,
+  };
+}
+
+async function completeRentalItems(all) {
+  const itemIds = all
+    ? state.rental.order.items.filter((item) => item.status === "issued").map((item) => item.id)
+    : [...document.querySelectorAll("[data-return-select]:checked")].map((input) => input.dataset.returnSelect);
+  if (!itemIds.length) return;
+  const hasLost = itemIds.some((id) => document.querySelector(`[data-return-outcome="${id}"]`).value === "lost");
+  const prompt = all ? "Завершить все оставшиеся позиции?" : `Завершить выбранные позиции: ${itemIds.length}?`;
+  if (!window.confirm(`${prompt}${hasLost ? " Среди них есть LOST." : ""}`)) return;
+  try {
+    state.rental.order = await api(`/rental/orders/${state.rental.order.id}/complete-items`, {
+      method: "POST",
+      body: JSON.stringify({ items: itemIds.map(buildReturnCompletion) }),
+    });
+    if (state.rental.order.status === "closed") {
+      renderRentalReturnCompleted();
+      return;
+    }
+    await openRentalReturnOrder(state.rental.order.id);
+    showToast("Частичный возврат сохранён. Договор остаётся активным.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalReturnCompleted() {
+  const order = state.rental.order;
+  root.innerHTML = `<div class="shell">
+    ${topbar()}
+    <div class="result" style="margin-top:36px">
+      <div class="result-mark">✓</div>
+      <p class="eyebrow">Возврат завершён</p>
+      <h1>${escapeHtml(order.order_number)}</h1>
+      <p>Все позиции договора завершены. Заказ закрыт автоматически.</p>
+      <div class="chips" style="justify-content:center">
+        <span class="chip good">Возвращено: ${order.items.filter((item) => item.status === "returned").length}</span>
+        ${order.items.some((item) => item.status === "lost") ? `<span class="chip warn">LOST: ${order.items.filter((item) => item.status === "lost").length}</span>` : ""}
+      </div>
+      <button class="button full" id="rental-return-done" style="margin-top:20px">Готово</button>
+    </div>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#rental-return-done").addEventListener("click", loadHome);
+}
+
 function toLocalInput(date) {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return local.toISOString().slice(0, 16);
@@ -886,6 +1089,10 @@ function conditionLabel(value) {
 
 function availabilityLabel(value) {
   return { available: "Доступен", rented: "Выдан", maintenance: "Обслуживание" }[value] || value;
+}
+
+function itemStatusLabel(value) {
+  return { prepared: "Подготовлен", issued: "Выдан", returned: "Возвращён", lost: "LOST", cancelled: "Отменён" }[value] || value;
 }
 
 async function hydrateImages() {

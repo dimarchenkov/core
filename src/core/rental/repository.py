@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from core.catalog.models import CatalogProduct, CatalogVariant
 from core.rental.enums import RentalAvailability
-from core.rental.models import RentalAssetRecord, RentalOrderRecord
+from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
 from core.rental.order_enums import RentalOrderStatus
 from core.shared.db import UUIDv7
 
@@ -168,6 +168,9 @@ class RentalOrderRepository:
                     RentalOrderRecord.order_number.ilike(pattern),
                     RentalOrderRecord.customer_name_snapshot.ilike(pattern),
                     RentalOrderRecord.customer_phone_snapshot.ilike(pattern),
+                    RentalOrderRecord.items.any(
+                        RentalOrderItemRecord.asset_number_snapshot.ilike(pattern)
+                    ),
                 )
             )
         statement = statement.order_by(

@@ -22,8 +22,11 @@ from core.rental.order_exceptions import InvalidRentalMoneyError, RentalOrderIte
 from core.rental.order_number import RentalOrderNumberGenerator
 from core.rental.order_schemas import (
     RentalOrderCreate,
+    RentalOrderItemCompletion,
     RentalOrderItemCreate,
+    RentalOrderItemOutcome,
     RentalOrderItemReturn,
+    RentalOrderItemsComplete,
     RentalOrderUpdate,
 )
 from core.rental.repository import RentalAssetRepository, RentalOrderRepository
@@ -230,25 +233,71 @@ class RentalOrderService:
         actor_id: UUIDv7 | None = None,
     ) -> RentalOrder:
         """Atomically return one order item and its physical RentalAsset."""
+        return self.complete_items(
+            order_id,
+            RentalOrderItemsComplete(
+                items=[
+                    RentalOrderItemCompletion(
+                        item_id=item_id,
+                        outcome=RentalOrderItemOutcome.RETURNED,
+                        condition=data.condition,
+                        charged_amount=data.charged_amount,
+                        completed_at=data.returned_at,
+                        note=data.return_note,
+                    )
+                ]
+            ),
+            actor_id=actor_id,
+        )
+
+    def complete_items(
+        self,
+        order_id: UUIDv7,
+        data: RentalOrderItemsComplete,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> RentalOrder:
+        """Complete returned and lost items together in one transaction."""
         try:
             record, order = self._load_order(order_id, for_update=True)
-            item = next((candidate for candidate in order.items if candidate.id == item_id), None)
-            if item is None:
-                raise RentalOrderItemNotFoundError
-            asset_record = self._assets.get_for_update(item.rental_asset_id)
-            if asset_record is None:
-                raise RentalAssetNotFoundError
-            asset = rental_asset_from_record(asset_record)
-            asset.accept_return(data.condition)
-            order.return_item(
-                item_id,
-                charged_amount=data.charged_amount,
-                returned_at=data.returned_at,
-                return_note=data.return_note,
-            )
-            update_rental_asset_record(asset_record, asset)
-            asset_record.updated_by_id = actor_id
+            order_items = {item.id: item for item in order.items}
+            returned_assets: list[tuple[RentalAssetRecord, RentalAsset]] = []
+            completed_item_ids: set[UUIDv7] = set()
+            for completion in data.items:
+                item = order_items.get(completion.item_id)
+                if item is None:
+                    raise RentalOrderItemNotFoundError
+                if completion.outcome is RentalOrderItemOutcome.RETURNED:
+                    asset_record = self._assets.get_for_update(item.rental_asset_id)
+                    if asset_record is None:
+                        raise RentalAssetNotFoundError
+                    asset = rental_asset_from_record(asset_record)
+                    if completion.condition is None:
+                        raise ValueError("Returned item condition is required.")
+                    asset.accept_return(completion.condition)
+                    order.return_item(
+                        completion.item_id,
+                        charged_amount=completion.charged_amount,
+                        returned_at=completion.completed_at,
+                        return_note=completion.note,
+                    )
+                    returned_assets.append((asset_record, asset))
+                else:
+                    order.mark_item_lost(
+                        completion.item_id,
+                        charged_amount=completion.charged_amount,
+                        completed_at=completion.completed_at,
+                        note=completion.note,
+                    )
+                completed_item_ids.add(completion.item_id)
+
+            for asset_record, asset in returned_assets:
+                update_rental_asset_record(asset_record, asset)
+                asset_record.updated_by_id = actor_id
             update_rental_order_record(record, order, actor_id=actor_id)
+            for item_record in record.items:
+                if item_record.id in completed_item_ids:
+                    item_record.completed_by_id = actor_id
             self._orders.save(record)
             self._commit()
             return order

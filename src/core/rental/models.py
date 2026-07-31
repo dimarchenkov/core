@@ -139,6 +139,10 @@ class RentalOrderItemRecord(BaseModel):
     discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     charged_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     returned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_by_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     return_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[RentalOrderItemStatus] = mapped_column(
         Enum(

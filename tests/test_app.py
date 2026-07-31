@@ -46,6 +46,9 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "missing_retail_price" in script.text
     assert 'name="rental_quantity"' in script.text
     assert "Из них в аренду" in script.text
+    assert "Возврат аренды" in script.text
+    assert "/complete-items" in script.text
+    assert "Просрочен" in script.text
     assert styles.status_code == 200
     assert "viewport-fit=cover" in page.text
 

@@ -158,8 +158,8 @@ Engine.
 сохраняет собственную историю и экономику.
 
 **Sprints:** Sprint 9 — Rental Foundation; Sprint 10A — Customers Foundation; Sprint 10B —
-Rental Orders; **Sprint 10C — Rental Checkout Workflow (current)**; Sprint 10D — Rental Return
-Workflow; Sprint 10E — Rental History & Maintenance; Sprint 10F — Rental Economics.
+Rental Orders; Sprint 10C — Rental Checkout Workflow — Completed; **Sprint 10D — Rental Return
+Workflow (current)**; Sprint 10E — Rental History & Maintenance; Sprint 10F — Rental Economics.
 
 ### Backend
 
@@ -175,8 +175,8 @@ Workflow; Sprint 10E — Rental History & Maintenance; Sprint 10F — Rental Eco
 - [x] Автоматическое закрытие заказа после завершения всех позиций.
 - [x] Защищённый API создания, поиска, изменения, выдачи, отмены и возврата заказа.
 - [x] Явный аудит оператора выдачи.
-- [ ] Явный аудит операторов возврата.
-- [ ] Завершение позиции как LOST и отдельный процесс обработки утраты.
+- [x] Явный аудит операторов возврата.
+- [x] Завершение позиции как LOST без имитации физического возврата.
 - [ ] История аренд клиента и RentalAsset.
 - [ ] Фото состояния до и после аренды.
 - [ ] История пломб, повреждений и обслуживания.
@@ -197,8 +197,8 @@ Workflow; Sprint 10E — Rental History & Maintenance; Sprint 10F — Rental Eco
 - [x] Создание и редактирование черновика аренды.
 - [x] Поиск или сканирование RentalAsset и добавление в заказ.
 - [x] Подтверждение атомарной выдачи.
-- [ ] Список активных и вычисляемых просроченных заказов.
-- [ ] Полный и частичный возврат с результатом осмотра.
+- [x] Список активных и вычисляемых просроченных заказов.
+- [x] Полный и частичный возврат с результатом осмотра.
 - [ ] Просмотр истории клиента и экземпляра.
 - [ ] Карточка состояния, обслуживания и пломб RentalAsset.
 - [ ] Экран экономики и окупаемости экземпляра.

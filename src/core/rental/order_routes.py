@@ -17,6 +17,7 @@ from core.rental.order_schemas import (
     RentalOrderCreate,
     RentalOrderItemCreate,
     RentalOrderItemReturn,
+    RentalOrderItemsComplete,
     RentalOrderRead,
     RentalOrderUpdate,
 )
@@ -142,6 +143,17 @@ def return_rental_order_item(
     return _execute(
         lambda: service.return_item(order_id, item_id, data, actor_id=current_user.id)
     )
+
+
+@router.post("/{order_id}/complete-items", response_model=RentalOrderRead)
+def complete_rental_order_items(
+    order_id: UUIDv7,
+    data: RentalOrderItemsComplete,
+    service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalOrder:
+    """Complete one or many returned/lost items in one transaction."""
+    return _execute(lambda: service.complete_items(order_id, data, actor_id=current_user.id))
 
 
 def _execute(
