@@ -1,124 +1,355 @@
-# Backlog
+# Core Product Roadmap
 
-## Completed foundations
+Этот документ одновременно показывает продуктовый roadmap, уже доступные возможности Core и
+оставшийся объём работ. Иерархия планирования: `Epic → Sprint`; технические задачи ведутся вне
+этого документа.
 
-- [x] Infrastructure
-- [x] Shared database foundation
-- [x] Catalog foundation
-- [x] Identity Lite
-- [x] Supplier management
-- [x] Receipt drafts
-- [x] Inventory ledger, posting and cancellation
-- [x] Media foundation: image metadata, links, primary image and local original upload
+## Обозначения
 
-## P1 — Ready for Sale
+- [x] возможность реализована и проверена;
+- [ ] возможность запланирована или находится в разработке;
+- **Production-ready milestone** — версия, с которой Core можно использовать в реальном основном
+  процессе магазина.
 
-- [x] Retail pricing and product identifiers
-- [x] Derived ready-for-sale checks
-- [x] Printer-independent 58 x 40 mm label and standard PDF printing
-- [x] AQSI product publication boundary and field mapping
-- [x] AQSI asynchronous product publication implementation
-- [x] Controlled live AQSI smoke test with one dedicated Variant
-- [ ] Runtime versioned AQSI fiscal profile and controlled bulk republishing
-- [x] End-to-end photo-first intake workflow from phone
+---
 
-## Deferred — Local Printing Infrastructure
+## Epic 1 — Core Foundation
 
-- [ ] Physically calibrate XPrinter XP-365B with 58 x 40 mm labels
-- [ ] Verify thermal barcode scanning, margins, darkness and gap detection
-- [ ] Add a local TSPL-over-USB print adapter when the local server is available
-- [ ] Preserve standard PDF printing as the universal fallback
+**Status: ✅ Completed**
 
-## P2 — Workflow UX
+Цель Epic — создать надёжное ядро управления каталогом, поставщиками, поступлениями, остатками,
+медиа и доступом сотрудников. Core получает единый источник данных и неизменяемую историю
+складских операций.
 
-- [x] Photo-first mobile Receive Goods workflow
-- [x] Derived Ready for Sale employee attention API
-- [ ] Ready for Sale employee queue interface
-- [x] Employee activity feed API
-- [x] First-party activity feed interface
-- [ ] Employee workflow timing, errors and cancellation metrics
-- [ ] Reference/history cards separated from daily workflow screens
+**Sprints:** Sprint 1 — Infrastructure; Sprint 2 — Shared Foundation; Sprint 3 — Catalog and
+Intake; Sprint 4 — Identity Lite; Sprint 5 — Suppliers and Receipt Drafts; Sprint 6 — Inventory
+Engine.
 
-## P3 — Rental Foundation
+### Backend
 
-- [ ] Rental Asset and Asset Code
-- [ ] Checkout and return lifecycle foundation
-- [ ] Before/after condition photos
-- [ ] Seals, maintenance and damage history
-- [ ] Rental pricing and deposits
+- [x] Управление категориями, товарами и вариантами.
+- [x] Автоматическое присвоение SKU.
+- [x] Хранение изображений и выбор основного фото.
+- [x] Управление поставщиками.
+- [x] Создание черновиков поступления с позициями, количеством и закупочной ценой.
+- [x] Проведение и отмена поступлений.
+- [x] Неизменяемая история складских движений и вычисление остатка.
+- [x] Аутентификация сотрудников и защита рабочих API.
+- [x] Аудит создания, изменения и удаления данных.
 
-### Epic — Rental Operations and Economics
+### UI
 
-#### Rental operations
-
-- [ ] Issue a `RentalAsset` to a customer.
-- [ ] Accept a returned `RentalAsset` and record its resulting condition.
-- [ ] Record the actual rental amount attributed to each `RentalAsset`.
-- [ ] Preserve the append-only history of completed rentals.
-- [ ] Send an available asset to maintenance and return it to operation.
-- [ ] Record before/after condition photos, damage and seal changes.
-
-#### Rental analytics
-
-- [ ] Define the source of `acquisition_cost` for each `RentalAsset`.
-- [ ] Define how `preparation_cost` is recorded.
-- [ ] Derive `invested_cost` from acquisition and preparation costs.
-- [ ] Calculate `completed_rentals_count` from completed rental history.
-- [ ] Calculate `lifetime_revenue` from actual attributed rental income.
-- [ ] Calculate `payback_percent` and `is_paid_back`.
-- [ ] Identify the `first_profitable_rental` after payback.
-- [ ] Show the statuses «Окупается», «Окупился» and «Окупился + одна аренда».
-- [ ] Define allocation rules for discounts, delivery and shared order amounts before financial analytics.
-- [ ] Aggregate Rental economics by `Variant` and `Product`.
-
-## P4 — Sell
-
-- [ ] Sales document and lifecycle
-- [ ] Sale inventory movements
-- [ ] Returns and corrections
-- [ ] AQSI sales synchronization
-
-## P5 — Warehouse Operations
-
-- [ ] Stock balance read API
-- [ ] Media processing: master/WebP generation
-- [x] Authenticated source-image delivery
-- [ ] Media delivery: generated master download
-- [ ] Brand support
-- [ ] CSV import from Tilda
-- [ ] Inventory counting and adjustments
-- [ ] Write-offs and transfers
-
-## P6 — Marketplace and Messaging
-
-- [ ] Tilda Sync
-- [ ] Telegram
-- [ ] MAX
-- [ ] Wildberries
-- [ ] Яндекс Маркет
-
-## P7 — Productization
-
-- [ ] Zero-to-Working bootstrap
-- [ ] Deployment and upgrade guide
-- [ ] User and administrator guides
-- [ ] Versioned developer API guide
-- [ ] Subscription deployment model
-- [ ] Franchise operations guide
-- [ ] Investor and partner materials
-- [x] Optional first-party intake frontend
-- [ ] Employee activity feed and operational analytics
-- [ ] Multi Warehouse
-
-## Technical debt
-
-### Catalog
-
-- Discuss renaming `CatalogVariant.title` to `variant_name` or `display_name`.
-- Design `AssetCodeGenerator` for future rental assets.
+- [x] Техническое управление основными сущностями через SQLAdmin.
+- [x] Базовая загрузка оригиналов изображений.
 
 ### Infrastructure
 
-- Configure Angie to re-resolve the Docker `api` service after container recreation.
-- Add an API healthcheck and make Angie depend on API health.
-- Add recovery for an AQSI publication attempt left in `processing` after a hard worker crash.
+- [x] Docker-окружение приложения, PostgreSQL, Redis и reverse proxy.
+- [x] Общая модель идентификаторов, времени, денег, версий и мягкого удаления.
+- [x] Миграции базы данных и smoke-проверки основных сценариев.
+- [x] Фоновые задачи и инфраструктура очередей.
+
+### Milestone
+
+После завершения Epic 1 Core можно использовать как защищённое ядро каталога, поступлений и
+складского учёта.
+
+---
+
+## Epic 2 — Ready for Sale
+
+**Status: 🚧 In Progress**
+
+Цель Epic — довести поступивший вариант товара до состояния, в котором его можно маркировать,
+найти сканером и отправить в кассу. Готовность определяется из фактических данных, а не хранится
+как ручной статус.
+
+**Sprints:** Sprint 7 — Ready for Sale; последующие улучшения AQSI и локальной печати.
+
+### Backend
+
+- [x] Розничные цены с историей изменений.
+- [x] Внутренние EAN-13-совместимые штрихкоды и точный поиск сканером.
+- [x] Проверка обязательных условий готовности к продаже.
+- [x] Формирование этикетки 58 × 40 мм в PDF.
+- [x] Асинхронная и идемпотентная публикация товаров в AQSI.
+- [x] Проверка результата публикации и история попыток.
+- [x] Реальная публикация тестового товара и поиск по штрихкоду на кассе.
+- [ ] Версионируемый фискальный профиль AQSI и управляемая массовая перепубликация.
+
+### UI
+
+- [x] Получение причин, по которым товар ещё не готов к продаже.
+- [x] Универсальная печать этикетки через стандартный PDF.
+- [ ] Отдельная очередь товаров, требующих доведения до готовности.
+
+### Infrastructure
+
+- [x] Фоновая обработка публикаций и повторных попыток AQSI.
+- [ ] Физическая калибровка XPrinter XP-365B для этикеток 58 × 40 мм.
+- [ ] Проверка сканирования, полей, затемнения и определения зазора.
+- [ ] Локальный TSPL-over-USB адаптер печати при появлении локального сервера.
+- [ ] Восстановление AQSI-попыток, оставшихся в обработке после аварии worker.
+
+### Milestone
+
+После завершения Epic 2 товар можно подготовить, промаркировать и безопасно опубликовать в кассе
+из Core.
+
+---
+
+## Epic 3 — Workflow UX
+
+**Status: 🚧 In Progress**
+
+Цель Epic — сделать ежедневные операции понятными сотруднику без работы с технической админкой.
+Основной результат — быстрая photo-first приёмка с телефона и прозрачная очередь дальнейших
+действий.
+
+**Sprints:** Sprint 8 — Workflow UX; дальнейшие улучшения рабочих очередей и наблюдаемости.
+
+### Backend
+
+- [x] Возобновляемые сессии приёмки, принадлежащие сотруднику.
+- [x] Photo-first создание нового товара или варианта.
+- [x] Повторная приёмка существующего варианта по SKU, штрихкоду или поиску.
+- [x] Постепенное заполнение количества, закупочной цены и поставщика.
+- [x] Атомарное завершение приёмки с созданием каталога, поступления и складских движений.
+- [x] Идемпотентный повтор завершения и полный откат при ошибке.
+- [x] Лента действий сотрудника.
+- [x] API очереди товаров, требующих внимания.
+- [ ] Метрики времени выполнения, ошибок и отмен рабочих процессов.
+
+### UI
+
+- [x] Мобильный вход в Core.
+- [x] Начало и продолжение незавершённой приёмки.
+- [x] Сканирование, поиск и фотографирование нового товара.
+- [x] Подтверждение существующего основного фото.
+- [x] Пошаговое заполнение данных и поздний выбор поставщика.
+- [x] Завершение поступления с понятными причинами неготовности к продаже.
+- [x] Рабочая лента активности.
+- [ ] Интерфейс очереди Ready for Sale.
+- [ ] Разделение ежедневных рабочих экранов и справочных карточек/истории.
+
+### Infrastructure
+
+- [x] Единая транзакция полного процесса завершения приёмки.
+- [x] Проверка реальной приёмки с телефона через Angie.
+- [ ] Повторное разрешение адреса API в Angie после пересоздания контейнера.
+- [ ] Healthcheck API и запуск Angie только после готовности API.
+
+### Milestone
+
+После завершения Epic 3 сотрудник может выполнить основной цикл приёмки с телефона без
+технической админки.
+
+**Production-ready milestone: ✅ v0.5.0 — первый production-ready релиз основного процесса
+приёмки Core.**
+
+---
+
+## Epic 4 — Rental
+
+**Status: 🚧 In Progress**
+
+Цель Epic — обеспечить полный поштучный учёт аренды: от выделения экземпляров при приёмке до
+выдачи, частичного возврата, обслуживания и анализа окупаемости. Каждый физический экземпляр
+сохраняет собственную историю и экономику.
+
+**Sprints:** Sprint 9 — Rental Foundation; Sprint 10A — Customers Foundation; Sprint 10B —
+Rental Orders; **Sprint 10C — Rental Operations UI & Audit (current)**; последующие Sprint —
+condition history, maintenance и economics.
+
+### Backend
+
+- [x] Выделение заданного количества поступивших единиц в аренду.
+- [x] Создание отдельных RentalAsset с номерами вида `RENT-000001`.
+- [x] Учёт назначения, состояния и доступности каждого экземпляра.
+- [x] Доменные операции выдачи, возврата, обслуживания, вывода в продажу и списания.
+- [x] Управление клиентами и поиск по имени, телефону или номеру.
+- [x] Создание черновика заказа аренды со снимком данных клиента.
+- [x] Добавление конкретных экземпляров, срока, цены, скидки и залога.
+- [x] Атомарная выдача заказа и всех его экземпляров.
+- [x] Полный и частичный возврат с фиксацией суммы и состояния.
+- [x] Автоматическое закрытие заказа после завершения всех позиций.
+- [x] Защищённый API создания, поиска, изменения, выдачи, отмены и возврата заказа.
+- [ ] Явный аудит операторов выдачи и возврата.
+- [ ] Завершение позиции как LOST и отдельный процесс обработки утраты.
+- [ ] История аренд клиента и RentalAsset.
+- [ ] Фото состояния до и после аренды.
+- [ ] История пломб, повреждений и обслуживания.
+- [ ] Полный цикл обслуживания экземпляра.
+- [ ] Арендные тарифы и правила расчёта.
+- [ ] Источник стоимости приобретения и расходов на подготовку экземпляра.
+- [ ] Расчёт количества завершённых аренд и фактического дохода экземпляра.
+- [ ] Расчёт окупаемости и статусов «Окупается», «Окупился» и
+  «Окупился + одна аренда».
+- [ ] Агрегирование экономики по Variant и Product.
+
+### UI
+
+- [x] Указание количества экземпляров для аренды в мобильной приёмке.
+- [x] Просмотр клиентов в SQLAdmin.
+- [x] Просмотр заказов и позиций аренды в SQLAdmin без обхода доменных правил.
+- [ ] Рабочий экран поиска или создания клиента.
+- [ ] Создание и редактирование черновика аренды.
+- [ ] Поиск или сканирование RentalAsset и добавление в заказ.
+- [ ] Подтверждение атомарной выдачи.
+- [ ] Список активных и вычисляемых просроченных заказов.
+- [ ] Полный и частичный возврат с результатом осмотра.
+- [ ] Просмотр истории клиента и экземпляра.
+- [ ] Карточка состояния, обслуживания и пломб RentalAsset.
+- [ ] Экран экономики и окупаемости экземпляра.
+
+### Infrastructure
+
+- [x] Одна транзакция для складской приёмки и создания RentalAsset.
+- [x] Одна транзакция для изменения RentalOrder и RentalAsset при выдаче/возврате.
+- [x] Идемпотентное повторное завершение приёмки без дублирования экземпляров.
+- [x] PostgreSQL-миграции и Docker smoke test Rental Foundation и Rental Orders.
+- [ ] Метрики конфликтов доступности, просрочек и ошибок операций аренды.
+
+### Milestone
+
+После завершения Epic 4 Core можно использовать для полноценного операционного и экономического
+учёта аренды.
+
+---
+
+## Epic 5 — Sales
+
+**Status: ⏳ Planned**
+
+Цель Epic — проводить продажу через Core и связывать её со складским ledger и кассой. Продажи,
+возвраты и исправления должны сохранять проверяемую историю без прямого изменения остатка.
+
+**Sprints:** будут определены после основного операционного цикла Rental.
+
+### Backend
+
+- [ ] Создание и проведение продажи.
+- [ ] Списание проданных единиц через складские движения.
+- [ ] Возвраты и корректировки без переписывания истории.
+- [ ] Продажа RentalAsset, выведенного из аренды.
+- [ ] Синхронизация фактических продаж с AQSI.
+
+### UI
+
+- [ ] Рабочий экран оформления продажи.
+- [ ] Возврат или корректировка продажи.
+- [ ] История продаж товара и клиента.
+
+### Milestone
+
+После завершения Epic 5 Core поддерживает полный внутренний цикл продажи и возврата.
+
+---
+
+## Epic 6 — Warehouse Operations
+
+**Status: ⏳ Planned**
+
+Цель Epic — дополнить учёт повседневными складскими операциями и массовым импортом существующего
+каталога. Сотрудник должен видеть доступный остаток и безопасно исправлять расхождения через
+документированные операции.
+
+**Sprints:** будут сформированы по вертикальным сценариям остатков, медиа и импорта.
+
+### Backend
+
+- [ ] Чтение текущих остатков по складам.
+- [ ] Инвентаризация и корректирующие движения.
+- [ ] Списание и перемещение.
+- [ ] Несколько складов и мест хранения.
+- [ ] Импорт товаров из CSV Tilda с предварительной проверкой.
+- [ ] Поддержка брендов.
+- [ ] Генерация master/WebP из оригиналов изображений.
+- [x] Защищённая выдача исходных изображений.
+- [ ] Выдача подготовленных master-изображений.
+
+### UI
+
+- [ ] Экран остатков и истории движений.
+- [ ] Инвентаризация со сканером.
+- [ ] Списание и перемещение товара.
+- [ ] Проверка и подтверждение CSV-импорта.
+- [ ] Управление несколькими складами.
+
+### Milestone
+
+После завершения Epic 6 Core покрывает ежедневные складские операции и перенос существующего
+каталога.
+
+---
+
+## Epic 7 — Publishing & Messaging
+
+**Status: ⏳ Planned**
+
+Цель Epic — публиковать одну карточку Core во внешние витрины и каналы коммуникации без
+дублирования ручного ввода. Каждая интеграция остаётся заменяемым внешним модулем.
+
+**Sprints:** отдельный Sprint на каждый канал после стабилизации внутренних данных.
+
+### Backend
+
+- [ ] Синхронизация товаров с Tilda.
+- [ ] Публикация в Telegram.
+- [ ] Публикация в MAX.
+- [ ] Интеграция с Wildberries.
+- [ ] Интеграция с Яндекс Маркет.
+- [ ] История публикаций, ошибок и повторных попыток по каждому каналу.
+
+### UI
+
+- [ ] Выбор каналов и запуск публикации из карточки.
+- [ ] Просмотр статуса и ошибок публикации.
+- [ ] Предварительный просмотр сообщения или карточки.
+
+### Infrastructure
+
+- [ ] Изолированные адаптеры внешних каналов.
+- [ ] Безопасное хранение ключей и сессий интеграций.
+- [ ] Управляемые повторы и ограничение частоты запросов.
+
+### Milestone
+
+После завершения Epic 7 карточку товара можно публиковать из Core во все основные внешние каналы.
+
+---
+
+## Epic 8 — Productization
+
+**Status: ⏳ Planned**
+
+Цель Epic — превратить внутреннюю систему в воспроизводимый и сопровождаемый продукт. Развёртывание,
+обновление и ежедневная эксплуатация не должны зависеть от знаний автора проекта.
+
+**Sprints:** будут определены после стабилизации основных бизнес-процессов.
+
+### Backend
+
+- [ ] Версионируемое публичное руководство по API.
+- [ ] Операционная аналитика работы сотрудников.
+- [ ] Поддержка конфигурации нескольких организаций или франшиз.
+
+### UI
+
+- [x] Первый собственный интерфейс мобильной приёмки.
+- [ ] Руководство пользователя и встроенные подсказки.
+- [ ] Руководство администратора.
+- [ ] Материалы для партнёров и инвесторов.
+
+### Infrastructure
+
+- [ ] Развёртывание Core с нуля до рабочего состояния.
+- [ ] Руководство по обновлению и восстановлению.
+- [ ] Подписная модель развёртывания.
+- [ ] Операционная модель франшизы.
+- [ ] Автоматические healthchecks и проверка готовности всех сервисов.
+
+### Milestone
+
+После завершения Epic 8 Core можно воспроизводимо разворачивать, обновлять и сопровождать как
+самостоятельный продукт.
