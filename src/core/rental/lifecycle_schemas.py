@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, field_validator
 
 from core.customers.enums import CustomerStatus
+from core.rental.economics_schemas import RentalAssetEconomicsRead
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
 from core.rental.order_enums import RentalOrderStatus
 from core.shared.db import UUIDv7
@@ -46,6 +48,7 @@ class MaintenanceCreate(PydanticBaseModel):
     service_type: MaintenanceType
     comment: str | None = Field(default=None, max_length=2000)
     result: str = Field(min_length=1, max_length=2000)
+    cost: Decimal = Field(default=Decimal("0"), ge=0)
 
     @field_validator("result")
     @classmethod
@@ -69,6 +72,7 @@ class MaintenanceRead(PydanticBaseModel):
     performer_id: UUIDv7 | None
     performer_name: str | None
     result: str
+    cost: Decimal
 
 
 class DamageCreate(PydanticBaseModel):
@@ -161,6 +165,7 @@ class RentalAssetPassportRead(PydanticBaseModel):
     maintenance: list[MaintenanceRead]
     damages: list[DamageRead]
     condition_photos: list[ConditionPhotoRead]
+    economics: RentalAssetEconomicsRead
 
 
 class CustomerRentalHistoryItem(PydanticBaseModel):

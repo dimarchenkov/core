@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sqlalchemy.orm import Session
 
 from core.rental.asset import RentalAsset
@@ -24,6 +26,7 @@ class RentalAssetService:
         variant_id: UUIDv7,
         intake_item_id: UUIDv7,
         quantity: int,
+        acquisition_cost: Decimal | None = None,
         actor_id: UUIDv7 | None = None,
     ) -> list[RentalAsset]:
         """Create one independently tracked new asset for every allocated rental unit."""
@@ -37,7 +40,13 @@ class RentalAssetService:
                 intake_item_id=intake_item_id,
                 condition=AssetCondition.NEW,
             )
-            self._repository.add(rental_asset_to_record(asset, actor_id=actor_id))
+            self._repository.add(
+                rental_asset_to_record(
+                    asset,
+                    actor_id=actor_id,
+                    acquisition_cost=acquisition_cost,
+                )
+            )
             assets.append(asset)
             self._session.flush()
         return assets

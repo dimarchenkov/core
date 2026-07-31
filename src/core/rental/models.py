@@ -49,6 +49,7 @@ class RentalAssetRecord(BaseModel):
         nullable=False,
     )
     retirement_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acquisition_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
         """Reject deletion because RentalAsset identity and history are permanent."""
@@ -184,6 +185,7 @@ class RentalMaintenanceRecord(BaseModel):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     result: Mapped[str] = mapped_column(Text, nullable=False)
+    cost: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=0)
 
     def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
         """Reject deletion because maintenance history is permanent."""

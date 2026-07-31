@@ -10,6 +10,7 @@ from core.customers.models import CustomerRecord
 from core.identity.models import User
 from core.media.models import Image
 from core.media.service import ImageService
+from core.rental.economics_service import RentalEconomicsService
 from core.rental.enums import AssetPurpose
 from core.rental.lifecycle_schemas import (
     AssetTimelineEvent,
@@ -117,6 +118,7 @@ class RentalLifecycleService:
                 performer_id=record.performer_id,
                 performer_name=users.get(record.performer_id),
                 result=record.result,
+                cost=record.cost,
             )
             for record in maintenance_records
         ]
@@ -183,6 +185,7 @@ class RentalLifecycleService:
                 )
                 for record in photo_records
             ],
+            economics=RentalEconomicsService(self._session).get_asset(asset.id),
         )
 
     def add_maintenance(
@@ -201,6 +204,7 @@ class RentalLifecycleService:
             comment=self._optional_text(data.comment),
             performer_id=actor_id,
             result=data.result,
+            cost=data.cost,
             created_by_id=actor_id,
         )
         self._session.add(record)
@@ -215,6 +219,7 @@ class RentalLifecycleService:
             performer_id=record.performer_id,
             performer_name=user.full_name if user is not None else None,
             result=record.result,
+            cost=record.cost,
         )
 
     def add_damage(

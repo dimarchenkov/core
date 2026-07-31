@@ -26,7 +26,7 @@ deployable service. “Public API” includes HTTP endpoints and worker/CLI entr
 | `admin` | SQLAdmin reference and maintenance UI | Mounted admin UI | Model views and admin setup | identity and registered models | Administrators; not a primary workflow client |
 | `shared` | UUIDv7, SQLAlchemy base/mixins, money normalization | Python imports only | DB types/mixins, `quantize_money` | SQLAlchemy | All persisted contexts |
 | `config`, `database`, `logging` | Runtime configuration, Session factory, process logging | Dependency/provider imports | `Settings`, `SessionLocal`, `get_session` | environment, SQLAlchemy | API, CLI, worker, infrastructure adapters |
-| `rental` | Individually tracked RentalAssets, RentalOrders, lifecycle passports and append-only maintenance evidence | Asset search; order commands; operational catalog; passport, customer history, maintenance, damage and condition-photo API | RentalAsset/RentalOrder services, `RentalLifecycleService`, operational read services and repositories | Catalog, Customers, Media, Identity, `shared` | Intake and first-party UI |
+| `rental` | Individually tracked RentalAssets, RentalOrders, lifecycle passports, maintenance evidence and computed economics | Asset search; order commands; operational catalog; passport, customer history, maintenance, damage, condition-photo and economics API | RentalAsset/RentalOrder services, `RentalLifecycleService`, `RentalEconomicsService`, operational read services and repositories | Catalog, Customers, Media, Identity, `shared` | Intake and first-party UI |
 | `publishing`, `audit`, `users` | Reserved package boundaries; no implemented domain behavior yet | None | None | None | Future work only |
 
 ## Public dependency graph

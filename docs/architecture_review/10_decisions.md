@@ -141,3 +141,13 @@
   ссылкой на RentalOrderItem.
 - Полноценная галерея и обязательность фотографий отложены; текущая модель хранит доказательства
   состояния без изменения Aggregate.
+# Sprint 10G — Rental economics decisions
+
+- Acquisition cost is copied once from the completed Intake item to the created RentalAsset
+  persistence record. There is deliberately no update command.
+- Revenue is the sum of actual `charged_amount` values for completed returned or lost order items.
+- Damage is evidence, not an expense. Only a maintenance record with `cost` contributes expenses.
+- Payback, utilization and efficiency flags are read-model calculations and are never persisted as
+  RentalAsset or RentalOrder statuses.
+- “High expenses” means expenses are at least 50% of revenue (or any expense before revenue);
+  “long idle” means no issue for 90 days after at least one rental.

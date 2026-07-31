@@ -581,22 +581,22 @@ function renderResult() {
   document.querySelector("#finish-home").addEventListener("click", loadHome);
 }
 
-async function openOperationsCatalog(query = "", productFilter = "all") {
+async function openOperationsCatalog(query = "", productFilter = "all", sort = "title") {
   try {
-    const params = new URLSearchParams({ product_filter: productFilter });
+    const params = new URLSearchParams({ product_filter: productFilter, sort });
     if (query) params.set("query", query);
     state.operations.products = await api(`/api/operations/catalog/products?${params}`);
-    renderOperationsCatalog(query, productFilter);
+    renderOperationsCatalog(query, productFilter, sort);
   } catch (error) { showToast(error.message, true); }
 }
 
-function renderOperationsCatalog(query, productFilter) {
+function renderOperationsCatalog(query, productFilter, sort) {
   const rows = state.operations.products.length
     ? state.operations.products.map((product) => `
       <button class="catalog-row catalog-product-row" data-product-id="${product.id}">
         ${product.primary_image_id ? `<img class="catalog-photo" data-image-id="${product.primary_image_id}" alt="${escapeHtml(product.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
         <span><strong>${escapeHtml(product.title)}</strong><br><span class="muted small">${escapeHtml(product.skus.join(", ") || "Без SKU")}</span></span>
-        <span class="catalog-counts"><span>${product.variant_count} вар.</span><span>${product.rental_asset_count} арендных ед.</span><span class="${product.available_asset_count ? "available-text" : "muted"}">${product.available_asset_count} доступно</span>${product.needs_initial_price ? '<span class="chip warn">Нужно указать цену</span>' : ""}</span>
+        <span class="catalog-counts"><strong>${formatMoney(product.economics.profit)}</strong><span>Доход ${formatMoney(product.economics.revenue)}</span><span>${product.economics.rental_count} аренд</span><span class="${product.available_asset_count ? "available-text" : "muted"}">${product.available_asset_count} доступно</span>${product.needs_initial_price ? '<span class="chip warn">Нужно указать цену</span>' : ""}</span>
       </button>`).join("")
     : '<div class="empty">Товары не найдены</div>';
   root.innerHTML = `<div class="shell">
@@ -612,18 +612,30 @@ function renderOperationsCatalog(query, productFilter) {
       ${operationsFilterButton("rental", "Для аренды", productFilter)}
       ${operationsFilterButton("available", "Есть доступные", productFilter)}
       ${operationsFilterButton("needs_price", "Нужно указать цену", productFilter)}
+      ${operationsFilterButton("never_rented", "Не сдавался", productFilter)}
+      ${operationsFilterButton("paid_back", "Окупился", productFilter)}
+      ${operationsFilterButton("high_expenses", "Высокие расходы", productFilter)}
+      ${operationsFilterButton("long_idle", "Давно не сдавался", productFilter)}
     </div>
+    <div class="field sort-field"><label>Сортировка</label><select id="operations-product-sort">
+      <option value="title" ${sort === "title" ? "selected" : ""}>По названию</option>
+      <option value="revenue" ${sort === "revenue" ? "selected" : ""}>По доходу</option>
+      <option value="rental_count" ${sort === "rental_count" ? "selected" : ""}>По количеству аренд</option>
+      <option value="profit" ${sort === "profit" ? "selected" : ""}>По прибыли</option>
+      <option value="last_rental" ${sort === "last_rental" ? "selected" : ""}>По последней аренде</option>
+    </select></div>
     <div class="session-list">${rows}</div>
   </div>`;
   bindTopbar();
   hydrateImages();
   document.querySelector("#operations-product-search").addEventListener("submit", (event) => {
     event.preventDefault();
-    openOperationsCatalog(String(new FormData(event.currentTarget).get("query") || "").trim(), productFilter);
+    openOperationsCatalog(String(new FormData(event.currentTarget).get("query") || "").trim(), productFilter, sort);
   });
   document.querySelectorAll("[data-product-filter]").forEach((button) => {
-    button.addEventListener("click", () => openOperationsCatalog(query, button.dataset.productFilter));
+    button.addEventListener("click", () => openOperationsCatalog(query, button.dataset.productFilter, sort));
   });
+  document.querySelector("#operations-product-sort").addEventListener("change", (event) => openOperationsCatalog(query, productFilter, event.target.value));
   document.querySelectorAll("[data-product-id]").forEach((button) => {
     button.addEventListener("click", () => openOperationsProduct(button.dataset.productId));
   });
@@ -646,7 +658,7 @@ function renderOperationsProduct() {
     ? product.variants.map((variant) => `<article class="variant-commercial-card card">
         ${variant.primary_image_id ? `<img class="catalog-photo" data-image-id="${variant.primary_image_id}" alt="${escapeHtml(variant.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
         <span class="variant-commercial-main"><strong>${escapeHtml(variant.title)}</strong><span class="muted small">${escapeHtml(variant.sku)}</span><span class="barcode-value">${escapeHtml(variant.barcode)}</span></span>
-        <span class="catalog-counts"><strong>${variant.current_retail_price === null ? "Цена не указана" : `${escapeHtml(variant.current_retail_price)} ₽`}</strong><span>${variant.rental_asset_count} арендных ед.</span><span class="available-text">${variant.available_asset_count} доступно</span></span>
+        <span class="catalog-counts"><strong>Прибыль ${formatMoney(variant.economics.profit)}</strong><span>Доход ${formatMoney(variant.economics.revenue)}</span><span>${variant.economics.rental_count} аренд</span><span>Загрузка ${formatPercent(variant.economics.average_utilization)}</span><span class="available-text">${variant.available_asset_count} доступно</span></span>
         <span class="variant-actions">
           ${variant.current_retail_price === null ? `<button class="button secondary compact" data-set-price="${variant.id}">Указать цену</button>` : ""}
           ${variant.current_retail_price !== null && variant.primary_image_id ? `<button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button><button class="button compact" data-print-label="${variant.id}">Печать</button>` : ""}
@@ -666,6 +678,10 @@ function renderOperationsProduct() {
       <div><span class="muted small">Варианты</span><strong>${product.variant_count}</strong></div>
       <div><span class="muted small">Арендные единицы</span><strong>${product.rental_asset_count}</strong></div>
       <div><span class="muted small">Доступно</span><strong>${product.available_asset_count}</strong></div>
+      <div><span class="muted small">Доход</span><strong>${formatMoney(product.economics.revenue)}</strong></div>
+      <div><span class="muted small">Расходы</span><strong>${formatMoney(product.economics.expenses)}</strong></div>
+      <div><span class="muted small">Прибыль</span><strong>${formatMoney(product.economics.profit)}</strong></div>
+      <div><span class="muted small">Аренд</span><strong>${product.economics.rental_count}</strong></div>
     </section>
     <div class="section-heading"><h2>Варианты</h2><span class="muted small">${product.variant_count}</span></div>
     <div class="session-list">${variants}</div>
@@ -735,7 +751,7 @@ function renderOperationsAssetRow(asset) {
   return `<article class="asset-catalog-row">
     <button class="asset-main" data-operations-asset="${asset.id}">
       <span><strong>${escapeHtml(asset.product_title)} · ${escapeHtml(asset.variant_title)}</strong><br><span class="muted small">${escapeHtml(asset.asset_number)} · ${escapeHtml(asset.sku)}</span></span>
-      <span class="chips compact-chips"><span class="chip ${asset.availability === "available" ? "good" : asset.is_lost ? "warn" : ""}">${asset.is_lost ? "LOST" : escapeHtml(availabilityLabel(asset.availability))}</span></span>
+      <span class="chips compact-chips"><span class="chip ${asset.availability === "available" ? "good" : asset.is_lost ? "warn" : ""}">${asset.is_lost ? "LOST" : escapeHtml(availabilityLabel(asset.availability))}</span><span class="chip">${formatMoney(asset.economics.net_income)}</span>${asset.economics.flags.map(efficiencyChip).join("")}</span>
     </button>
     ${asset.current_order_id ? `<button class="button ghost compact" data-asset-order="${asset.current_order_id}">${escapeHtml(asset.current_order_number)} →</button>` : ""}
   </article>`;
@@ -759,6 +775,7 @@ async function openOperationsAsset(assetId) {
 
 function renderOperationsAsset() {
   const asset = state.operations.asset;
+  const economics = asset.economics;
   const timeline = asset.timeline.length ? asset.timeline.map((event) => `
     <article class="timeline-row">
       <span class="timeline-dot"></span>
@@ -766,7 +783,7 @@ function renderOperationsAsset() {
       <div class="inline-actions">${event.order_id ? `<button class="link-button" data-passport-order="${event.order_id}">${escapeHtml(event.order_number)} →</button>` : ""}${event.customer_id ? `<button class="link-button" data-passport-customer="${event.customer_id}">${escapeHtml(event.customer_name)} →</button>` : ""}</div></div>
     </article>`).join("") : '<div class="empty">История пока пуста</div>';
   const maintenance = asset.maintenance.length ? asset.maintenance.map((record) => `
-    <article class="session-row"><span><strong>${escapeHtml(maintenanceTypeLabel(record.service_type))}</strong><br><span class="muted small">${formatDate(record.performed_at)} · ${escapeHtml(record.performer_name || "Исполнитель не указан")}</span><br>${escapeHtml(record.result)}${record.comment ? `<br><span class="muted small">${escapeHtml(record.comment)}</span>` : ""}</span></article>`).join("") : '<div class="empty">Обслуживаний пока нет</div>';
+    <article class="session-row"><span><strong>${escapeHtml(maintenanceTypeLabel(record.service_type))} · ${formatMoney(record.cost)}</strong><br><span class="muted small">${formatDate(record.performed_at)} · ${escapeHtml(record.performer_name || "Исполнитель не указан")}</span><br>${escapeHtml(record.result)}${record.comment ? `<br><span class="muted small">${escapeHtml(record.comment)}</span>` : ""}</span></article>`).join("") : '<div class="empty">Обслуживаний пока нет</div>';
   const damages = asset.damages.length ? asset.damages.map((record) => `
     <article class="session-row"><span><strong>${escapeHtml(damageSeverityLabel(record.severity))}: ${escapeHtml(record.description)}</strong><br><span class="muted small">${formatDate(record.created_at)} · ${escapeHtml(record.recorded_by_name || "Автор не указан")}${record.order_number ? ` · ${escapeHtml(record.order_number)}` : ""}</span>${record.comment ? `<br>${escapeHtml(record.comment)}` : ""}</span></article>`).join("") : '<div class="empty">Повреждений не зафиксировано</div>';
   const photos = asset.condition_photos.length ? asset.condition_photos.map((photo) => `
@@ -788,6 +805,17 @@ function renderOperationsAsset() {
       <button class="button secondary" id="asset-open-product">← К товару</button>
       ${asset.current_order_id ? `<button class="button" id="asset-open-order">Открыть аренду →</button>` : ""}
     </div>
+    <div class="section-heading"><h2>Экономика</h2><span class="chips">${economics.flags.map(efficiencyChip).join("")}</span></div>
+    <section class="card order-facts">
+      <div><span class="muted small">Стоимость приобретения</span><strong>${economics.acquisition_cost === null ? "Не зафиксирована" : formatMoney(economics.acquisition_cost)}</strong></div>
+      <div><span class="muted small">Доход</span><strong>${formatMoney(economics.revenue)}</strong></div>
+      <div><span class="muted small">Расходы</span><strong>${formatMoney(economics.expenses)}</strong></div>
+      <div><span class="muted small">Чистый доход</span><strong>${formatMoney(economics.net_income)}</strong></div>
+      <div><span class="muted small">Количество аренд</span><strong>${economics.rental_count}</strong></div>
+      <div><span class="muted small">Средняя аренда</span><strong>${formatMoney(economics.average_rental_revenue)}</strong></div>
+      <div><span class="muted small">Последняя аренда</span><strong>${economics.last_rental_at ? formatDate(economics.last_rental_at) : "Нет"}</strong></div>
+      <div><span class="muted small">Дата окупаемости</span><strong>${economics.payback_at ? formatDate(economics.payback_at) : "Не окупился"}</strong></div>
+    </section>
     <div class="section-heading"><h2>История</h2><span class="muted small">Сдавался: ${asset.rental_count}</span></div>
     <div class="timeline">${timeline}</div>
     <div class="section-heading"><h2>Обслуживание</h2></div>
@@ -795,7 +823,7 @@ function renderOperationsAsset() {
     <form class="card" id="asset-maintenance-form">
       <h3>Добавить обслуживание</h3>
       <div class="field-row"><div class="field"><label>Тип</label><select name="service_type"><option value="preventive">Профилактика</option><option value="repair">Ремонт</option><option value="cleaning">Чистка</option><option value="part_replacement">Замена деталей</option></select></div><div class="field"><label>Результат</label><input name="result" required></div></div>
-      <div class="field"><label>Комментарий</label><textarea name="comment"></textarea></div>
+      <div class="field-row"><div class="field"><label>Стоимость, ₽</label><input name="cost" type="number" min="0" step="0.01" value="0" required></div><div class="field"><label>Комментарий</label><textarea name="comment"></textarea></div></div>
       <button class="button secondary full" type="submit">Сохранить обслуживание</button>
     </form>
     <div class="section-heading"><h2>Повреждения</h2></div>
@@ -828,7 +856,7 @@ async function addAssetMaintenance(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   try {
-    await api(`/api/operations/rental/assets/${state.operations.asset.id}/maintenance`, { method: "POST", body: JSON.stringify({ service_type: data.get("service_type"), result: data.get("result"), comment: nullableText(data.get("comment")) }) });
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/maintenance`, { method: "POST", body: JSON.stringify({ service_type: data.get("service_type"), result: data.get("result"), cost: data.get("cost"), comment: nullableText(data.get("comment")) }) });
     await openOperationsAsset(state.operations.asset.id);
     showToast("Обслуживание сохранено");
   } catch (error) { showToast(error.message, true); }
@@ -1495,6 +1523,15 @@ function formatShortDate(value) {
 
 function formatMoney(value) {
   return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value);
+}
+
+function formatPercent(value) {
+  return new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1 }).format(Number(value));
+}
+
+function efficiencyChip(value) {
+  const labels = { paid_back: "Окупился", not_paid_back: "Не окупился", never_rented: "Нет аренд", high_expenses: "Высокие расходы", long_idle: "Давно не сдавался" };
+  return `<span class="chip ${value === "paid_back" ? "good" : value === "high_expenses" ? "warn" : ""}">${labels[value] || escapeHtml(value)}</span>`;
 }
 
 function conditionLabel(value) {

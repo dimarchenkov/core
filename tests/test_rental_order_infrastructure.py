@@ -129,6 +129,7 @@ def asset(session: Session) -> RentalAssetRecord:
         purpose=AssetPurpose.RENTAL,
         condition=AssetCondition.NEW,
         availability=RentalAvailability.AVAILABLE,
+        acquisition_cost=Decimal("500"),
         created_at=NOW,
         updated_at=NOW,
     )
@@ -625,6 +626,7 @@ def test_rental_asset_passport_journals_and_customer_history(
             "service_type": "cleaning",
             "result": "Ready for use",
             "comment": "Routine cleaning",
+            "cost": "50",
         },
     )
     damage = client.post(
@@ -688,6 +690,13 @@ def test_rental_asset_passport_journals_and_customer_history(
         event["occurred_at"] for event in body["timeline"]
     )
     assert body["maintenance"][0]["service_type"] == "cleaning"
+    assert body["maintenance"][0]["cost"] == "50.00"
+    assert body["economics"]["acquisition_cost"] == "500.00"
+    assert body["economics"]["revenue"] == "700.00"
+    assert body["economics"]["expenses"] == "50.00"
+    assert body["economics"]["net_income"] == "650.00"
+    assert body["economics"]["rental_count"] == 1
+    assert "paid_back" in body["economics"]["flags"]
     assert body["damages"][0]["description"] == "Scratched housing"
     assert body["condition_photos"][0]["stage"] == "after"
     assert customer_history.status_code == 200

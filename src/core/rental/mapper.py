@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from core.rental.asset import RentalAsset
 from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
 from core.rental.order import RentalOrder, RentalOrderItem
@@ -8,6 +10,7 @@ def rental_asset_to_record(
     asset: RentalAsset,
     *,
     actor_id: UUIDv7 | None = None,
+    acquisition_cost: Decimal | None = None,
 ) -> RentalAssetRecord:
     """Map a domain aggregate into its persistence projection."""
     return RentalAssetRecord(
@@ -19,6 +22,7 @@ def rental_asset_to_record(
         condition=asset.condition,
         availability=asset.availability,
         retirement_reason=asset.retirement_reason,
+        acquisition_cost=acquisition_cost,
         created_at=asset.created_at,
         updated_at=asset.updated_at,
         created_by_id=actor_id,

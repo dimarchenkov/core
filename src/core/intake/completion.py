@@ -116,6 +116,7 @@ class CompleteIntakeWorkflow:
                     variant_id=variant_id,
                     intake_item_id=item.id,
                     quantity=item.rental_quantity,
+                    acquisition_cost=item.purchase_price,
                     actor_id=actor_id,
                 )
                 if item.retail_price is not None:

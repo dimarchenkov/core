@@ -12,10 +12,13 @@ from core.media.models import ImageLink
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.pricing.repository import PriceRepository
+from core.rental.economics_schemas import EfficiencyFlag
+from core.rental.economics_service import RentalEconomicsService
 from core.rental.enums import RentalAvailability
 from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
 from core.rental.operations_schemas import (
     CatalogOperationsFilter,
+    CatalogOperationsSort,
     CatalogProductOperationsDetail,
     CatalogProductOperationsRead,
     CatalogVariantOperationsRead,
@@ -43,6 +46,7 @@ class RentalOperationsReadService:
         query: str | None = None,
         *,
         product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
+        sort: CatalogOperationsSort = CatalogOperationsSort.TITLE,
     ) -> list[CatalogProductOperationsRead]:
         """Return products with variant and physical rental counts."""
         statement = select(CatalogProduct).where(CatalogProduct.deleted_at.is_(None))
@@ -68,6 +72,8 @@ class RentalOperationsReadService:
         variant_ids = [variant.id for variant in variants]
         image_ids = self._primary_images(products, variants)
         priced_variant_ids = self._ever_priced_variant_ids(variant_ids)
+        economics_service = RentalEconomicsService(self._session)
+        asset_economics = economics_service.get_assets([asset.id for asset in assets])
         variants_by_product: dict[UUIDv7, list[CatalogVariant]] = defaultdict(list)
         assets_by_product: dict[UUIDv7, list[RentalAssetRecord]] = defaultdict(list)
         for variant in variants:
@@ -101,16 +107,53 @@ class RentalOperationsReadService:
                     variant.id not in priced_variant_ids
                     for variant in variants_by_product[product.id]
                 ),
+                economics=economics_service.get_product(product.id),
+                last_rental_at=max(
+                    (
+                        asset_economics[asset.id].last_rental_at
+                        for asset in assets_by_product[product.id]
+                        if asset_economics[asset.id].last_rental_at is not None
+                    ),
+                    default=None,
+                ),
+                efficiency_flags=sorted(
+                    {
+                        flag
+                        for asset in assets_by_product[product.id]
+                        for flag in asset_economics[asset.id].flags
+                    },
+                    key=lambda flag: flag.value,
+                ),
             )
             for product in products
         ]
         if product_filter is CatalogOperationsFilter.RENTAL:
-            return [row for row in rows if row.rental_asset_count > 0]
-        if product_filter is CatalogOperationsFilter.AVAILABLE:
-            return [row for row in rows if row.available_asset_count > 0]
-        if product_filter is CatalogOperationsFilter.NEEDS_PRICE:
-            return [row for row in rows if row.needs_initial_price]
-        return rows
+            rows = [row for row in rows if row.rental_asset_count > 0]
+        elif product_filter is CatalogOperationsFilter.AVAILABLE:
+            rows = [row for row in rows if row.available_asset_count > 0]
+        elif product_filter is CatalogOperationsFilter.NEEDS_PRICE:
+            rows = [row for row in rows if row.needs_initial_price]
+        efficiency_filters = {
+            CatalogOperationsFilter.NEVER_RENTED: EfficiencyFlag.NEVER_RENTED,
+            CatalogOperationsFilter.PAID_BACK: EfficiencyFlag.PAID_BACK,
+            CatalogOperationsFilter.HIGH_EXPENSES: EfficiencyFlag.HIGH_EXPENSES,
+            CatalogOperationsFilter.LONG_IDLE: EfficiencyFlag.LONG_IDLE,
+        }
+        if flag := efficiency_filters.get(product_filter):
+            rows = [row for row in rows if flag in row.efficiency_flags]
+        if sort is CatalogOperationsSort.REVENUE:
+            return sorted(rows, key=lambda row: row.economics.revenue, reverse=True)
+        if sort is CatalogOperationsSort.RENTAL_COUNT:
+            return sorted(rows, key=lambda row: row.economics.rental_count, reverse=True)
+        if sort is CatalogOperationsSort.PROFIT:
+            return sorted(rows, key=lambda row: row.economics.profit, reverse=True)
+        if sort is CatalogOperationsSort.LAST_RENTAL:
+            return sorted(
+                rows,
+                key=lambda row: row.last_rental_at or datetime.min.replace(tzinfo=UTC),
+                reverse=True,
+            )
+        return sorted(rows, key=lambda row: row.title)
 
     def get_product(self, product_id: UUIDv7) -> CatalogProductOperationsDetail:
         """Return one product with all variants and RentalAssets."""
@@ -129,6 +172,7 @@ class RentalOperationsReadService:
         prices = PriceRepository(self._session)
         now = datetime.now(UTC)
         assets = self.list_assets(product_id=product_id)
+        economics_service = RentalEconomicsService(self._session)
         assets_by_variant: dict[UUIDv7, list[RentalAssetOperationsRead]] = defaultdict(list)
         for asset in assets:
             assets_by_variant[asset.variant_id].append(asset)
@@ -154,6 +198,19 @@ class RentalOperationsReadService:
             needs_initial_price=any(
                 variant.id not in priced_variant_ids for variant in variants
             ),
+            economics=economics_service.get_product(product.id),
+            last_rental_at=max(
+                (
+                    asset.economics.last_rental_at
+                    for asset in assets
+                    if asset.economics.last_rental_at
+                ),
+                default=None,
+            ),
+            efficiency_flags=sorted(
+                {flag for asset in assets for flag in asset.economics.flags},
+                key=lambda flag: flag.value,
+            ),
             variants=[
                 CatalogVariantOperationsRead(
                     id=variant.id,
@@ -177,6 +234,7 @@ class RentalOperationsReadService:
                     ),
                     retail_currency=(current_price.currency if current_price is not None else None),
                     has_ever_retail_price=variant.id in priced_variant_ids,
+                    economics=economics_service.get_variant(variant.id),
                 )
                 for variant in variants
             ],
@@ -222,6 +280,7 @@ class RentalOperationsReadService:
             ).all()
         ) if asset_ids else set()
         current_orders = self._current_orders(asset_ids)
+        economics = RentalEconomicsService(self._session).get_assets(asset_ids)
         rows = [
             RentalAssetOperationsRead(
                 id=record.id,
@@ -237,6 +296,7 @@ class RentalOperationsReadService:
                 current_order_id=current_orders.get(record.id, (None, None, None))[0],
                 current_order_number=current_orders.get(record.id, (None, None, None))[1],
                 current_order_status=current_orders.get(record.id, (None, None, None))[2],
+                economics=economics[record.id],
             )
             for record, variant, product in records
         ]
@@ -251,6 +311,18 @@ class RentalOperationsReadService:
             )
         if sort is RentalAssetOperationsSort.STATUS:
             return sorted(rows, key=lambda row: (row.availability.value, row.asset_number))
+        if sort is RentalAssetOperationsSort.REVENUE:
+            return sorted(rows, key=lambda row: row.economics.revenue, reverse=True)
+        if sort is RentalAssetOperationsSort.RENTAL_COUNT:
+            return sorted(rows, key=lambda row: row.economics.rental_count, reverse=True)
+        if sort is RentalAssetOperationsSort.PROFIT:
+            return sorted(rows, key=lambda row: row.economics.net_income, reverse=True)
+        if sort is RentalAssetOperationsSort.LAST_RENTAL:
+            return sorted(
+                rows,
+                key=lambda row: row.economics.last_rental_at or datetime.min.replace(tzinfo=UTC),
+                reverse=True,
+            )
         return sorted(rows, key=lambda row: row.asset_number)
 
     def _variants_for_products(self, product_ids: list[UUIDv7]) -> list[CatalogVariant]:

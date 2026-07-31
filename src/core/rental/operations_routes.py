@@ -13,6 +13,7 @@ from core.rental.operations_read_service import (
 )
 from core.rental.operations_schemas import (
     CatalogOperationsFilter,
+    CatalogOperationsSort,
     CatalogProductOperationsDetail,
     CatalogProductOperationsRead,
     RentalAssetOperationsFilter,
@@ -40,9 +41,10 @@ def list_operational_products(
     service: Annotated[RentalOperationsReadService, Depends(get_operations_read_service)],
     query: Annotated[str | None, Query(max_length=255)] = None,
     product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
+    sort: CatalogOperationsSort = CatalogOperationsSort.TITLE,
 ) -> list[CatalogProductOperationsRead]:
     """List products with rental counts for the first-party client."""
-    return service.list_products(query, product_filter=product_filter)
+    return service.list_products(query, product_filter=product_filter, sort=sort)
 
 
 @router.get("/catalog/products/{product_id}", response_model=CatalogProductOperationsDetail)
