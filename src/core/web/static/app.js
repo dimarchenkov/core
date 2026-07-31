@@ -14,6 +14,13 @@ const state = {
   imageUrls: new Map(),
   mode: null,
   result: null,
+  rental: {
+    customers: [],
+    customer: null,
+    drafts: [],
+    order: null,
+    assets: [],
+  },
 };
 
 const requirementLabels = {
@@ -172,15 +179,27 @@ function renderHome(activity) {
     <div class="shell">
       ${topbar()}
       <p class="eyebrow">Рабочий режим</p>
-      <h1>Приёмка</h1>
+      <h1>Рабочее место</h1>
+      <p class="muted">Выберите операцию.</p>
+      <div class="actions">
+        <button class="action-card" id="open-intake"><span class="action-icon">＋</span><strong>Приёмка</strong><span class="muted small">Принять товар</span></button>
+        <button class="action-card" id="open-rental"><span class="action-icon">↗</span><strong>Выдача аренды</strong><span class="muted small">Найти клиента и оформить заказ</span></button>
+      </div>
+      <section id="intake-home" class="hidden">
       <p class="muted">Сначала определяем товар. Поставщика и цены добавим после.</p>
       <button class="button full" id="start-session">＋ Начать приёмку</button>
       <h2 style="margin-top:28px">Продолжить</h2>
       <div class="session-list">${drafts}</div>
       <h2 style="margin-top:28px">Мои последние действия</h2>
       <div class="session-list">${feed}</div>
+      </section>
     </div>`;
   bindTopbar();
+  document.querySelector("#open-intake").addEventListener("click", () => {
+    document.querySelector("#intake-home").classList.remove("hidden");
+    document.querySelector("#open-intake").scrollIntoView({ behavior: "smooth" });
+  });
+  document.querySelector("#open-rental").addEventListener("click", openRentalHome);
   document.querySelector("#start-session").addEventListener("click", startSession);
   document.querySelectorAll("[data-resume]").forEach((button) => {
     button.addEventListener("click", () => openSession(button.dataset.resume));
@@ -525,6 +544,348 @@ function renderResult() {
   </div>`;
   bindTopbar();
   document.querySelector("#finish-home").addEventListener("click", loadHome);
+}
+
+async function openRentalHome() {
+  try {
+    const drafts = await api("/rental/orders?order_status=draft");
+    state.rental = { customers: [], customer: null, drafts, order: null, assets: [] };
+    renderRentalHome();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalHome() {
+  const draftRows = state.rental.drafts.length
+    ? state.rental.drafts.map((order) => `
+      <button class="session-row" data-rental-draft="${order.id}">
+        <span><strong>${escapeHtml(order.order_number)}</strong><br><span class="muted small">${escapeHtml(order.customer_name_snapshot)} · ${formatShortDate(order.planned_return_at)}</span></span>
+        <span aria-hidden="true">→</span>
+      </button>`).join("")
+    : '<div class="empty">Черновиков аренды нет</div>';
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Rental checkout</p>
+    <h1>Новая аренда</h1>
+    <p class="muted">Найдите клиента по имени, телефону или номеру.</p>
+    <form class="search-row" id="customer-search-form">
+      <input name="query" autocomplete="off" placeholder="Имя, телефон или CUST-номер" autofocus>
+      <button class="button" type="submit">Найти</button>
+    </form>
+    <div id="customer-results">${renderCustomerResults()}</div>
+    <button class="button secondary full" id="show-customer-create">＋ Создать нового клиента</button>
+    <form class="card hidden" id="customer-create-form">
+      <h2>Новый клиент</h2>
+      <div class="field"><label>Имя</label><input name="full_name" maxlength="255" required></div>
+      <div class="field"><label>Телефон</label><input name="phone" type="tel" maxlength="32" required></div>
+      <div class="field"><label>Электронная почта <span class="muted">(необязательно)</span></label><input name="email" type="email" maxlength="320"></div>
+      <div class="field"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="note"></textarea></div>
+      <button class="button full" type="submit">Создать и продолжить</button>
+    </form>
+    <h2 style="margin-top:28px">Черновики</h2>
+    <div class="session-list">${draftRows}</div>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#customer-search-form").addEventListener("submit", searchCustomers);
+  document.querySelector("#show-customer-create").addEventListener("click", () => {
+    document.querySelector("#customer-create-form").classList.toggle("hidden");
+  });
+  document.querySelector("#customer-create-form").addEventListener("submit", createRentalCustomer);
+  bindCustomerResults();
+  document.querySelectorAll("[data-rental-draft]").forEach((button) => {
+    button.addEventListener("click", () => openRentalDraft(button.dataset.rentalDraft));
+  });
+}
+
+function renderCustomerResults() {
+  if (!state.rental.customers.length) return "";
+  return `<div class="session-list">${state.rental.customers.map((customer) => `
+    <button class="session-row" data-rental-customer="${customer.id}" ${customer.status !== "active" ? "disabled" : ""}>
+      <span><strong>${escapeHtml(customer.full_name)}</strong><br><span class="muted small">${escapeHtml(customer.phone)} · ${escapeHtml(customer.customer_number)}</span></span>
+      <span>${customer.status === "active" ? "→" : "Неактивен"}</span>
+    </button>`).join("")}</div>`;
+}
+
+function bindCustomerResults() {
+  document.querySelectorAll("[data-rental-customer]").forEach((button) => {
+    button.addEventListener("click", () => selectRentalCustomer(button.dataset.rentalCustomer));
+  });
+}
+
+async function searchCustomers(event) {
+  event.preventDefault();
+  const query = new FormData(event.currentTarget).get("query");
+  try {
+    state.rental.customers = await api(`/api/customers?query=${encodeURIComponent(String(query || ""))}`);
+    document.querySelector("#customer-results").innerHTML = state.rental.customers.length
+      ? renderCustomerResults()
+      : '<div class="empty" style="margin:16px 0">Клиент не найден. Создайте его ниже.</div>';
+    bindCustomerResults();
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function createRentalCustomer(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const payload = {
+    full_name: String(data.get("full_name")),
+    phone: String(data.get("phone")),
+    email: nullableText(data.get("email")),
+    note: nullableText(data.get("note")),
+  };
+  try {
+    state.rental.customer = await api("/api/customers", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    renderRentalCustomer();
+    showToast("Клиент создан");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function selectRentalCustomer(customerId) {
+  try {
+    state.rental.customer = await api(`/api/customers/${customerId}`);
+    renderRentalCustomer();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalCustomer() {
+  const customer = state.rental.customer;
+  const now = new Date();
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Клиент выбран</p>
+    <section class="card customer-card">
+      <span class="chip good">${escapeHtml(customer.customer_number)}</span>
+      <h1>${escapeHtml(customer.full_name)}</h1>
+      <p><a href="tel:${escapeHtml(customer.phone)}">${escapeHtml(customer.phone)}</a>${customer.email ? ` · ${escapeHtml(customer.email)}` : ""}</p>
+      ${customer.note ? `<p class="muted">${escapeHtml(customer.note)}</p>` : ""}
+    </section>
+    <form class="card" id="rental-create-form">
+      <h2>Новый договор</h2>
+      <div class="field-row">
+        <div class="field"><label>Начало</label><input name="planned_start_at" type="datetime-local" value="${toLocalInput(now)}" required></div>
+        <div class="field"><label>Возврат</label><input name="planned_return_at" type="datetime-local" value="${toLocalInput(tomorrow)}" required></div>
+      </div>
+      <div class="field"><label>Залог, ₽</label><input name="deposit_amount" type="number" inputmode="decimal" min="0" step="0.01" value="0" required></div>
+      <div class="field"><label>Комментарий <span class="muted">(необязательно)</span></label><textarea name="note"></textarea></div>
+      <button class="button full" type="submit">Создать черновик</button>
+    </form>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#rental-create-form").addEventListener("submit", createRentalDraft);
+}
+
+async function createRentalDraft(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    state.rental.order = await api("/rental/orders", {
+      method: "POST",
+      body: JSON.stringify({
+        customer_id: state.rental.customer.id,
+        planned_start_at: new Date(String(data.get("planned_start_at"))).toISOString(),
+        planned_return_at: new Date(String(data.get("planned_return_at"))).toISOString(),
+        deposit_amount: String(data.get("deposit_amount")),
+        note: nullableText(data.get("note")),
+      }),
+    });
+    renderRentalDraft();
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function openRentalDraft(orderId) {
+  try {
+    state.rental.order = await api(`/rental/orders/${orderId}`);
+    state.rental.customer = await api(`/api/customers/${state.rental.order.customer_id}`);
+    state.rental.assets = [];
+    renderRentalDraft();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalDraft() {
+  const order = state.rental.order;
+  const total = order.items.reduce(
+    (sum, item) => sum + Number(item.agreed_price) - Number(item.discount),
+    0,
+  );
+  const items = order.items.length ? order.items.map((item) => `
+    <article class="session-row rental-line">
+      <span><strong>${escapeHtml(item.title_snapshot)}</strong><br><span class="muted small">${escapeHtml(item.asset_number_snapshot)} · ${formatMoney(Number(item.agreed_price) - Number(item.discount))}</span></span>
+      <button class="button danger compact" data-remove-rental-item="${item.id}" type="button">Удалить</button>
+    </article>`).join("") : '<div class="empty">Добавьте первый экземпляр</div>';
+  root.innerHTML = `<div class="shell">
+    ${topbar(true)}
+    <p class="eyebrow">Черновик · ${escapeHtml(order.order_number)}</p>
+    <h1>${escapeHtml(order.customer_name_snapshot)}</h1>
+    <p class="muted">${escapeHtml(order.customer_phone_snapshot)}</p>
+    <form class="card" id="rental-draft-form">
+      <h2>Условия аренды</h2>
+      <div class="field-row">
+        <div class="field"><label>Начало</label><input name="planned_start_at" type="datetime-local" value="${toLocalInput(new Date(order.planned_start_at))}" required></div>
+        <div class="field"><label>Возврат</label><input name="planned_return_at" type="datetime-local" value="${toLocalInput(new Date(order.planned_return_at))}" required></div>
+      </div>
+      <div class="field"><label>Залог, ₽</label><input name="deposit_amount" type="number" inputmode="decimal" min="0" step="0.01" value="${escapeHtml(order.deposit_amount)}" required></div>
+      <div class="field"><label>Комментарий</label><textarea name="note">${escapeHtml(order.note || "")}</textarea></div>
+      <button class="button secondary full" type="submit">Сохранить условия</button>
+    </form>
+    <section class="card">
+      <h2>Добавить экземпляр</h2>
+      <p class="muted small">Отсканируйте RENT-номер или найдите по товару, варианту либо SKU.</p>
+      <form class="search-row" id="rental-asset-search-form">
+        <input name="query" autocomplete="off" placeholder="RENT-000001 или название" required>
+        <button class="button" type="submit">Найти</button>
+      </form>
+      <div id="rental-asset-results">${renderRentalAssetResults()}</div>
+    </section>
+    <h2>Экземпляры · ${order.items.length}</h2>
+    <div class="session-list">${items}</div>
+    <section class="checkout-summary">
+      <div><span class="muted small">Стоимость</span><strong>${formatMoney(total)}</strong></div>
+      <div><span class="muted small">Залог</span><strong>${formatMoney(Number(order.deposit_amount))}</strong></div>
+      <button class="button full" id="issue-rental-order" ${order.items.length ? "" : "disabled"}>Выдать</button>
+    </section>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#rental-draft-form").addEventListener("submit", saveRentalDraft);
+  document.querySelector("#rental-asset-search-form").addEventListener("submit", searchRentalAssets);
+  bindRentalAssetResults();
+  document.querySelectorAll("[data-remove-rental-item]").forEach((button) => {
+    button.addEventListener("click", () => removeRentalItem(button.dataset.removeRentalItem));
+  });
+  document.querySelector("#issue-rental-order").addEventListener("click", issueRentalOrder);
+}
+
+async function saveRentalDraft(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    state.rental.order = await api(`/rental/orders/${state.rental.order.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        planned_start_at: new Date(String(data.get("planned_start_at"))).toISOString(),
+        planned_return_at: new Date(String(data.get("planned_return_at"))).toISOString(),
+        deposit_amount: String(data.get("deposit_amount")),
+        note: nullableText(data.get("note")),
+      }),
+    });
+    renderRentalDraft();
+    showToast("Условия сохранены");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function searchRentalAssets(event) {
+  event.preventDefault();
+  const query = new FormData(event.currentTarget).get("query");
+  try {
+    state.rental.assets = await api(`/api/rental/assets?query=${encodeURIComponent(String(query))}`);
+    document.querySelector("#rental-asset-results").innerHTML = renderRentalAssetResults()
+      || '<div class="empty" style="margin-top:14px">Экземпляр не найден</div>';
+    bindRentalAssetResults();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderRentalAssetResults() {
+  return state.rental.assets.map((asset) => {
+    const alreadyAdded = state.rental.order?.items.some((item) => item.rental_asset_id === asset.id);
+    const available = asset.availability === "available" && !alreadyAdded;
+    return `<article class="asset-result">
+      <div><strong>${escapeHtml(asset.product_title)} · ${escapeHtml(asset.variant_title)}</strong>
+      <div class="muted small">${escapeHtml(asset.asset_number)} · ${escapeHtml(conditionLabel(asset.condition))} · ${escapeHtml(availabilityLabel(asset.availability))}</div></div>
+      <div class="asset-price"><input data-asset-price="${asset.id}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Цена, ₽" ${available ? "" : "disabled"}>
+      <button class="button compact" data-add-rental-asset="${asset.id}" ${available ? "" : "disabled"}>${alreadyAdded ? "Добавлен" : "Добавить"}</button></div>
+    </article>`;
+  }).join("");
+}
+
+function bindRentalAssetResults() {
+  document.querySelectorAll("[data-add-rental-asset]").forEach((button) => {
+    button.addEventListener("click", () => addRentalAsset(button.dataset.addRentalAsset));
+  });
+}
+
+async function addRentalAsset(assetId) {
+  const input = document.querySelector(`[data-asset-price="${assetId}"]`);
+  if (!input.value) return showToast("Укажите стоимость аренды", true);
+  try {
+    state.rental.order = await api(`/rental/orders/${state.rental.order.id}/items`, {
+      method: "POST",
+      body: JSON.stringify({
+        rental_asset_id: assetId,
+        agreed_price: input.value,
+        discount: "0",
+      }),
+    });
+    state.rental.assets = [];
+    renderRentalDraft();
+    showToast("Экземпляр добавлен");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function removeRentalItem(itemId) {
+  try {
+    await api(`/rental/orders/${state.rental.order.id}/items/${itemId}`, { method: "DELETE" });
+    state.rental.order = await api(`/rental/orders/${state.rental.order.id}`);
+    renderRentalDraft();
+    showToast("Позиция удалена");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function issueRentalOrder() {
+  if (!window.confirm(`Выдать заказ ${state.rental.order.order_number}? После выдачи редактирование будет недоступно.`)) return;
+  const button = document.querySelector("#issue-rental-order");
+  button.disabled = true;
+  button.innerHTML = '<span class="spinner"></span> Выдаём';
+  try {
+    state.rental.order = await api(`/rental/orders/${state.rental.order.id}/issue`, { method: "POST" });
+    renderRentalIssued();
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+    button.textContent = "Выдать";
+  }
+}
+
+function renderRentalIssued() {
+  const order = state.rental.order;
+  root.innerHTML = `<div class="shell">
+    ${topbar()}
+    <div class="result" style="margin-top:36px">
+      <div class="result-mark">✓</div>
+      <p class="eyebrow">Аренда выдана</p>
+      <h1>${escapeHtml(order.order_number)}</h1>
+      <p><strong>${escapeHtml(order.customer_name_snapshot)}</strong><br>${escapeHtml(order.customer_phone_snapshot)}</p>
+      <div class="chips" style="justify-content:center">
+        <span class="chip good">Экземпляров: ${order.items.length}</span>
+        <span class="chip">Возврат: ${formatShortDate(order.planned_return_at)}</span>
+      </div>
+      <button class="button full" id="rental-issued-done" style="margin-top:20px">Готово</button>
+    </div>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#rental-issued-done").addEventListener("click", loadHome);
+}
+
+function toLocalInput(date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function formatShortDate(value) {
+  return new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(value));
+}
+
+function formatMoney(value) {
+  return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value);
+}
+
+function conditionLabel(value) {
+  return { new: "Новое", good: "Хорошее", fair: "Удовлетворительное", damaged: "Повреждено", unusable: "Непригодно" }[value] || value;
+}
+
+function availabilityLabel(value) {
+  return { available: "Доступен", rented: "Выдан", maintenance: "Обслуживание" }[value] || value;
 }
 
 async function hydrateImages() {

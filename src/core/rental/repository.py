@@ -5,6 +5,8 @@ from collections.abc import Sequence
 from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session, selectinload
 
+from core.catalog.models import CatalogProduct, CatalogVariant
+from core.rental.enums import RentalAvailability
 from core.rental.models import RentalAssetRecord, RentalOrderRecord
 from core.rental.order_enums import RentalOrderStatus
 from core.shared.db import UUIDv7
@@ -53,6 +55,36 @@ class RentalAssetRepository:
             .order_by(RentalAssetRecord.asset_number)
         )
         return self._session.scalars(statement).all()
+
+    def search(
+        self,
+        query: str | None = None,
+        *,
+        availability: RentalAvailability | None = None,
+        limit: int = 50,
+    ) -> Sequence[tuple[RentalAssetRecord, str, str]]:
+        """Search physical assets with their catalog display snapshots."""
+        statement = (
+            select(RentalAssetRecord, CatalogProduct.title, CatalogVariant.title)
+            .join(CatalogVariant, CatalogVariant.id == RentalAssetRecord.variant_id)
+            .join(CatalogProduct, CatalogProduct.id == CatalogVariant.product_id)
+            .where(RentalAssetRecord.deleted_at.is_(None))
+        )
+        if availability is not None:
+            statement = statement.where(RentalAssetRecord.availability == availability)
+        normalized_query = (query or "").strip()
+        if normalized_query:
+            pattern = f"%{normalized_query}%"
+            statement = statement.where(
+                or_(
+                    RentalAssetRecord.asset_number.ilike(pattern),
+                    CatalogVariant.title.ilike(pattern),
+                    CatalogVariant.sku.ilike(pattern),
+                    CatalogProduct.title.ilike(pattern),
+                )
+            )
+        statement = statement.order_by(RentalAssetRecord.asset_number).limit(limit)
+        return self._session.execute(statement).all()
 
     def next_asset_number(self) -> int:
         """Reserve the next asset number from PostgreSQL or the test database."""

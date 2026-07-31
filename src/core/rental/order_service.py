@@ -139,9 +139,13 @@ class RentalOrderService:
     ) -> RentalOrder:
         """Add one existing physical asset and capture its current snapshots."""
         record, order = self._load_order(order_id, for_update=True)
-        asset = self._assets.get(data.rental_asset_id)
-        if asset is None:
+        asset_record = self._assets.get(data.rental_asset_id)
+        if asset_record is None:
             raise RentalAssetNotFoundError
+        asset = rental_asset_from_record(asset_record)
+        # Reuse the aggregate's checkout invariant as a side-effect-free
+        # availability check. The mutated in-memory copy is intentionally not saved.
+        asset.checkout()
         variant = self._variants.get(asset.variant_id)
         if variant is None:
             raise RentalAssetVariantNotFoundError
@@ -195,6 +199,7 @@ class RentalOrderService:
                 update_rental_asset_record(asset_record, asset)
                 asset_record.updated_by_id = actor_id
             update_rental_order_record(record, order, actor_id=actor_id)
+            record.issued_by_id = actor_id
             self._orders.save(record)
             self._commit()
             return order

@@ -124,6 +124,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .button.secondary:hover { background: #dcd8cc; }
 .button.ghost { min-height: 40px; padding: 8px 11px; color: var(--muted); background: transparent; }
 .button.danger { color: var(--red); background: #f7e5e2; }
+.button.compact { min-height: 38px; padding: 7px 11px; border-radius: 11px; }
 
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 18px 0; }
 .action-card {
@@ -141,6 +142,32 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 
 .session-list { display: grid; gap: 10px; margin: 18px 0; }
 .session-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 15px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
+.session-row:disabled { opacity: .6; cursor: not-allowed; }
+
+.search-row { display: grid; grid-template-columns: 1fr auto; gap: 9px; margin: 16px 0; }
+.customer-card h1 { margin-top: 20px; font-size: clamp(1.8rem, 7vw, 2.7rem); }
+.customer-card a { color: var(--green); font-weight: 750; }
+.rental-line { width: 100%; text-align: left; }
+.asset-result { display: grid; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
+.asset-result:first-child { margin-top: 14px; }
+.asset-price { display: grid; grid-template-columns: minmax(110px, 1fr) auto; gap: 8px; }
+.asset-price input { min-height: 42px; }
+.checkout-summary {
+  position: sticky;
+  bottom: max(8px, env(safe-area-inset-bottom));
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 22px;
+  padding: 16px;
+  background: rgb(255 253 248 / 95%);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px);
+}
+.checkout-summary div { display: grid; gap: 3px; }
+.checkout-summary .button { grid-column: 1 / -1; }
 
 .item { display: grid; grid-template-columns: 92px 1fr; gap: 14px; }
 .item-photo { width: 92px; height: 108px; object-fit: cover; border-radius: 15px; background: #e5e2d8; }
@@ -182,7 +209,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 520px) {
-  .actions, .field-row { grid-template-columns: 1fr; }
+  .actions, .field-row, .search-row { grid-template-columns: 1fr; }
   .action-card { min-height: 112px; }
   .item { grid-template-columns: 76px 1fr; }
   .item-photo, .photo-placeholder { width: 76px; height: 92px; }

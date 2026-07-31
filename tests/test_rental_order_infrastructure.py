@@ -5,6 +5,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogVariant
+from core.catalog.models import CatalogProduct, CatalogVariant
 from core.customers.customer import Customer
 from core.customers.models import CustomerRecord
 from core.customers.schemas import CustomerCreate
@@ -22,6 +23,7 @@ from core.identity.models import User
 from core.identity.service import IdentityService
 from core.main import create_app
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
+from core.rental.exceptions import RentalDomainError
 from core.rental.mapper import rental_order_from_record, rental_order_to_record
 from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
 from core.rental.order import RentalOrder
@@ -52,6 +54,7 @@ def session() -> Generator[Session]:
         tables=[
             User.__table__,
             CustomerRecord.__table__,
+            CatalogProduct.__table__,
             CatalogVariant.__table__,
             RentalAssetRecord.__table__,
             RentalOrderRecord.__table__,
@@ -74,11 +77,20 @@ def customer(session: Session) -> Customer:
 @pytest.fixture
 def asset(session: Session) -> RentalAssetRecord:
     """Persist one available physical asset with a resolvable title snapshot."""
+    product_id = generate_uuid_v7()
     variant_id = generate_uuid_v7()
+    session.add(
+        CatalogProduct(
+            id=product_id,
+            title="Инструменты",
+            slug="tools",
+            category_id=generate_uuid_v7(),
+        )
+    )
     session.add(
         CatalogVariant(
             id=variant_id,
-            product_id=generate_uuid_v7(),
+            product_id=product_id,
             title="Шуруповерт Bosch",
             sku="RENTAL-TEST-001",
             barcode="2000000000000000000001",
@@ -218,6 +230,23 @@ def test_service_issues_and_returns_order_atomically(
     assert asset.availability is RentalAvailability.AVAILABLE
 
 
+def test_service_rejects_unavailable_asset_before_adding_item(
+    session: Session,
+    customer: Customer,
+    asset: RentalAssetRecord,
+) -> None:
+    """An unavailable physical asset cannot enter a checkout draft."""
+    asset.availability = RentalAvailability.RENTED
+    session.commit()
+    service = RentalOrderService(session)
+    order = _draft(service, customer.id)
+
+    with pytest.raises(RentalDomainError):
+        _add_asset(service, order, asset)
+
+    assert service.get(order.id).items == ()
+
+
 def test_api_supports_authenticated_rental_order_workflow(
     client: TestClient,
     session: Session,
@@ -262,6 +291,9 @@ def test_api_supports_authenticated_rental_order_workflow(
     issued = client.post(f"/rental/orders/{order_id}/issue", headers=headers)
     assert issued.status_code == 200
     assert issued.json()["status"] == "issued"
+    persisted_order = session.get(RentalOrderRecord, UUID(order_id))
+    assert persisted_order is not None
+    assert persisted_order.issued_by_id == user.id
 
     returned = client.post(
         f"/rental/orders/{order_id}/items/{item_id}/return",
@@ -271,6 +303,39 @@ def test_api_supports_authenticated_rental_order_workflow(
     assert returned.status_code == 200
     assert returned.json()["status"] == "closed"
     assert client.get(f"/rental/orders/{order_id}", headers=headers).status_code == 200
+
+
+def test_api_searches_rental_assets_for_checkout(
+    client: TestClient,
+    session: Session,
+    asset: RentalAssetRecord,
+) -> None:
+    """Checkout UI can find an asset and inspect its operational availability."""
+    user = IdentityService(session).create_admin(
+        "asset-search@example.com",
+        "Asset Search",
+        "long enough password",
+    )
+    login = client.post(
+        "/api/auth/login",
+        data={"username": user.email, "password": "long enough password"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    response = client.get("/api/rental/assets?query=RENT-000001", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": str(asset.id),
+            "asset_number": "RENT-000001",
+            "variant_id": str(asset.variant_id),
+            "product_title": "Инструменты",
+            "variant_title": "Шуруповерт Bosch",
+            "condition": "new",
+            "availability": "available",
+        }
+    ]
 
 
 def test_rental_order_routes_require_authentication(client: TestClient) -> None:

@@ -86,6 +86,10 @@ class RentalOrderRecord(BaseModel):
     planned_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     planned_return_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    issued_by_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deposit_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
