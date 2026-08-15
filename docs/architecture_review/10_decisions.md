@@ -86,6 +86,14 @@
 ### RentalAsset economics
 
 - Доход считается на уровне конкретного `RentalAsset` по завершенным позициям аренды.
+- Фактический `revenue` — сумма `charged_amount` завершённых (`RETURNED`/`LOST`) позиций.
+- Фактические `expenses` — только стоимость записей обслуживания; наблюдение повреждения само по
+  себе расходом не является.
+- `net_income` и агрегированное поле `profit` равны `revenue - expenses` и не вычитают стоимость
+  приобретения. В операторском UI это называется «Операционный результат», а не бухгалтерская
+  прибыль.
+- Окупаемость достигается в первый момент, когда накопленный доход за вычетом обслуживания
+  становится не меньше неизменяемой стоимости приобретения RentalAsset.
 - `payback_percent` и другие показатели окупаемости являются производными и не редактируются
   вручную.
 - Аналитика по `Variant` и `Product` строится поверх экономики отдельных `RentalAsset`.
@@ -151,3 +159,16 @@
   RentalAsset or RentalOrder statuses.
 - “High expenses” means expenses are at least 50% of revenue (or any expense before revenue);
   “long idle” means no issue for 90 days after at least one rental.
+
+## Sprint 9.11 — Catalog Management Foundation
+
+- Product and Variant edits reuse Catalog application services and authenticated API commands;
+  the first-party UI does not mutate ORM records.
+- Retail, base rental price and recommended deposit are append-only `Price` facts owned by
+  Variant. They are not mutable Variant columns.
+- `rental` and `rental_deposit` are current catalog proposals. Actual deal values remain snapshots
+  in `RentalOrderItem.agreed_price` and `RentalOrder.deposit_amount`.
+- Product and Variant photos continue to use universal Media `Image + ImageLink`. Selecting a new
+  primary image is one Media service command that demotes the previous primary link.
+- Labels and AQSI remain independent modules and rebuild output from current authoritative Core
+  data. AQSI stock synchronization is deferred because the current adapter has no stock contract.

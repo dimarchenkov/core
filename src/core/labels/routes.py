@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from core.database import get_session
 from core.identity.dependencies import get_current_user
+from core.labels.renderer import LabelProfile
 from core.labels.service import (
     LabelVariantNotFoundError,
     LabelVariantNotReadyError,
@@ -28,14 +29,16 @@ def get_variant_label_service(
     return VariantLabelService(session)
 
 
-@router.get("/{variant_id}/58x40.pdf", response_class=Response)
-def generate_58x40_label(
+@router.get("/{variant_id}/{profile}.pdf", response_class=Response)
+def generate_label(
     variant_id: UUIDv7,
+    profile: LabelProfile,
     service: Annotated[VariantLabelService, Depends(get_variant_label_service)],
+    dpi: int = 203,
 ) -> Response:
-    """Return one printer-independent 58 x 40 mm PDF product label."""
+    """Return one exact-size vector PDF for a supported product-label profile."""
     try:
-        content = service.generate_58x40(variant_id)
+        content = service.generate(variant_id, profile, dpi=dpi)
     except LabelVariantNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -49,9 +52,14 @@ def generate_58x40_label(
                 "missing_requirements": exc.missing_requirements,
             },
         ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
     return Response(
         content=content,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{variant_id}-58x40.pdf"'},
+        headers={"Content-Disposition": f'inline; filename="{variant_id}-{profile.value}.pdf"'},
     )

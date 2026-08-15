@@ -23,12 +23,16 @@ from core.customers.service import CustomerService
 from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
+from core.inventory.enums import MovementType, SourceType
+from core.inventory.models import StockMovement
 from core.main import create_app
 from core.media.models import Image, ImageLink
 from core.media.service import ImageService
 from core.media.storage import LocalImageStorage
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
+from core.pricing.schemas import PriceCreate
+from core.pricing.service import PriceService
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
 from core.rental.exceptions import RentalDomainError
 from core.rental.lifecycle_routes import get_lifecycle_image_service
@@ -77,6 +81,7 @@ def session() -> Generator[Session]:
             Image.__table__,
             ImageLink.__table__,
             Price.__table__,
+            StockMovement.__table__,
             RentalAssetRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
@@ -119,6 +124,15 @@ def asset(session: Session) -> RentalAssetRecord:
             sku="RENTAL-TEST-001",
             barcode="2000000000000000000001",
             attributes={},
+        )
+    )
+    session.add(
+        StockMovement(
+            variant_id=variant_id,
+            movement_type=MovementType.RECEIPT,
+            quantity_delta=Decimal("1"),
+            source_type=SourceType.RECEIPT,
+            source_id=generate_uuid_v7(),
         )
     )
     record = RentalAssetRecord(
@@ -489,8 +503,46 @@ def test_api_searches_rental_assets_for_checkout(
             "variant_title": "Шуруповерт Bosch",
             "condition": "new",
             "availability": "available",
+            "suggested_rental_price": None,
+            "recommended_deposit": None,
         }
     ]
+
+
+def test_asset_search_proposes_catalog_terms_without_creating_order_snapshots(
+    client: TestClient,
+    session: Session,
+    asset: RentalAssetRecord,
+) -> None:
+    """Checkout sees current catalog defaults while the order remains the snapshot owner."""
+    prices = PriceService(session)
+    prices.set_price(
+        asset.variant_id,
+        PriceCreate(price_type=PriceType.RENTAL, amount="700"),
+    )
+    prices.set_price(
+        asset.variant_id,
+        PriceCreate(price_type=PriceType.RENTAL_DEPOSIT, amount="2500"),
+    )
+    session.commit()
+    user = IdentityService(session).create_admin(
+        "commercial-defaults@example.com",
+        "Commercial Defaults",
+        "long enough password",
+    )
+    login = client.post(
+        "/api/auth/login",
+        data={"username": user.email, "password": "long enough password"},
+    )
+
+    response = client.get(
+        "/api/rental/assets?query=RENT-000001",
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["suggested_rental_price"] == "700.00"
+    assert response.json()[0]["recommended_deposit"] == "2500.00"
 
 
 def test_operational_catalog_links_product_asset_and_current_rental(

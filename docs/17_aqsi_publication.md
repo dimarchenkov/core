@@ -232,13 +232,33 @@ The current channel projection uses these meanings:
 - `pending` — Core accepted the user's request and queued work;
 - `accepted` — AQSI accepted create/update into its processing queue;
 - `published` — a later AQSI read verified the expected remote representation;
-- `failed` — a definitive error occurred or verification exhausted retries;
+- `failed` — a definitive, operator-actionable error occurred;
 - `outdated` — the current Core payload differs from the last verified payload;
 - `disabled` — channel publication was intentionally disabled in Core.
 
 `outdated` can be derived by comparing the current canonical payload hash with the last verified payload hash. Catalog and Pricing modules do not call AQSI directly.
 
 An individual PublicationAttempt additionally uses `processing` while a worker owns it. The worker commits that claim before starting network I/O, so no database transaction remains open while AQSI responds.
+
+AQSI may accept a write before the corresponding Goods read exposes it. Verification therefore uses
+a configured, bounded number of reads with a delay. Exhausting that short read-after-write window does
+not turn an accepted write into a false failure: the projection returns to `accepted`, and the queue may
+perform its bounded retry. If AQSI remains delayed after worker retries, the operator can request
+`Проверить состояние`; that operation only reads the stable external ID and does not create another good.
+
+The operator-facing mapping is:
+
+| Projection | UI |
+| --- | --- |
+| no publication | `Не передан` |
+| `pending` / `processing` | `Отправляется` |
+| `accepted` | `Передан в очередь AQSI` |
+| `published`, current hash | `Синхронизирован` |
+| `published`, changed current hash | `Есть изменения, не переданные в AQSI` |
+| `failed` | `Ошибка синхронизации` |
+
+The UI exposes the last attempt time, last confirmed publication time, stable external ID and a
+sanitized error summary. API keys and raw remote responses are never part of this projection.
 
 ## Asynchronous workflow
 

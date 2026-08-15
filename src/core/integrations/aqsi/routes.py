@@ -26,6 +26,7 @@ from core.integrations.aqsi.service import (
     AqsiIntegrationNotConfiguredError,
     AqsiPublicationService,
     PublicationNotFoundError,
+    PublicationVerificationUnavailableError,
 )
 from core.jobs import get_default_queue
 from core.shared.db import UUIDv7
@@ -48,6 +49,26 @@ def get_aqsi_publication_service(
 def get_aqsi_queue() -> Queue:
     """Provide the infrastructure queue used for AQSI publication jobs."""
     return get_default_queue()
+
+
+def _publication_read(
+    service: AqsiPublicationService,
+    publication: object,
+) -> PublicationRead:
+    """Add latest-attempt context to one operator-facing publication projection."""
+    from core.integrations.aqsi.models import Publication
+
+    if not isinstance(publication, Publication):
+        raise PublicationNotFoundError
+    latest = service.latest_attempt(publication.id)
+    return PublicationRead.model_validate(publication).model_copy(
+        update={
+            "is_outdated": service.is_outdated(publication),
+            "latest_attempt_status": latest.status if latest is not None else None,
+            "latest_attempt_at": latest.requested_at if latest is not None else None,
+            "latest_error_code": latest.error_code if latest is not None else None,
+        }
+    )
 
 
 @router.post(
@@ -95,9 +116,7 @@ def publish_variant(
             ) from exc
 
     return PublicationRequestRead(
-        publication=PublicationRead.model_validate(publication).model_copy(
-            update={"is_outdated": service.is_outdated(publication)}
-        ),
+        publication=_publication_read(service, publication),
         attempt=PublicationAttemptRead.model_validate(attempt),
         queued=should_enqueue,
     )
@@ -111,11 +130,44 @@ def get_publication(
     """Return current AQSI projection state for a Variant."""
     try:
         publication = service.get_publication(variant_id)
-        return PublicationRead.model_validate(publication).model_copy(
-            update={"is_outdated": service.is_outdated(publication)}
-        )
+        return _publication_read(service, publication)
     except PublicationNotFoundError as exc:
         raise HTTPException(status_code=404, detail="AQSI publication not found.") from exc
+
+
+@router.post("/{variant_id}/verify", response_model=PublicationRequestRead)
+def verify_publication(
+    variant_id: UUIDv7,
+    service: Annotated[AqsiPublicationService, Depends(get_aqsi_publication_service)],
+    queue: Annotated[Queue, Depends(get_aqsi_queue)],
+) -> PublicationRequestRead:
+    """Enqueue a bounded AQSI read-side verification without another goods write."""
+    try:
+        attempt, should_enqueue = service.request_verification(variant_id)
+        publication = service.get_publication(variant_id)
+    except PublicationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="AQSI publication not found.") from exc
+    except PublicationVerificationUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="AQSI has not accepted this publication yet.",
+        ) from exc
+    if should_enqueue:
+        try:
+            queue.enqueue(
+                publish_aqsi_attempt,
+                str(attempt.id),
+                job_timeout=120,
+                retry=Retry(max=3, interval=[2, 10, 30]),
+            )
+        except RedisError as exc:
+            service.mark_enqueue_failed(attempt.id)
+            raise HTTPException(503, "AQSI verification could not be queued.") from exc
+    return PublicationRequestRead(
+        publication=_publication_read(service, publication),
+        attempt=PublicationAttemptRead.model_validate(attempt),
+        queued=should_enqueue,
+    )
 
 
 @router.get("/{variant_id}/attempts", response_model=list[PublicationAttemptRead])

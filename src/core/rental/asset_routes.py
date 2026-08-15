@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from core.database import get_session
 from core.identity.dependencies import get_current_user
+from core.pricing.enums import PriceType
+from core.pricing.repository import PriceRepository
 from core.rental.asset_schemas import RentalAssetRead
 from core.rental.enums import RentalAvailability
 from core.rental.repository import RentalAssetRepository
@@ -31,6 +34,8 @@ def search_rental_assets(
         availability=availability,
         limit=limit,
     )
+    prices = PriceRepository(session)
+    now = datetime.now(UTC)
     return [
         RentalAssetRead(
             id=record.id,
@@ -40,6 +45,16 @@ def search_rental_assets(
             variant_title=variant_title,
             condition=record.condition,
             availability=record.availability,
+            suggested_rental_price=(
+                rental_price.amount if (rental_price := prices.get_current(
+                    record.variant_id, PriceType.RENTAL, at=now
+                )) is not None else None
+            ),
+            recommended_deposit=(
+                deposit.amount if (deposit := prices.get_current(
+                    record.variant_id, PriceType.RENTAL_DEPOSIT, at=now
+                )) is not None else None
+            ),
         )
         for record, product_title, variant_title in rows
     ]

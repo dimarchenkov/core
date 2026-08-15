@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
 
@@ -14,6 +15,13 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 
 
+class LabelProfile(StrEnum):
+    """Supported fixed physical product-label layouts."""
+
+    COMPACT_40X30 = "40x30"
+    STANDARD_58X40 = "58x40"
+
+
 @dataclass(frozen=True, slots=True)
 class VariantLabelData:
     """Resolved business data rendered on one product label."""
@@ -23,88 +31,145 @@ class VariantLabelData:
     price: Decimal
     barcode: str
     sku: str
-    store_name: str = "2010shop"
 
 
-class VariantLabel58x40Renderer:
-    """Render a compact printer-independent 58 x 40 mm product label."""
+class VariantLabelRenderer:
+    """Render vector product labels in one of two fixed physical profiles."""
 
-    width = 58 * mm
-    height = 40 * mm
     regular_font = "CoreLabelRegular"
     bold_font = "CoreLabelBold"
+    sizes = {
+        LabelProfile.COMPACT_40X30: (40 * mm, 30 * mm),
+        LabelProfile.STANDARD_58X40: (58 * mm, 40 * mm),
+    }
+    supported_dpi = frozenset({203, 300})
 
-    def render(self, data: VariantLabelData) -> bytes:
-        """Return one complete single-page PDF label."""
+    def render(
+        self,
+        data: VariantLabelData,
+        *,
+        profile: LabelProfile = LabelProfile.STANDARD_58X40,
+        dpi: int = 203,
+    ) -> bytes:
+        """Return one single-page vector PDF with an exact physical MediaBox."""
+        if dpi not in self.supported_dpi:
+            raise ValueError("Label printer DPI must be 203 or 300.")
+        self._validate_barcode(data.barcode)
         self._register_fonts()
+        width, height = self.sizes[profile]
         output = BytesIO()
         canvas = Canvas(
             output,
-            pagesize=(self.width, self.height),
+            pagesize=(width, height),
             pageCompression=1,
             invariant=1,
         )
-        canvas.setTitle(f"{data.sku} label")
-        self._draw_barcode(canvas, data.barcode)
-        self._draw_title(canvas, data.product_title)
-        self._draw_variant_details(canvas, data.variant_details)
-        self._draw_price(canvas, data.price)
-        self._draw_footer(canvas, data.sku, data.store_name)
+        canvas.setTitle(f"{data.sku} {profile.value} label")
+        if profile is LabelProfile.COMPACT_40X30:
+            self._draw_40x30(canvas, data)
+        else:
+            self._draw_58x40(canvas, data)
         canvas.showPage()
         canvas.save()
         return output.getvalue()
 
-    def _draw_title(self, canvas: Canvas, title: str) -> None:
-        """Draw at most two readable product-title lines."""
-        lines = self._wrap_text(title.strip(), self.bold_font, 8, 54 * mm, max_lines=2)
-        canvas.setFont(self.bold_font, 8)
-        for index, line in enumerate(lines):
-            canvas.drawString(2 * mm, (37 - index * 3.5) * mm, line)
+    def _draw_40x30(self, canvas: Canvas, data: VariantLabelData) -> None:
+        """Prioritize barcode and price within the compact 40 x 30 mm profile."""
+        self._draw_wrapped(canvas, self._combined_title(data), 1.5, 28, 37, 6.8, 2, 3)
+        canvas.setFont(self.bold_font, 12)
+        canvas.drawRightString(38.5 * mm, 19.5 * mm, self._price_text(data.price))
+        self._draw_barcode(
+            canvas,
+            data.barcode,
+            page_width=40 * mm,
+            width_mm=37,
+            height_mm=9.5,
+            y_mm=4.2,
+        )
+        sku = self._truncate_text(data.sku, self.regular_font, 4.8, 37 * mm)
+        canvas.setFont(self.regular_font, 4.8)
+        canvas.drawCentredString(20 * mm, 1.1 * mm, sku)
 
-    def _draw_variant_details(self, canvas: Canvas, details: str) -> None:
-        """Draw one compact line describing color, size, or configuration."""
-        text = self._truncate_text(details.strip(), self.regular_font, 6.5, 54 * mm)
-        canvas.setFont(self.regular_font, 6.5)
-        canvas.drawString(2 * mm, 28.5 * mm, text)
+    def _draw_58x40(self, canvas: Canvas, data: VariantLabelData) -> None:
+        """Use the full standard label while preserving barcode quiet zones."""
+        self._draw_wrapped(canvas, data.product_title, 2, 38, 54, 8, 2, 3.4)
+        details = self._truncate_text(data.variant_details, self.regular_font, 6.2, 54 * mm)
+        canvas.setFont(self.regular_font, 6.2)
+        canvas.drawString(2 * mm, 29.8 * mm, details)
+        canvas.setFont(self.bold_font, 16)
+        canvas.drawRightString(56 * mm, 23.2 * mm, self._price_text(data.price))
+        self._draw_barcode(
+            canvas,
+            data.barcode,
+            page_width=58 * mm,
+            width_mm=54,
+            height_mm=12,
+            y_mm=4,
+        )
+        sku = self._truncate_text(data.sku, self.regular_font, 5.2, 54 * mm)
+        canvas.setFont(self.regular_font, 5.2)
+        canvas.drawCentredString(29 * mm, 1.1 * mm, sku)
 
-    def _draw_price(self, canvas: Canvas, amount: Decimal) -> None:
-        """Draw the retail price as the label's strongest visual element."""
-        text = f"{self._format_price(amount)} руб."
-        canvas.setFont(self.bold_font, 15)
-        canvas.drawRightString(56 * mm, 21.5 * mm, text)
-
-    def _draw_barcode(self, canvas: Canvas, barcode: str) -> None:
-        """Draw generated internal EAN-13 or a compatible legacy numeric barcode."""
-        if len(barcode) == 13:
-            drawing = createBarcodeDrawing(
-                "EAN13",
-                value=barcode[:12],
-                barHeight=7 * mm,
-                humanReadable=True,
-            )
-        else:
-            drawing = createBarcodeDrawing(
-                "Code128",
-                value=barcode,
-                barHeight=7 * mm,
-                barWidth=0.3 * mm,
-                humanReadable=True,
-            )
-
-        max_width = 50 * mm
-        scale = min(1.0, max_width / drawing.width)
-        left = (self.width - drawing.width * scale) / 2
+    def _draw_barcode(
+        self,
+        canvas: Canvas,
+        barcode: str,
+        *,
+        page_width: float,
+        width_mm: float,
+        height_mm: float,
+        y_mm: float,
+    ) -> None:
+        """Generate the stored EAN-13 directly at the layout's final vector size."""
+        drawing = createBarcodeDrawing(
+            "EAN13",
+            value=barcode[:12],
+            barHeight=height_mm * mm,
+            humanReadable=True,
+        )
+        scale = min(1.0, width_mm * mm / drawing.width)
+        left = (page_width - drawing.width * scale) / 2
         canvas.saveState()
-        canvas.translate(left, 4.2 * mm)
+        canvas.translate(left, y_mm * mm)
         canvas.scale(scale, 1)
         renderPDF.draw(drawing, canvas, 0, 0)
         canvas.restoreState()
 
-    def _draw_footer(self, canvas: Canvas, sku: str, store_name: str) -> None:
-        """Draw stable human-readable identifiers below the barcode."""
-        canvas.setFont(self.regular_font, 5.5)
-        canvas.drawString(2 * mm, 1.5 * mm, sku)
-        canvas.drawRightString(56 * mm, 1.5 * mm, store_name)
+    def _draw_wrapped(
+        self,
+        canvas: Canvas,
+        text: str,
+        x_mm: float,
+        y_mm: float,
+        width_mm: float,
+        font_size: float,
+        lines: int,
+        leading_mm: float,
+    ) -> None:
+        wrapped = self._wrap_text(
+            text.strip(), self.bold_font, font_size, width_mm * mm, max_lines=lines
+        )
+        canvas.setFont(self.bold_font, font_size)
+        for index, line in enumerate(wrapped):
+            canvas.drawString(x_mm * mm, (y_mm - index * leading_mm) * mm, line)
+
+    @staticmethod
+    def _combined_title(data: VariantLabelData) -> str:
+        details = data.variant_details.strip()
+        return (
+            f"{data.product_title.strip()} - {details}" if details else data.product_title.strip()
+        )
+
+    @staticmethod
+    def _validate_barcode(barcode: str) -> None:
+        if len(barcode) != 13 or not barcode.isdigit():
+            raise ValueError("Product label requires a 13-digit EAN-13 barcode.")
+        weighted = sum(
+            int(digit) * (1 if position % 2 == 1 else 3)
+            for position, digit in enumerate(barcode[:12], start=1)
+        )
+        if (10 - weighted % 10) % 10 != int(barcode[-1]):
+            raise ValueError("Product label barcode has an invalid EAN-13 check digit.")
 
     def _wrap_text(
         self,
@@ -115,7 +180,6 @@ class VariantLabel58x40Renderer:
         *,
         max_lines: int,
     ) -> list[str]:
-        """Wrap text to a fixed number of physical label lines."""
         words = text.split()
         if not words:
             return [""]
@@ -133,16 +197,12 @@ class VariantLabel58x40Renderer:
             lines.append(current)
         if words:
             lines[-1] = self._truncate_text(
-                f"{lines[-1]} {' '.join(words)}",
-                font_name,
-                font_size,
-                max_width,
+                f"{lines[-1]} {' '.join(words)}", font_name, font_size, max_width
             )
-        return lines
+        return lines[:max_lines]
 
     @staticmethod
     def _truncate_text(text: str, font_name: str, font_size: float, max_width: float) -> str:
-        """Truncate one line with an ellipsis until it fits the label width."""
         if pdfmetrics.stringWidth(text, font_name, font_size) <= max_width:
             return text
         suffix = "..."
@@ -156,17 +216,30 @@ class VariantLabel58x40Renderer:
 
     @staticmethod
     def _format_price(amount: Decimal) -> str:
-        """Format rubles with grouped thousands and optional kopecks."""
         if amount == amount.to_integral_value():
             return f"{int(amount):,}".replace(",", " ")
         return f"{amount:,.2f}".replace(",", " ")
 
     @classmethod
+    def _price_text(cls, amount: Decimal) -> str:
+        return f"{cls._format_price(amount)} руб."
+
+    @classmethod
     def _register_fonts(cls) -> None:
-        """Register ReportLab's bundled Unicode fonts once per process."""
         registered = set(pdfmetrics.getRegisteredFontNames())
         fonts_dir = Path(font_roboto.__file__).parent / "files"
         if cls.regular_font not in registered:
             pdfmetrics.registerFont(TTFont(cls.regular_font, fonts_dir / "Roboto-Regular.ttf"))
         if cls.bold_font not in registered:
             pdfmetrics.registerFont(TTFont(cls.bold_font, fonts_dir / "Roboto-Bold.ttf"))
+
+
+class VariantLabel58x40Renderer(VariantLabelRenderer):
+    """Backward-compatible renderer facade for the established 58 x 40 API."""
+
+    width = 58 * mm
+    height = 40 * mm
+
+    def render(self, data: VariantLabelData, *, dpi: int = 203) -> bytes:
+        """Render the standard profile for existing callers."""
+        return super().render(data, profile=LabelProfile.STANDARD_58X40, dpi=dpi)

@@ -46,14 +46,12 @@ class AqsiPublicationProcessor:
         if attempt is None:
             return
         publication = self._publications.get(attempt.publication_id, for_update=True)
-        if publication is None or attempt.status in {
-            PublicationAttemptStatus.PROCESSING,
-            PublicationAttemptStatus.PUBLISHED,
-        }:
+        if publication is None or attempt.status is PublicationAttemptStatus.PUBLISHED:
             return
 
         payload_snapshot = dict(attempt.payload)
         external_id = publication.external_id
+        was_accepted = attempt.accepted_at is not None
         attempt.status = PublicationAttemptStatus.PROCESSING
         self._session.commit()
 
@@ -73,13 +71,14 @@ class AqsiPublicationProcessor:
                 return
 
             if remote is None or not self._matches(remote, payload):
-                if remote is None:
-                    attempt.operation = PublicationOperation.CREATE
-                    self._gateway.create_good(payload)
-                else:
-                    attempt.operation = PublicationOperation.UPDATE
-                    self._gateway.update_good(payload)
-                self._mark_accepted(publication, attempt)
+                if not was_accepted:
+                    if remote is None:
+                        attempt.operation = PublicationOperation.CREATE
+                        self._gateway.create_good(payload)
+                    else:
+                        attempt.operation = PublicationOperation.UPDATE
+                        self._gateway.update_good(payload)
+                    self._mark_accepted(publication, attempt)
                 remote = self._wait_for_good(external_id, payload)
 
             self._gateway.set_shop_price(
@@ -90,7 +89,10 @@ class AqsiPublicationProcessor:
                 self._mark_published(publication, attempt)
         except (AqsiApiError, ValidationError) as exc:
             code = exc.code if isinstance(exc, AqsiApiError) else "invalid_payload"
-            self._mark_failed(publication, attempt, code, str(exc))
+            if isinstance(exc, AqsiApiError) and exc.retryable and attempt.accepted_at is not None:
+                self._restore_accepted(publication, attempt, code, str(exc))
+            else:
+                self._mark_failed(publication, attempt, code, str(exc))
             if isinstance(exc, AqsiApiError) and exc.retryable:
                 raise
 
@@ -221,6 +223,26 @@ class AqsiPublicationProcessor:
         attempt.completed_at = datetime.now(UTC)
         publication.status = PublicationStatus.FAILED
         publication.last_error = safe_message
+        self._session.commit()
+
+    def _restore_accepted(
+        self,
+        publication: object,
+        attempt: object,
+        code: str,
+        message: str,
+    ) -> None:
+        """Keep a queued AQSI write pending when bounded verification times out."""
+        from core.integrations.aqsi.models import Publication, PublicationAttempt
+
+        if not isinstance(publication, Publication) or not isinstance(attempt, PublicationAttempt):
+            return
+        attempt.status = PublicationAttemptStatus.ACCEPTED
+        attempt.error_code = code[:128]
+        attempt.error_message = message[:1000]
+        attempt.completed_at = None
+        publication.status = PublicationStatus.ACCEPTED
+        publication.last_error = None
         self._session.commit()
 
     @staticmethod

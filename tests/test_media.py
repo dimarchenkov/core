@@ -412,6 +412,41 @@ def test_image_link_service_enforces_one_primary_link(
     assert ImageService(session).get_image(first_image.id).id == first_image.id
 
 
+def test_set_primary_demotes_previous_link_atomically(
+    session: Session,
+    product: CatalogProduct,
+) -> None:
+    """Catalog can change its main photo without deleting either Media link."""
+    images = ImageService(session)
+    first_image = images.create_image(ImageCreate(**image_payload()))
+    second_payload = image_payload()
+    second_payload["source_key"] = "images/source/gallery.jpg"
+    second_image = images.create_image(ImageCreate(**second_payload))
+    links = ImageLinkService(session)
+    first = links.create_link(
+        ImageLinkCreate(
+            image_id=first_image.id,
+            entity_type=ImageLinkEntityType.CATALOG_PRODUCT,
+            entity_id=product.id,
+            role=ImageLinkRole.PRIMARY,
+        )
+    )
+    second = links.create_link(
+        ImageLinkCreate(
+            image_id=second_image.id,
+            entity_type=ImageLinkEntityType.CATALOG_PRODUCT,
+            entity_id=product.id,
+            role=ImageLinkRole.GALLERY,
+        )
+    )
+
+    links.set_primary(second.id)
+
+    assert first.role is ImageLinkRole.GALLERY
+    assert second.role is ImageLinkRole.PRIMARY
+    assert links.get_link(first.id) is first
+
+
 def test_primary_image_lookup_supports_visual_item_confirmation(
     client: TestClient,
     product: CatalogProduct,

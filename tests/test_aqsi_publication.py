@@ -34,7 +34,10 @@ from core.integrations.aqsi.schemas import (
     AqsiGoodsPayload,
     AqsiShopPricePayload,
 )
-from core.integrations.aqsi.service import AqsiPublicationService
+from core.integrations.aqsi.service import (
+    AqsiIntegrationNotConfiguredError,
+    AqsiPublicationService,
+)
 from core.main import create_app
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import Image, ImageLink
@@ -61,6 +64,24 @@ def test_aqsi_worker_entrypoint_registers_user_table_in_fresh_process() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_publication_requires_api_key_at_application_boundary(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+) -> None:
+    """An enabled integration without a secret never reaches the worker queue."""
+    settings = Settings(
+        jwt_secret="test-only-jwt-secret-at-least-32-bytes",
+        aqsi_enabled=True,
+        aqsi_api_key=None,
+    )
+    with pytest.raises(AqsiIntegrationNotConfiguredError):
+        AqsiPublicationService(session, settings).request_publication(
+            variant.id,
+            actor_id=user.id,
+        )
 
 
 class FakeAqsiGateway:
@@ -132,6 +153,26 @@ class CanonicalReadAqsiGateway(FakeAqsiGateway):
             good[field] = str(good[field])
         good["unit"] = "шт."
         return good
+
+
+class DelayedAqsiGateway(FakeAqsiGateway):
+    """Accept a goods write without exposing it until the test releases the queue."""
+
+    def __init__(self) -> None:
+        """Create a gateway whose accepted write is initially invisible."""
+        super().__init__()
+        self.accepted: dict[str, object] | None = None
+
+    def create_good(self, payload: AqsiGoodsPayload) -> None:
+        """Accept but do not yet expose one queued goods payload."""
+        value = payload.as_aqsi_json()
+        self.created_goods.append(value)
+        self.accepted = value
+
+    def expose(self) -> None:
+        """Simulate AQSI finishing its asynchronous data-bus operation."""
+        assert self.accepted is not None
+        self.goods[str(self.accepted["id"])] = dict(self.accepted)
 
 
 class FakeQueue:
@@ -416,6 +457,56 @@ def test_processor_accepts_aqsi_canonical_read_values(
     session.refresh(attempt)
     assert publication.status is PublicationStatus.PUBLISHED
     assert attempt.status is PublicationAttemptStatus.PUBLISHED
+
+
+def test_verification_timeout_stays_accepted_and_retry_does_not_duplicate_good(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+    aqsi_settings: Settings,
+) -> None:
+    """AQSI queue latency remains pending confirmation across bounded worker retries."""
+    service = AqsiPublicationService(session, aqsi_settings)
+    publication, attempt, _ = service.request_publication(variant.id, actor_id=user.id)
+    gateway = DelayedAqsiGateway()
+    processor = AqsiPublicationProcessor(session, aqsi_settings, gateway, sleeper=lambda _: None)
+
+    with pytest.raises(AqsiApiError, match="could not be verified"):
+        processor.process(attempt.id)
+
+    session.refresh(publication)
+    session.refresh(attempt)
+    assert publication.status is PublicationStatus.ACCEPTED
+    assert attempt.status is PublicationAttemptStatus.ACCEPTED
+    assert len(gateway.created_goods) == 1
+
+    gateway.expose()
+    processor.process(attempt.id)
+
+    session.refresh(publication)
+    assert publication.status is PublicationStatus.PUBLISHED
+    assert len(gateway.created_goods) == 1
+
+
+def test_manual_verification_is_idempotent_while_check_is_pending(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+    aqsi_settings: Settings,
+) -> None:
+    """Double-clicking Check state schedules only one read-side worker pass."""
+    service = AqsiPublicationService(session, aqsi_settings)
+    _, attempt, _ = service.request_publication(variant.id, actor_id=user.id)
+    attempt.status = PublicationAttemptStatus.ACCEPTED
+    attempt.accepted_at = datetime.now(UTC)
+    session.commit()
+
+    first, first_enqueue = service.request_verification(variant.id)
+    duplicate, duplicate_enqueue = service.request_verification(variant.id)
+
+    assert first.id == duplicate.id
+    assert first_enqueue is True
+    assert duplicate_enqueue is False
 
 
 def test_multiple_shops_require_explicit_configuration(

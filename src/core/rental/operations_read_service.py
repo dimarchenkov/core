@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from core.catalog.models import CatalogProduct, CatalogVariant
+from core.inventory.service import InventoryService
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import ImageLink
 from core.pricing.enums import PriceType
@@ -14,7 +15,7 @@ from core.pricing.models import Price
 from core.pricing.repository import PriceRepository
 from core.rental.economics_schemas import EfficiencyFlag
 from core.rental.economics_service import RentalEconomicsService
-from core.rental.enums import RentalAvailability
+from core.rental.enums import AssetPurpose, RentalAvailability
 from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
 from core.rental.operations_schemas import (
     CatalogOperationsFilter,
@@ -87,6 +88,7 @@ class RentalOperationsReadService:
                 id=product.id,
                 title=product.title,
                 description=product.description,
+                category_id=product.category_id,
                 is_active=product.is_active,
                 skus=[variant.sku for variant in variants_by_product[product.id]],
                 variant_count=len(variants_by_product[product.id]),
@@ -168,6 +170,17 @@ class RentalOperationsReadService:
         variants = self._variants_for_products([product_id])
         image_ids = self._primary_images([product], variants)
         variant_ids = [variant.id for variant in variants]
+        balances = InventoryService(self._session).get_balances(variant_ids)
+        reserved_rows = self._session.execute(
+            select(RentalAssetRecord.variant_id, func.count(RentalAssetRecord.id))
+            .where(
+                RentalAssetRecord.variant_id.in_(variant_ids),
+                RentalAssetRecord.purpose != AssetPurpose.SALE,
+                RentalAssetRecord.deleted_at.is_(None),
+            )
+            .group_by(RentalAssetRecord.variant_id)
+        )
+        reserved_counts = {variant_id: count for variant_id, count in reserved_rows}
         priced_variant_ids = self._ever_priced_variant_ids(variant_ids)
         prices = PriceRepository(self._session)
         now = datetime.now(UTC)
@@ -180,6 +193,7 @@ class RentalOperationsReadService:
             id=product.id,
             title=product.title,
             description=product.description,
+            category_id=product.category_id,
             is_active=product.is_active,
             skus=[variant.sku for variant in variants],
             variant_count=len(variants),
@@ -195,9 +209,7 @@ class RentalOperationsReadService:
                 ),
                 image_ids.get((ImageLinkEntityType.CATALOG_PRODUCT, product.id)),
             ),
-            needs_initial_price=any(
-                variant.id not in priced_variant_ids for variant in variants
-            ),
+            needs_initial_price=any(variant.id not in priced_variant_ids for variant in variants),
             economics=economics_service.get_product(product.id),
             last_rental_at=max(
                 (
@@ -217,10 +229,17 @@ class RentalOperationsReadService:
                     title=variant.title,
                     sku=variant.sku,
                     barcode=variant.barcode,
+                    attributes=variant.attributes,
                     is_active=variant.is_active,
+                    physical_quantity=balances[variant.id],
+                    ordinary_quantity=(balances[variant.id] - reserved_counts.get(variant.id, 0)),
                     rental_asset_count=len(assets_by_variant[variant.id]),
                     available_asset_count=sum(
                         asset.availability is RentalAvailability.AVAILABLE
+                        for asset in assets_by_variant[variant.id]
+                    ),
+                    rented_asset_count=sum(
+                        asset.availability is RentalAvailability.RENTED
                         for asset in assets_by_variant[variant.id]
                     ),
                     primary_image_id=(
@@ -228,11 +247,34 @@ class RentalOperationsReadService:
                         or image_ids.get((ImageLinkEntityType.CATALOG_PRODUCT, product.id))
                     ),
                     current_retail_price=(
-                        current_price.amount if (current_price := prices.get_current(
-                            variant.id, PriceType.RETAIL, at=now
-                        )) is not None else None
+                        current_price.amount
+                        if (
+                            current_price := prices.get_current(
+                                variant.id, PriceType.RETAIL, at=now
+                            )
+                        )
+                        is not None
+                        else None
                     ),
                     retail_currency=(current_price.currency if current_price is not None else None),
+                    current_rental_price=(
+                        rental_price.amount
+                        if (
+                            rental_price := prices.get_current(variant.id, PriceType.RENTAL, at=now)
+                        )
+                        is not None
+                        else None
+                    ),
+                    current_recommended_deposit=(
+                        deposit.amount
+                        if (
+                            deposit := prices.get_current(
+                                variant.id, PriceType.RENTAL_DEPOSIT, at=now
+                            )
+                        )
+                        is not None
+                        else None
+                    ),
                     has_ever_retail_price=variant.id in priced_variant_ids,
                     economics=economics_service.get_variant(variant.id),
                 )
@@ -254,7 +296,10 @@ class RentalOperationsReadService:
             select(RentalAssetRecord, CatalogVariant, CatalogProduct)
             .join(CatalogVariant, CatalogVariant.id == RentalAssetRecord.variant_id)
             .join(CatalogProduct, CatalogProduct.id == CatalogVariant.product_id)
-            .where(RentalAssetRecord.deleted_at.is_(None))
+            .where(
+                RentalAssetRecord.deleted_at.is_(None),
+                RentalAssetRecord.purpose == AssetPurpose.RENTAL,
+            )
         )
         if product_id is not None:
             statement = statement.where(CatalogProduct.id == product_id)
@@ -271,14 +316,18 @@ class RentalOperationsReadService:
             )
         records = self._session.execute(statement).all()
         asset_ids = [record.id for record, _, _ in records]
-        lost_ids = set(
-            self._session.scalars(
-                select(RentalOrderItemRecord.rental_asset_id).where(
-                    RentalOrderItemRecord.rental_asset_id.in_(asset_ids),
-                    RentalOrderItemRecord.status == RentalOrderItemStatus.LOST,
-                )
-            ).all()
-        ) if asset_ids else set()
+        lost_ids = (
+            set(
+                self._session.scalars(
+                    select(RentalOrderItemRecord.rental_asset_id).where(
+                        RentalOrderItemRecord.rental_asset_id.in_(asset_ids),
+                        RentalOrderItemRecord.status == RentalOrderItemStatus.LOST,
+                    )
+                ).all()
+            )
+            if asset_ids
+            else set()
+        )
         current_orders = self._current_orders(asset_ids)
         economics = RentalEconomicsService(self._session).get_assets(asset_ids)
         rows = [
@@ -349,6 +398,7 @@ class RentalOperationsReadService:
                 .where(
                     CatalogVariant.product_id.in_(product_ids),
                     RentalAssetRecord.deleted_at.is_(None),
+                    RentalAssetRecord.purpose == AssetPurpose.RENTAL,
                 )
             ).all()
         )
@@ -384,10 +434,12 @@ class RentalOperationsReadService:
             return set()
         return set(
             self._session.scalars(
-                select(Price.variant_id).where(
+                select(Price.variant_id)
+                .where(
                     Price.variant_id.in_(variant_ids),
                     Price.price_type == PriceType.RETAIL,
-                ).distinct()
+                )
+                .distinct()
             ).all()
         )
 

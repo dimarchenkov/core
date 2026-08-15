@@ -231,6 +231,20 @@ class ImageLinkService:
         link.soft_delete(actor_id)
         self._session.flush()
 
+    def set_primary(self, link_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> ImageLink:
+        """Make one existing entity image primary without exposing a transient conflict."""
+        link = self.get_link(link_id)
+        current = self._repository.get_primary_for_entity(link.entity_type, link.entity_id)
+        if current is not None and current.id != link.id:
+            current.role = ImageLinkRole.GALLERY
+            if actor_id is not None:
+                current.updated_by_id = actor_id
+        link.role = ImageLinkRole.PRIMARY
+        if actor_id is not None:
+            link.updated_by_id = actor_id
+        self._session.flush()
+        return link
+
     def _ensure_image_exists(self, image_id: UUIDv7) -> None:
         """Raise when an image is missing or soft-deleted."""
         if self._image_repository.get(image_id) is None:

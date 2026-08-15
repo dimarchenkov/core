@@ -38,6 +38,10 @@ class PublicationAttemptNotFoundError(Exception):
     """Raised when a queued publication attempt cannot be found."""
 
 
+class PublicationVerificationUnavailableError(Exception):
+    """Raised when there is no AQSI-accepted attempt to verify."""
+
+
 class AqsiPublicationService:
     """Accept idempotent, attributed AQSI product publication commands."""
 
@@ -123,6 +127,38 @@ class AqsiPublicationService:
         """Return attributed AQSI attempt history for a Variant."""
         publication = self.get_publication(variant_id)
         return list(self._attempts.list_for_publication(publication.id))
+
+    def latest_attempt(self, publication_id: UUIDv7) -> PublicationAttempt | None:
+        """Return the latest attempt used to explain operator-facing state."""
+        return self._attempts.latest(publication_id)
+
+    def request_verification(self, variant_id: UUIDv7) -> tuple[PublicationAttempt, bool]:
+        """Queue another bounded read-side check without resending product data."""
+        publication = self._publications.get_for_variant(
+            variant_id,
+            PublicationChannel.AQSI,
+            for_update=True,
+        )
+        if publication is None:
+            raise PublicationNotFoundError
+        attempt = self._attempts.latest(publication.id)
+        if attempt is None or attempt.accepted_at is None:
+            raise PublicationVerificationUnavailableError
+        if attempt.status in {
+            PublicationAttemptStatus.PENDING,
+            PublicationAttemptStatus.PROCESSING,
+        }:
+            return attempt, False
+        if attempt.status is PublicationAttemptStatus.PUBLISHED:
+            return attempt, False
+        attempt.status = PublicationAttemptStatus.PENDING
+        attempt.error_code = None
+        attempt.error_message = None
+        attempt.completed_at = None
+        publication.status = PublicationStatus.ACCEPTED
+        publication.last_error = None
+        self._session.commit()
+        return attempt, True
 
     def is_outdated(self, publication: Publication) -> bool:
         """Derive drift by comparing current Core data with the last verified payload."""

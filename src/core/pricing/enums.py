@@ -8,3 +8,5 @@ class PriceType(StrEnum):
 
     RETAIL = "retail"
     PROMO = "promo"
+    RENTAL = "rental"
+    RENTAL_DEPOSIT = "rental_deposit"

@@ -32,7 +32,7 @@ class RentalAsset:
     _id: UUID
     _asset_number: str
     _variant_id: UUID
-    _intake_item_id: UUID
+    _intake_item_id: UUID | None
     _purpose: AssetPurpose
     _condition: AssetCondition
     _availability: RentalAvailability
@@ -45,7 +45,7 @@ class RentalAsset:
         id: UUID,
         asset_number: str,
         variant_id: UUID,
-        intake_item_id: UUID,
+        intake_item_id: UUID | None,
         purpose: AssetPurpose,
         condition: AssetCondition,
         availability: RentalAvailability,
@@ -81,7 +81,7 @@ class RentalAsset:
         return self._variant_id
 
     @property
-    def intake_item_id(self) -> UUID:
+    def intake_item_id(self) -> UUID | None:
         """Return the intake item through which this physical item entered Core."""
         return self._intake_item_id
 
@@ -122,7 +122,7 @@ class RentalAsset:
         asset_id: UUID,
         asset_number: str,
         variant_id: UUID,
-        intake_item_id: UUID,
+        intake_item_id: UUID | None,
         condition: AssetCondition,
         created_at: datetime | None = None,
     ) -> RentalAsset:

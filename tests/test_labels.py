@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Generator
 from decimal import Decimal
 
@@ -13,7 +14,12 @@ from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
-from core.labels.renderer import VariantLabel58x40Renderer, VariantLabelData
+from core.labels.renderer import (
+    LabelProfile,
+    VariantLabel58x40Renderer,
+    VariantLabelData,
+    VariantLabelRenderer,
+)
 from core.labels.service import LabelVariantNotReadyError, VariantLabelService
 from core.main import create_app
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
@@ -142,6 +148,57 @@ def test_renderer_creates_single_pdf_label_with_cyrillic_data() -> None:
 
     assert content.startswith(b"%PDF-")
     assert len(content) > 5_000
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected_mm"),
+    [
+        (LabelProfile.COMPACT_40X30, (40, 30)),
+        (LabelProfile.STANDARD_58X40, (58, 40)),
+    ],
+)
+@pytest.mark.parametrize("dpi", [203, 300])
+def test_label_profiles_have_exact_single_page_media_box(
+    profile: LabelProfile,
+    expected_mm: tuple[int, int],
+    dpi: int,
+) -> None:
+    """Both printer modes keep exact physical dimensions at supported DPI settings."""
+    content = VariantLabelRenderer().render(
+        VariantLabelData(
+            product_title="Очень длинное название небольшого демонстрационного товара",
+            variant_details="Красный - максимальная комплектация",
+            price=Decimal("999999.99"),
+            barcode="2000000000015",
+            sku="SKU-000001",
+        ),
+        profile=profile,
+        dpi=dpi,
+    )
+    media_box = re.search(rb"/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]", content)
+    assert media_box is not None
+    width = float(media_box.group(1)) * 25.4 / 72
+    height = float(media_box.group(2)) * 25.4 / 72
+    assert width == pytest.approx(expected_mm[0], abs=0.02)
+    assert height == pytest.approx(expected_mm[1], abs=0.02)
+    assert content.count(b"/Type /Page\n") == 1
+    assert b"2010shop" not in content
+    assert b"QR" not in content
+
+
+def test_label_rejects_invalid_ean_check_digit() -> None:
+    """A visually plausible but invalid EAN-13 is never printed."""
+    with pytest.raises(ValueError, match="check digit"):
+        VariantLabelRenderer().render(
+            VariantLabelData(
+                product_title="Товар",
+                variant_details="Вариант",
+                price=Decimal("200"),
+                barcode="2000000000014",
+                sku="SKU-000001",
+            ),
+            profile=LabelProfile.COMPACT_40X30,
+        )
 
 
 def test_label_service_uses_authoritative_variant_and_price(

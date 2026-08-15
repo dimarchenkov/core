@@ -113,6 +113,9 @@ class PublicationRead(PydanticBaseModel):
     published_at: datetime | None
     updated_at: datetime
     is_outdated: bool = False
+    latest_attempt_status: PublicationAttemptStatus | None = None
+    latest_attempt_at: datetime | None = None
+    latest_error_code: str | None = None
 
 
 class PublicationRequestRead(PydanticBaseModel):

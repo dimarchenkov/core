@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from core.catalog.repository import CatalogVariantRepository
-from core.labels.renderer import VariantLabel58x40Renderer, VariantLabelData
+from core.labels.renderer import LabelProfile, VariantLabelData, VariantLabelRenderer
 from core.pricing.enums import PriceType
 from core.pricing.repository import PriceRepository
 from core.readiness.enums import ReadyForSaleRequirement
@@ -32,16 +32,42 @@ class VariantLabelService:
     def __init__(
         self,
         session: Session,
-        renderer: VariantLabel58x40Renderer | None = None,
+        renderer: VariantLabelRenderer | None = None,
     ) -> None:
         """Create a label service with repositories and a PDF renderer."""
         self._variant_repository = CatalogVariantRepository(session)
         self._price_repository = PriceRepository(session)
         self._readiness_service = ReadyForSaleService(session)
-        self._renderer = renderer or VariantLabel58x40Renderer()
+        self._renderer = renderer or VariantLabelRenderer()
+
+    def generate(
+        self,
+        variant_id: UUIDv7,
+        profile: LabelProfile,
+        *,
+        dpi: int = 203,
+        at: datetime | None = None,
+    ) -> bytes:
+        """Generate one fixed-profile sale label from authoritative current data."""
+        return self._generate(variant_id, profile=profile, dpi=dpi, at=at)
 
     def generate_58x40(self, variant_id: UUIDv7, *, at: datetime | None = None) -> bytes:
         """Generate one 58 x 40 mm sale label for a currently ready Variant."""
+        return self._generate(
+            variant_id,
+            profile=LabelProfile.STANDARD_58X40,
+            dpi=203,
+            at=at,
+        )
+
+    def _generate(
+        self,
+        variant_id: UUIDv7,
+        *,
+        profile: LabelProfile,
+        dpi: int,
+        at: datetime | None,
+    ) -> bytes:
         effective_at = at or datetime.now(UTC)
         try:
             readiness = self._readiness_service.check_variant(variant_id, at=effective_at)
@@ -68,5 +94,7 @@ class VariantLabelService:
                 price=price.amount,
                 barcode=variant.barcode,
                 sku=variant.sku,
-            )
+            ),
+            profile=profile,
+            dpi=dpi,
         )

@@ -161,6 +161,30 @@ def test_new_price_preserves_history_and_becomes_current(
     assert [price.id for price in history] == [new_price.id, old_price.id]
 
 
+@pytest.mark.parametrize("price_type", [PriceType.RENTAL, PriceType.RENTAL_DEPOSIT])
+def test_rental_catalog_terms_use_the_same_immutable_history(
+    session: Session,
+    variant: CatalogVariant,
+    price_type: PriceType,
+) -> None:
+    """Rental proposals are current Price facts rather than mutable Variant fields."""
+    service = PriceService(session)
+    first = service.set_price(
+        variant.id,
+        PriceCreate(price_type=price_type, amount="500"),
+    )
+    second = service.set_price(
+        variant.id,
+        PriceCreate(price_type=price_type, amount="700"),
+    )
+
+    assert service.get_current_price(variant.id, price_type).id == second.id
+    assert [item.id for item in service.get_price_history(variant.id, price_type=price_type)] == [
+        second.id,
+        first.id,
+    ]
+
+
 def test_future_price_is_historical_but_not_current(
     session: Session,
     variant: CatalogVariant,

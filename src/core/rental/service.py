@@ -24,7 +24,7 @@ class RentalAssetService:
         self,
         *,
         variant_id: UUIDv7,
-        intake_item_id: UUIDv7,
+        intake_item_id: UUIDv7 | None,
         quantity: int,
         acquisition_cost: Decimal | None = None,
         actor_id: UUIDv7 | None = None,

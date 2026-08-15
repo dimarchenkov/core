@@ -71,6 +71,7 @@ class CatalogProductOperationsRead(PydanticBaseModel):
     id: UUIDv7
     title: str
     description: str | None
+    category_id: UUIDv7
     is_active: bool
     skus: list[str]
     variant_count: int
@@ -92,12 +93,18 @@ class CatalogVariantOperationsRead(PydanticBaseModel):
     title: str
     sku: str
     barcode: str
+    attributes: dict[str, str | int | bool]
     is_active: bool
+    physical_quantity: Decimal
+    ordinary_quantity: Decimal
     rental_asset_count: int
     available_asset_count: int
+    rented_asset_count: int
     primary_image_id: UUIDv7 | None
     current_retail_price: Decimal | None
     retail_currency: str | None
+    current_rental_price: Decimal | None
+    current_recommended_deposit: Decimal | None
     has_ever_retail_price: bool
     economics: RentalVariantEconomicsRead
 

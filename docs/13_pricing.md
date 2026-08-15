@@ -11,6 +11,7 @@ Pricing answers:
 - who assigned it;
 - what earlier prices were;
 - whether the price satisfies Ready for Sale requirements.
+- what base rental price and recommended deposit should be proposed for a new rental deal.
 
 Pricing does not replace the purchase price recorded by a supplier receipt.
 
@@ -60,16 +61,21 @@ MVP fields:
 
 ## Price types
 
-The initial implementation supports:
+The implementation supports:
 
 - `retail` — regular selling price;
 - `promo` — promotional selling price.
+- `rental` — current base rental price proposed to an operator;
+- `rental_deposit` — recommended deposit proposed to an operator.
 
 Ready for Sale requires a valid `retail` price.
 
 Channel-specific prices for AQSI, Tilda, Wildberries and Yandex Market are not part of the initial pricing foundation. AQSI initially receives the current retail price.
 
-Rental pricing is not represented by this Price model. Rental later needs duration-based rates, deposits, overdue rules and other lifecycle-specific concepts.
+These two rental values are catalog defaults, not contractual truth. When an asset is added to a
+draft, the operator may override the proposal and `RentalOrderItem.agreed_price` plus
+`RentalOrder.deposit_amount` preserve the actual deal. Duration-based tariffs, overdue rules and
+other rental calculations remain future Rental concepts.
 
 ## Money rules
 

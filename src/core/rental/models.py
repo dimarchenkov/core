@@ -27,9 +27,9 @@ class RentalAssetRecord(BaseModel):
         nullable=False,
         index=True,
     )
-    intake_item_id: Mapped[UUIDv7] = mapped_column(
+    intake_item_id: Mapped[UUIDv7 | None] = mapped_column(
         ForeignKey("intake_item_drafts.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     purpose: Mapped[AssetPurpose] = mapped_column(

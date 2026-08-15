@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from core.catalog.barcode import InternalBarcodeGenerator
 from core.readiness.enums import ReadyForSaleRequirement
 from core.shared.money import DEFAULT_CURRENCY
 
@@ -45,4 +46,8 @@ def derive_ready_for_sale_requirements(
 
 def is_aqsi_compatible_barcode(barcode: str) -> bool:
     """Return whether the primary barcode can be sent to AQSI V2."""
-    return barcode.isdigit() and 4 <= len(barcode) <= 22
+    if not barcode.isdigit() or not 4 <= len(barcode) <= 22:
+        return False
+    if len(barcode) == 13:
+        return InternalBarcodeGenerator.calculate_check_digit(barcode[:12]) == int(barcode[-1])
+    return True

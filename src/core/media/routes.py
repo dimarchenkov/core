@@ -248,6 +248,30 @@ def get_image_link(
         ) from exc
 
 
+@image_link_router.post("/{link_id}/primary", response_model=ImageLinkRead)
+def set_primary_image_link(
+    link_id: UUIDv7,
+    service: Annotated[ImageLinkService, Depends(get_image_link_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> ImageLink:
+    """Select one already linked image as the entity's primary image."""
+    try:
+        link = service.set_primary(link_id, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(link)
+        return link
+    except ImageLinkNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Image link not found.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+
+
 @image_link_router.get(
     "/primary/{entity_type}/{entity_id}",
     response_model=ImageRead,

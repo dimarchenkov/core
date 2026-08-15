@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict
 
@@ -19,3 +21,5 @@ class RentalAssetRead(PydanticBaseModel):
     variant_title: str
     condition: AssetCondition
     availability: RentalAvailability
+    suggested_rental_price: Decimal | None
+    recommended_deposit: Decimal | None

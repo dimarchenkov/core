@@ -151,7 +151,7 @@ Engine.
 
 ## Epic 4 — Rental
 
-**Status: 🚧 In Progress**
+**Status: ✅ Completed**
 
 Цель Epic — обеспечить полный поштучный учёт аренды: от выделения экземпляров при приёмке до
 выдачи, частичного возврата, обслуживания и анализа окупаемости. Каждый физический экземпляр
@@ -160,7 +160,7 @@ Engine.
 **Sprints:** Sprint 9 — Rental Foundation; Sprint 10A — Customers Foundation; Sprint 10B —
 Rental Orders; Sprint 10C — Rental Checkout Workflow ✅; Sprint 10D — Rental Return Workflow ✅;
 Sprint 10E — Catalog & Rental Operations UX ✅; Sprint 10F — Rental History & Maintenance ✅;
-**Sprint 10G — Rental Economics & Business Insights (current)**.
+Sprint 10G — Rental Economics & Business Insights ✅.
 
 После первого полноценного пользовательского тестирования ежедневный UX каталога и аренды
 выделен в отдельный Sprint до расширения истории, обслуживания и экономики.
@@ -379,24 +379,59 @@ Sprint 10E — Catalog & Rental Operations UX ✅; Sprint 10F — Rental History
 
 ## Epic 9 — Catalog Management
 
-**Status: ⏳ Planned**
+**Status: 🚧 In Progress**
 
 Цель Epic — добавить полноценное управление карточками каталога после завершения основных
-бизнес-процессов. Возможности Epic не входят в Sprint 10E.
+бизнес-процессов. Текущий Sprint: **9.12 — AQSI Sync & Label Printing**.
+
+Начиная с 9.11 используется формат `Epic.Sprint` с глобальным номером Sprint. Исторические
+названия Sprint 1–10G не переименовываются.
 
 ### Backend
 
-- [ ] Редактирование Product и Variant через согласованные команды.
-- [ ] Управление характеристиками и штрихкодами.
+- [x] Редактирование Product и Variant через согласованные команды.
+- [x] Создание Variant с системными SKU и штрихкодом.
+- [x] Базовые цены продажи, аренды и рекомендуемый залог с историей.
+- [x] Snapshot фактических условий при создании аренды.
+- [ ] Product Split и Product Merge с сохранением истории.
+- [ ] Variant Split и Variant Merge с сохранением истории.
+- [ ] Перенос Variant между Product после определения допустимых правил.
+- [ ] Безопасное перераспределение остатков как явная Catalog Operation.
 - [ ] Массовые операции и архивирование.
-- [ ] Изменение фотографий и описаний с сохранением правил Catalog и Media.
+- [x] Изменение фотографий и описаний с сохранением правил Catalog и Media.
+- [ ] Синхронизация остатков Core → AQSI (текущий adapter публикует карточку и цену, но не stock).
+- [ ] AQSI bidirectional catalog sync: отдельно определить ownership полей и правила конфликтов.
+- [ ] AQSI inventory synchronization: спроектировать согласование AQSI stock с Inventory ledger.
 
 ### UI
 
-- [ ] Полноценное управление карточкой товара.
-- [ ] Редактирование Product и Variant.
-- [ ] Изменение фотографий, описаний и характеристик.
+- [x] Базовое управление карточкой товара без SQLAdmin.
+- [x] Редактирование Product и Variant.
+- [x] Изменение фотографий, описаний и характеристик.
+- [x] Просмотр штрихкода, открытие и печать PDF-этикетки.
+- [x] Запуск существующей публикации актуальной карточки в AQSI.
 - [ ] Массовые операции, архивирование и управление штрихкодами.
+- [ ] QR label use cases:
+  - открыть карточку Variant в Core;
+  - открыть карточку RentalAsset;
+  - открыть инструкцию;
+  - идентифицировать RENT;
+  - поддержать обязательную маркировку, если она потребуется;
+  - не смешивать внутренний QR Core с кодом обязательной маркировки.
+- [ ] RentalAsset / RENT labels.
+- [ ] Custom label designer и произвольные профили размеров.
+- [ ] Mass label printing.
+
+### UX debt
+
+- [ ] Быстрое создание категории непосредственно из Intake.
+- [ ] Быстрое создание поставщика непосредственно из Intake.
+- [ ] Согласовать ledger-операции физического выбытия для RentalAsset `LOST` и `RETIRED`:
+  текущий lifecycle сохраняет историю, но не уменьшает Inventory balance.
+- [ ] Определить политику acquisition cost для RentalAsset, выделенного из уже смешанного
+  складского остатка после Intake; сейчас происхождение честно остаётся неизвестным.
+- [ ] Заменить prompt-based формы коммерческих условий, allocation и adjustment на полноценные
+  операторские формы после проверки реальной эксплуатации.
 
 ### Milestone
 

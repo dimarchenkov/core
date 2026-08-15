@@ -1,5 +1,52 @@
 const root = document.querySelector("#app");
 const toast = document.querySelector("#toast");
+let logicalParent = () => loadHome();
+let restoringHistory = false;
+
+function recordRoute(name, data = {}) {
+  const route = { name, ...data };
+  if (restoringHistory) return;
+  if (window.history.state?.coreRoute?.name === name
+      && JSON.stringify(window.history.state.coreRoute) === JSON.stringify(route)) return;
+  const method = window.history.state?.coreRoute ? "pushState" : "replaceState";
+  window.history[method]({ coreRoute: route }, "", routeUrl(route));
+}
+
+function routeUrl(route) {
+  if (route.name === "product") return `${window.location.pathname}#product/${route.productId}`;
+  if (route.name === "customer") return `${window.location.pathname}#customer/${route.customerId}`;
+  if (route.name === "order") return `${window.location.pathname}#order/${route.orderId}`;
+  if (route.name === "intake") return `${window.location.pathname}#intake/${route.sessionId}`;
+  return `${window.location.pathname}#${route.name}`;
+}
+
+function routeFromLocation() {
+  const [name, id] = window.location.hash.slice(1).split("/");
+  if (name === "product" && id) return { name, productId: id };
+  if (name === "customer" && id) return { name, customerId: id };
+  if (name === "order" && id) return { name, orderId: id };
+  if (name === "intake" && id) return { name, sessionId: id };
+  if (["workspace", "catalog", "rental"].includes(name)) return { name };
+  return null;
+}
+
+async function restoreRoute(route) {
+  restoringHistory = true;
+  try {
+    if (!route || route.name === "workspace") await loadHome();
+    else if (route.name === "catalog") await openOperationsCatalog();
+    else if (route.name === "product") await openOperationsProduct(route.productId);
+    else if (route.name === "rental") await openRentalHub();
+    else if (route.name === "customer") await selectRentalCustomer(route.customerId);
+    else if (route.name === "order") await openRentalReturnOrder(route.orderId);
+    else if (route.name === "intake") await openSession(route.sessionId);
+    else await loadHome();
+  } finally {
+    restoringHistory = false;
+  }
+}
+
+window.addEventListener("popstate", (event) => restoreRoute(event.state?.coreRoute));
 
 const state = {
   token: sessionStorage.getItem("core.token"),
@@ -26,8 +73,10 @@ const state = {
   operations: {
     products: [],
     product: null,
+    imageLinks: [],
     assets: [],
     asset: null,
+    aqsi: new Map(),
   },
 };
 
@@ -58,6 +107,14 @@ const activityLabels = {
   intake_session_completed: "Приёмка завершена",
   intake_session_abandoned: "Приёмка отменена",
 };
+
+function activityDetail(event) {
+  if (event.event_type === "intake_session_completed") {
+    return `${event.data.item_count ?? 0} поз. · ${event.data.total_quantity ?? 0} шт.`;
+  }
+  if (event.event_type === "intake_item_added") return "Товар добавлен в приёмку";
+  return "";
+}
 
 function escapeHtml(value = "") {
   return String(value)
@@ -175,13 +232,20 @@ async function login(event) {
 async function bootstrap() {
   try {
     state.user = await api("/api/auth/me");
-    await loadHome();
+    const directRoute = routeFromLocation();
+    if (directRoute) {
+      window.history.replaceState({ coreRoute: directRoute }, "", routeUrl(directRoute));
+      await restoreRoute(directRoute);
+    } else {
+      await loadHome();
+    }
   } catch (error) {
     showToast(error.message, true);
   }
 }
 
 async function loadHome() {
+  recordRoute("workspace");
   state.session = null;
   state.result = null;
   const [sessions, activity] = await Promise.all([
@@ -201,7 +265,7 @@ function renderHome(activity) {
         </button>`).join("")
     : '<div class="empty">Незавершённых приёмок нет</div>';
   const feed = activity.length
-    ? activity.map((event) => `<div class="session-row"><span>${escapeHtml(activityLabels[event.event_type] || event.event_type)}</span><span class="muted small">${formatDate(event.occurred_at)}</span></div>`).join("")
+    ? activity.map((event) => `<div class="session-row"><span><strong>${escapeHtml(activityLabels[event.event_type] || "Действие")}</strong>${activityDetail(event) ? `<br><span class="muted small">${escapeHtml(activityDetail(event))}</span>` : ""}</span><span class="muted small">${formatDate(event.occurred_at)}</span></div>`).join("")
     : '<p class="muted small">Действий пока нет.</p>';
   root.innerHTML = `
     <div class="shell">
@@ -251,7 +315,7 @@ function bindTopbar() {
   document.querySelector("#back-home")?.addEventListener("click", async () => {
     try {
       await saveAllItemForms();
-      await loadHome();
+      await logicalParent();
     } catch (error) { showToast(error.message, true); }
   });
 }
@@ -275,6 +339,8 @@ async function loadReferences() {
 
 async function openSession(id) {
   try {
+    recordRoute("intake", { sessionId: id });
+    logicalParent = () => loadHome();
     await loadReferences();
     state.session = await api(`/api/intake/sessions/${id}`);
     state.mode = null;
@@ -583,6 +649,8 @@ function renderResult() {
 
 async function openOperationsCatalog(query = "", productFilter = "all", sort = "title") {
   try {
+    recordRoute("catalog");
+    logicalParent = () => loadHome();
     const params = new URLSearchParams({ product_filter: productFilter, sort });
     if (query) params.set("query", query);
     state.operations.products = await api(`/api/operations/catalog/products?${params}`);
@@ -596,7 +664,7 @@ function renderOperationsCatalog(query, productFilter, sort) {
       <button class="catalog-row catalog-product-row" data-product-id="${product.id}">
         ${product.primary_image_id ? `<img class="catalog-photo" data-image-id="${product.primary_image_id}" alt="${escapeHtml(product.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
         <span><strong>${escapeHtml(product.title)}</strong><br><span class="muted small">${escapeHtml(product.skus.join(", ") || "Без SKU")}</span></span>
-        <span class="catalog-counts"><strong>${formatMoney(product.economics.profit)}</strong><span>Доход ${formatMoney(product.economics.revenue)}</span><span>${product.economics.rental_count} аренд</span><span class="${product.available_asset_count ? "available-text" : "muted"}">${product.available_asset_count} доступно</span>${product.needs_initial_price ? '<span class="chip warn">Нужно указать цену</span>' : ""}</span>
+        <span class="catalog-counts"><strong>${formatMoney(product.economics.profit)}</strong><span>Операционный результат</span><span>Доход ${formatMoney(product.economics.revenue)}</span><span>${product.economics.rental_count} аренд</span><span class="${product.available_asset_count ? "available-text" : "muted"}">${product.available_asset_count} доступно</span>${product.needs_initial_price ? '<span class="chip warn">Нужно указать цену</span>' : ""}</span>
       </button>`).join("")
     : '<div class="empty">Товары не найдены</div>';
   root.innerHTML = `<div class="shell">
@@ -621,7 +689,7 @@ function renderOperationsCatalog(query, productFilter, sort) {
       <option value="title" ${sort === "title" ? "selected" : ""}>По названию</option>
       <option value="revenue" ${sort === "revenue" ? "selected" : ""}>По доходу</option>
       <option value="rental_count" ${sort === "rental_count" ? "selected" : ""}>По количеству аренд</option>
-      <option value="profit" ${sort === "profit" ? "selected" : ""}>По прибыли</option>
+      <option value="profit" ${sort === "profit" ? "selected" : ""}>По операционному результату</option>
       <option value="last_rental" ${sort === "last_rental" ? "selected" : ""}>По последней аренде</option>
     </select></div>
     <div class="session-list">${rows}</div>
@@ -647,21 +715,36 @@ function operationsFilterButton(value, label, active) {
 
 async function openOperationsProduct(productId) {
   try {
-    state.operations.product = await api(`/api/operations/catalog/products/${productId}`);
+    recordRoute("product", { productId });
+    logicalParent = () => openOperationsCatalog();
+    [state.operations.product, state.categories, state.operations.imageLinks] = await Promise.all([
+      api(`/api/operations/catalog/products/${productId}`),
+      api("/api/catalog/categories"),
+      api("/api/media/image-links"),
+    ]);
+    await loadAqsiStates(state.operations.product.variants);
     renderOperationsProduct();
   } catch (error) { showToast(error.message, true); }
 }
 
 function renderOperationsProduct() {
   const product = state.operations.product;
+  const categoryOptions = state.categories.map((category) => `<option value="${category.id}" ${category.id === product.category_id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
   const variants = product.variants.length
     ? product.variants.map((variant) => `<article class="variant-commercial-card card">
         ${variant.primary_image_id ? `<img class="catalog-photo" data-image-id="${variant.primary_image_id}" alt="${escapeHtml(variant.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
-        <span class="variant-commercial-main"><strong>${escapeHtml(variant.title)}</strong><span class="muted small">${escapeHtml(variant.sku)}</span><span class="barcode-value">${escapeHtml(variant.barcode)}</span></span>
-        <span class="catalog-counts"><strong>Прибыль ${formatMoney(variant.economics.profit)}</strong><span>Доход ${formatMoney(variant.economics.revenue)}</span><span>${variant.economics.rental_count} аренд</span><span>Загрузка ${formatPercent(variant.economics.average_utilization)}</span><span class="available-text">${variant.available_asset_count} доступно</span></span>
+        <span class="variant-commercial-main"><strong>${escapeHtml(variant.title)}</strong><span class="muted small">${escapeHtml(variant.sku)}</span><span class="barcode-value">${escapeHtml(variant.barcode)}</span>
+          <span class="commercial-block"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span><button class="link-button" data-set-sale-price="${variant.id}">Изменить</button></span>
+          <span class="commercial-block"><strong>Аренда</strong><span>Цена: ${variant.current_rental_price === null ? "не настроена" : formatMoney(variant.current_rental_price)}</span><span>Залог: ${variant.current_recommended_deposit === null ? "не указан" : formatMoney(variant.current_recommended_deposit)}</span><button class="link-button" data-set-rental-prices="${variant.id}">Изменить условия</button></span>
+          ${renderAqsiState(variant)}
+        </span>
+        <span class="catalog-counts"><strong>На учёте ${formatQuantity(variant.physical_quantity)}</strong><span>Для продажи ${formatQuantity(variant.ordinary_quantity)}</span><span>Арендных экземпляров ${variant.rental_asset_count}</span><span class="available-text">Доступно сейчас ${variant.available_asset_count}</span><span>Выдано ${variant.rented_asset_count}</span></span>
         <span class="variant-actions">
-          ${variant.current_retail_price === null ? `<button class="button secondary compact" data-set-price="${variant.id}">Указать цену</button>` : ""}
+          <button class="button secondary compact" data-edit-variant="${variant.id}">Редактировать</button>
+          ${Number(variant.ordinary_quantity) > 0 ? `<button class="button secondary compact" data-allocate-rental="${variant.id}">Выделить в аренду</button>` : ""}
+          ${state.user?.is_admin ? `<button class="button ghost compact" data-adjust-inventory="${variant.id}">Корректировка остатка</button>` : ""}
           ${variant.current_retail_price !== null && variant.primary_image_id ? `<button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button><button class="button compact" data-print-label="${variant.id}">Печать</button>` : ""}
+          ${renderAqsiAction(variant)}
         </span>
       </article>`).join("")
     : '<div class="empty">У товара пока нет вариантов</div>';
@@ -673,6 +756,22 @@ function renderOperationsProduct() {
     <p class="eyebrow">Карточка товара</p>
     <h1>${escapeHtml(product.title)}</h1>
     ${product.description ? `<p>${escapeHtml(product.description)}</p>` : '<p class="muted">Описание не заполнено.</p>'}
+    <details class="card"><summary><strong>Управление товаром</strong></summary>
+      <form id="catalog-product-form">
+        <div class="field"><label>Название</label><input name="title" value="${escapeHtml(product.title)}" required></div>
+        <div class="field"><label>Описание</label><textarea name="description">${escapeHtml(product.description || "")}</textarea></div>
+        <div class="field"><label>Категория</label><select name="category_id" required>${categoryOptions}</select></div>
+        <button class="button full" type="submit">Сохранить товар</button>
+      </form>
+      <hr>
+      <h3>Добавить вариант</h3>
+      <p class="muted small">Административная операция для дополнительной товарной позиции.</p>
+      <form id="catalog-variant-create-form">
+        <div class="field"><label>Название варианта</label><input name="title" required></div>
+        <div class="field"><label>Атрибуты JSON <span class="muted">(необязательно)</span></label><textarea name="attributes" placeholder='{"color":"blue"}'></textarea></div>
+        <button class="button full" type="submit">Создать вариант</button>
+      </form>
+    </details>
     <section class="card order-facts">
       <div><span class="muted small">SKU</span><strong>${escapeHtml(product.skus.join(", ") || "—")}</strong></div>
       <div><span class="muted small">Варианты</span><strong>${product.variant_count}</strong></div>
@@ -680,20 +779,273 @@ function renderOperationsProduct() {
       <div><span class="muted small">Доступно</span><strong>${product.available_asset_count}</strong></div>
       <div><span class="muted small">Доход</span><strong>${formatMoney(product.economics.revenue)}</strong></div>
       <div><span class="muted small">Расходы</span><strong>${formatMoney(product.economics.expenses)}</strong></div>
-      <div><span class="muted small">Прибыль</span><strong>${formatMoney(product.economics.profit)}</strong></div>
+      <div><span class="muted small">Операционный результат</span><strong>${formatMoney(product.economics.profit)}</strong></div>
       <div><span class="muted small">Аренд</span><strong>${product.economics.rental_count}</strong></div>
     </section>
     <div class="section-heading"><h2>Варианты</h2><span class="muted small">${product.variant_count}</span></div>
     <div class="session-list">${variants}</div>
+    ${renderCatalogMedia(product)}
     <div class="section-heading"><h2>Предметы аренды</h2></div>
     <div class="session-list">${assets}</div>
   </div>`;
   bindTopbar();
   bindOperationsAssetRows();
   hydrateImages();
-  document.querySelectorAll("[data-set-price]").forEach((button) => button.addEventListener("click", () => showToast("Управление ценами будет добавлено в Catalog Management.")));
-  document.querySelectorAll("[data-open-label]").forEach((button) => button.addEventListener("click", () => openAuthenticatedFile(`/api/labels/variants/${button.dataset.openLabel}/58x40.pdf`)));
-  document.querySelectorAll("[data-print-label]").forEach((button) => button.addEventListener("click", () => openAuthenticatedFile(`/api/labels/variants/${button.dataset.printLabel}/58x40.pdf`, true)));
+  document.querySelector("#catalog-product-form").addEventListener("submit", saveCatalogProduct);
+  document.querySelector("#catalog-variant-create-form").addEventListener("submit", createCatalogVariant);
+  document.querySelector("#catalog-media-form").addEventListener("submit", uploadCatalogImage);
+  document.querySelectorAll("[data-edit-variant]").forEach((button) => button.addEventListener("click", () => editCatalogVariant(button.dataset.editVariant)));
+  document.querySelectorAll("[data-set-sale-price]").forEach((button) => button.addEventListener("click", () => editCatalogSalePrice(button.dataset.setSalePrice)));
+  document.querySelectorAll("[data-set-rental-prices]").forEach((button) => button.addEventListener("click", () => editCatalogRentalPrices(button.dataset.setRentalPrices)));
+  document.querySelectorAll("[data-allocate-rental]").forEach((button) => button.addEventListener("click", () => allocateRental(button.dataset.allocateRental)));
+  document.querySelectorAll("[data-adjust-inventory]").forEach((button) => button.addEventListener("click", () => adjustInventory(button.dataset.adjustInventory)));
+  document.querySelectorAll("[data-publish-aqsi]").forEach((button) => button.addEventListener("click", () => publishCatalogVariant(button.dataset.publishAqsi)));
+  document.querySelectorAll("[data-verify-aqsi]").forEach((button) => button.addEventListener("click", () => verifyCatalogVariant(button.dataset.verifyAqsi)));
+  document.querySelectorAll("[data-primary-link]").forEach((button) => button.addEventListener("click", () => selectCatalogPrimary(button.dataset.primaryLink)));
+  document.querySelectorAll("[data-delete-link]").forEach((button) => button.addEventListener("click", () => deleteCatalogImageLink(button.dataset.deleteLink)));
+  document.querySelectorAll("[data-open-label]").forEach((button) => button.addEventListener("click", () => openVariantLabel(button.dataset.openLabel, false)));
+  document.querySelectorAll("[data-print-label]").forEach((button) => button.addEventListener("click", () => openVariantLabel(button.dataset.printLabel, true)));
+}
+
+async function openVariantLabel(variantId, print) {
+  const previous = localStorage.getItem("core.label-profile") || "40x30";
+  const profile = await selectLabelProfile(previous, print);
+  if (profile === null) return;
+  localStorage.setItem("core.label-profile", profile);
+  openAuthenticatedFile(`/api/labels/variants/${variantId}/${profile}.pdf?dpi=203`, print);
+}
+
+function selectLabelProfile(previous, print) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "label-dialog";
+    dialog.innerHTML = `
+      <form method="dialog">
+        <h2>Размер этикетки</h2>
+        <p class="muted small">PDF откроется в точном физическом размере без полей браузера.</p>
+        <label class="label-profile-option">
+          <input type="radio" name="profile" value="40x30" ${previous === "40x30" ? "checked" : ""}>
+          <span><strong>40 × 30 мм</strong><small>Компактная товарная этикетка</small></span>
+        </label>
+        <label class="label-profile-option">
+          <input type="radio" name="profile" value="58x40" ${previous === "58x40" ? "checked" : ""}>
+          <span><strong>58 × 40 мм</strong><small>Крупнее название, цена и штрихкод</small></span>
+        </label>
+        <div class="actions horizontal-actions">
+          <button class="button secondary" value="cancel">Отмена</button>
+          <button class="button" value="confirm">${print ? "Открыть и печатать" : "Предпросмотр PDF"}</button>
+        </div>
+      </form>`;
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => {
+      const selected = dialog.returnValue === "confirm"
+        ? dialog.querySelector("input[name=profile]:checked")?.value ?? null
+        : null;
+      dialog.remove();
+      resolve(selected);
+    }, { once: true });
+    dialog.showModal();
+  });
+}
+
+async function loadAqsiStates(variants) {
+  state.operations.aqsi = new Map();
+  await Promise.all(variants.map(async (variant) => {
+    try {
+      const value = await api(`/api/publishing/aqsi/variants/${variant.id}`);
+      state.operations.aqsi.set(variant.id, value);
+    } catch (error) {
+      if (error.message !== "AQSI publication not found.") throw error;
+    }
+  }));
+}
+
+function renderAqsiState(variant) {
+  const publication = state.operations.aqsi.get(variant.id);
+  if (!publication) return '<span class="commercial-block"><strong>AQSI</strong><span>Не передан</span></span>';
+  const status = publication.status;
+  let title = "Отправляется";
+  let detail = publication.latest_attempt_at ? formatDate(publication.latest_attempt_at) : "";
+  if (status === "accepted") {
+    title = "Передан в очередь AQSI";
+    detail = "Ожидаем подтверждения AQSI";
+  } else if (status === "published" && publication.is_outdated) {
+    title = "Есть изменения, не переданные в AQSI";
+    detail = publication.published_at ? `Последняя синхронизация: ${formatDate(publication.published_at)}` : "";
+  } else if (status === "published") {
+    title = "Синхронизирован";
+    detail = publication.published_at ? formatDate(publication.published_at) : "";
+  } else if (status === "failed") {
+    title = "Ошибка синхронизации";
+    detail = publication.last_error || "AQSI отклонил операцию";
+  }
+  return `<span class="commercial-block aqsi-block"><strong>AQSI</strong><span class="${status === "failed" ? "danger-text" : status === "published" && !publication.is_outdated ? "available-text" : ""}">${escapeHtml(title)}</span>${detail ? `<span class="muted small">${escapeHtml(detail)}</span>` : ""}<span class="muted small">Цена: ${variant.current_retail_price === null ? "—" : formatMoney(variant.current_retail_price)} · Штрихкод: ${escapeHtml(variant.barcode)}</span></span>`;
+}
+
+function renderAqsiAction(variant) {
+  const publication = state.operations.aqsi.get(variant.id);
+  if (!publication) return `<button class="button ghost compact" data-publish-aqsi="${variant.id}">Передать в AQSI</button>`;
+  if (publication.status === "accepted") {
+    const busy = ["pending", "processing"].includes(publication.latest_attempt_status);
+    return `<button class="button ghost compact" data-verify-aqsi="${variant.id}" ${busy ? "disabled" : ""}>${busy ? "Проверяется" : "Проверить состояние"}</button>`;
+  }
+  if (publication.status === "failed") return `<button class="button ghost compact" data-publish-aqsi="${variant.id}">Повторить</button>`;
+  if (publication.status === "published" && publication.is_outdated) return `<button class="button ghost compact" data-publish-aqsi="${variant.id}">Синхронизировать повторно</button>`;
+  return `<button class="button ghost compact" data-publish-aqsi="${variant.id}">Синхронизировать повторно</button>`;
+}
+
+function renderCatalogMedia(product) {
+  const entityIds = new Set([product.id, ...product.variants.map((variant) => variant.id)]);
+  const links = state.operations.imageLinks.filter((link) => entityIds.has(link.entity_id));
+  const targetOptions = [`<option value="catalog_product:${product.id}">Товар целиком</option>`, ...product.variants.map((variant) => `<option value="catalog_variant:${variant.id}">Вариант: ${escapeHtml(variant.title)}</option>`)].join("");
+  const gallery = links.length ? links.map((link) => `<figure class="catalog-media-item">
+    <img data-image-id="${link.image_id}" alt="Фото товара">
+    <figcaption><span class="chip ${link.role === "primary" ? "good" : ""}">${link.role === "primary" ? "Основное" : "Галерея"}</span>
+      ${link.role !== "primary" ? `<button class="link-button" data-primary-link="${link.id}">Сделать основным</button>` : ""}
+      <button class="link-button danger-text" data-delete-link="${link.id}">Отвязать</button></figcaption>
+  </figure>`).join("") : '<div class="empty">Фотографий пока нет</div>';
+  return `<section class="card"><div class="section-heading"><h2>Фотографии</h2><span class="muted small">${links.length}</span></div>
+    <div class="catalog-media-grid">${gallery}</div>
+    <form id="catalog-media-form"><div class="field"><label>К чему относится фото</label><select name="target">${targetOptions}</select></div><div class="field"><label>Новое фото</label><input name="file" type="file" accept="image/*" capture="environment" required></div><button class="button full" type="submit">Добавить фото</button></form>
+  </section>`;
+}
+
+async function saveCatalogProduct(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api(`/api/catalog/products/${state.operations.product.id}`, { method: "PATCH", body: JSON.stringify({ title: data.get("title"), description: nullableText(data.get("description")), category_id: data.get("category_id") }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Карточка товара сохранена");
+  } catch (error) { showToast(error.message, true); }
+}
+
+function parseAttributes(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) return {};
+  const parsed = JSON.parse(normalized);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("Атрибуты должны быть JSON-объектом");
+  return parsed;
+}
+
+async function createCatalogVariant(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api("/api/catalog/variants", { method: "POST", body: JSON.stringify({ product_id: state.operations.product.id, title: data.get("title"), attributes: parseAttributes(data.get("attributes")), is_active: true }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Вариант создан");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function editCatalogVariant(variantId) {
+  const variant = state.operations.product.variants.find((item) => item.id === variantId);
+  const title = window.prompt("Название варианта", variant.title);
+  if (title === null) return;
+  const attributes = window.prompt("Атрибуты JSON", JSON.stringify(variant.attributes));
+  if (attributes === null) return;
+  try {
+    await api(`/api/catalog/variants/${variantId}`, { method: "PATCH", body: JSON.stringify({ title, attributes: parseAttributes(attributes) }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Вариант сохранён");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function editCatalogSalePrice(variantId) {
+  const variant = state.operations.product.variants.find((item) => item.id === variantId);
+  const amount = window.prompt("Цена продажи, ₽", variant.current_retail_price ?? "");
+  if (amount === null || amount === "") return;
+  try {
+    await api(`/api/pricing/variants/${variantId}/prices`, { method: "POST", body: JSON.stringify({ price_type: "retail", amount, reason: "Catalog Management" }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Цена продажи сохранена");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function editCatalogRentalPrices(variantId) {
+  const variant = state.operations.product.variants.find((item) => item.id === variantId);
+  const rental = window.prompt("Цена аренды, ₽", variant.current_rental_price ?? "");
+  if (rental === null) return;
+  const deposit = window.prompt("Рекомендуемый залог, ₽", variant.current_recommended_deposit ?? "");
+  if (deposit === null) return;
+  try {
+    if (rental !== "") await api(`/api/pricing/variants/${variantId}/prices`, { method: "POST", body: JSON.stringify({ price_type: "rental", amount: rental, reason: "Catalog Management" }) });
+    if (deposit !== "") await api(`/api/pricing/variants/${variantId}/prices`, { method: "POST", body: JSON.stringify({ price_type: "rental_deposit", amount: deposit, reason: "Catalog Management" }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Условия аренды сохранены");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function allocateRental(variantId) {
+  const amount = window.prompt("Сколько единиц выделить в аренду?", "1");
+  if (amount === null) return;
+  try {
+    const result = await api(`/api/operations/catalog/variants/${variantId}/allocate-rental`, { method: "POST", body: JSON.stringify({ quantity: Number(amount) }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast(`Созданы: ${result.asset_numbers.join(", ")}`);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function adjustInventory(variantId) {
+  const quantityDelta = window.prompt("Изменение остатка (например, -1 или 2)", "-1");
+  if (quantityDelta === null) return;
+  const reason = window.prompt("Причина: shortage, damage, gift, personal_use, stocktake, other", "stocktake");
+  if (reason === null) return;
+  const comment = window.prompt("Комментарий", "");
+  if (comment === null) return;
+  try {
+    await api(`/api/operations/catalog/variants/${variantId}/inventory-adjustments`, { method: "POST", body: JSON.stringify({ quantity_delta: quantityDelta, reason, comment: nullableText(comment) }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Корректировка записана в складской ledger");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function uploadCatalogImage(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const [entityType, entityId] = String(data.get("target")).split(":");
+  const links = state.operations.imageLinks.filter((link) => link.entity_type === entityType && link.entity_id === entityId);
+  const upload = new FormData();
+  upload.set("file", data.get("file"));
+  try {
+    const image = await api("/api/media/images/upload", { method: "POST", body: upload });
+    await api("/api/media/image-links", { method: "POST", body: JSON.stringify({ image_id: image.id, entity_type: entityType, entity_id: entityId, role: links.length ? "gallery" : "primary", sort_order: links.length }) });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Фото добавлено");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function selectCatalogPrimary(linkId) {
+  try {
+    await api(`/api/media/image-links/${linkId}/primary`, { method: "POST" });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Основное фото изменено");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function deleteCatalogImageLink(linkId) {
+  if (!window.confirm("Отвязать фото от карточки? Сам файл останется в Media.")) return;
+  try {
+    await api(`/api/media/image-links/${linkId}`, { method: "DELETE" });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Фото отвязано");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function publishCatalogVariant(variantId) {
+  try {
+    const result = await api(`/api/publishing/aqsi/variants/${variantId}`, { method: "POST" });
+    await openOperationsProduct(state.operations.product.id);
+    showToast(result.queued ? "Команда отправлена. Ожидаем AQSI." : "Такая операция уже выполняется.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function verifyCatalogVariant(variantId) {
+  try {
+    const result = await api(`/api/publishing/aqsi/variants/${variantId}/verify`, { method: "POST" });
+    await openOperationsProduct(state.operations.product.id);
+    showToast(result.queued ? "Проверка AQSI поставлена в очередь" : "Проверка уже выполняется");
+  } catch (error) { showToast(error.message, true); }
 }
 
 async function openOperationsAssets(query = "", assetFilter = "all", sort = "asset_number") {
@@ -768,6 +1120,7 @@ function bindOperationsAssetRows() {
 
 async function openOperationsAsset(assetId) {
   try {
+    logicalParent = () => openOperationsProduct(state.operations.asset?.product_id || state.operations.product?.id);
     state.operations.asset = await api(`/api/operations/rental/assets/${assetId}/passport`);
     renderOperationsAsset();
   } catch (error) { showToast(error.message, true); }
@@ -804,6 +1157,7 @@ function renderOperationsAsset() {
     <div class="actions horizontal-actions">
       <button class="button secondary" id="asset-open-product">← К товару</button>
       ${asset.current_order_id ? `<button class="button" id="asset-open-order">Открыть аренду →</button>` : ""}
+      ${asset.purpose === "rental" && asset.availability === "available" ? '<button class="button ghost" id="asset-withdraw-for-sale">Вывести из аренды</button>' : ""}
     </div>
     <div class="section-heading"><h2>Экономика</h2><span class="chips">${economics.flags.map(efficiencyChip).join("")}</span></div>
     <section class="card order-facts">
@@ -845,11 +1199,22 @@ function renderOperationsAsset() {
   hydrateImages();
   document.querySelector("#asset-open-product").addEventListener("click", () => openOperationsProduct(asset.product_id));
   document.querySelector("#asset-open-order")?.addEventListener("click", () => openRentalReturnOrder(asset.current_order_id));
+  document.querySelector("#asset-withdraw-for-sale")?.addEventListener("click", withdrawAssetForSale);
   document.querySelectorAll("[data-passport-order]").forEach((button) => button.addEventListener("click", () => openRentalReturnOrder(button.dataset.passportOrder)));
   document.querySelectorAll("[data-passport-customer]").forEach((button) => button.addEventListener("click", () => selectRentalCustomer(button.dataset.passportCustomer)));
   document.querySelector("#asset-maintenance-form").addEventListener("submit", addAssetMaintenance);
   document.querySelector("#asset-damage-form").addEventListener("submit", addAssetDamage);
   document.querySelector("#asset-photo-form").addEventListener("submit", addAssetConditionPhoto);
+}
+
+async function withdrawAssetForSale() {
+  const asset = state.operations.asset;
+  if (!window.confirm(`Вывести ${asset.asset_number} из аренды и вернуть единицу в обычный остаток?`)) return;
+  try {
+    await api(`/api/operations/rental/assets/${asset.id}/withdraw-for-sale`, { method: "POST" });
+    await openOperationsProduct(asset.product_id);
+    showToast(`${asset.asset_number} выведен из аренды. История сохранена.`);
+  } catch (error) { showToast(error.message, true); }
 }
 
 async function addAssetMaintenance(event) {
@@ -892,6 +1257,8 @@ function damageSeverityLabel(value) {
 
 async function openRentalHub() {
   try {
+    recordRoute("rental");
+    logicalParent = () => loadHome();
     state.rental.drafts = await api("/rental/orders?order_status=issued");
     renderRentalHub();
   } catch (error) { showToast(error.message, true); }
@@ -929,6 +1296,7 @@ function renderRentalHub() {
 
 async function openRentalHome() {
   try {
+    logicalParent = () => openRentalHub();
     const drafts = await api("/rental/orders?order_status=draft");
     state.rental = {
       customers: [],
@@ -1033,6 +1401,8 @@ async function createRentalCustomer(event) {
 
 async function selectRentalCustomer(customerId) {
   try {
+    recordRoute("customer", { customerId });
+    logicalParent = () => openRentalHub();
     [state.rental.customer, state.rental.customerHistory] = await Promise.all([
       api(`/api/customers/${customerId}`),
       api(`/api/operations/rental/customers/${customerId}/history`),
@@ -1109,6 +1479,8 @@ async function createRentalDraft(event) {
 
 async function openRentalDraft(orderId) {
   try {
+    recordRoute("order", { orderId });
+    logicalParent = () => selectRentalCustomer(state.rental.order?.customer_id);
     state.rental.order = await api(`/rental/orders/${orderId}`);
     state.rental.customer = await api(`/api/customers/${state.rental.order.customer_id}`);
     await loadDefaultRentalAssets();
@@ -1208,8 +1580,8 @@ function renderRentalAssetResults() {
     const available = asset.availability === "available" && !alreadyAdded;
     return `<article class="asset-result">
       <div><strong>${escapeHtml(asset.product_title)} · ${escapeHtml(asset.variant_title)}</strong>
-      <div class="muted small">${escapeHtml(asset.asset_number)} · ${escapeHtml(conditionLabel(asset.condition))} · ${escapeHtml(availabilityLabel(asset.availability))}</div></div>
-      <div class="asset-price"><input data-asset-price="${asset.id}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Цена, ₽" ${available ? "" : "disabled"}>
+      <div class="muted small">${escapeHtml(asset.asset_number)} · ${escapeHtml(conditionLabel(asset.condition))} · ${escapeHtml(availabilityLabel(asset.availability))}${asset.recommended_deposit === null ? "" : ` · залог ${formatMoney(asset.recommended_deposit)}`}</div></div>
+      <div class="asset-price"><input data-asset-price="${asset.id}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="Цена, ₽" value="${asset.suggested_rental_price ?? ""}" ${available ? "" : "disabled"}>
       <button class="button compact" data-add-rental-asset="${asset.id}" ${available ? "" : "disabled"}>${alreadyAdded ? "Добавлен" : "Добавить"}</button></div>
     </article>`;
   }).join("");
@@ -1233,6 +1605,14 @@ async function addRentalAsset(assetId) {
         discount: "0",
       }),
     });
+    const asset = state.rental.assets.find((item) => item.id === assetId);
+    if (asset?.recommended_deposit !== null && asset?.recommended_deposit !== undefined) {
+      const currentDeposit = Number(state.rental.order.deposit_amount);
+      state.rental.order = await api(`/rental/orders/${state.rental.order.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ deposit_amount: String(currentDeposit + Number(asset.recommended_deposit)) }),
+      });
+    }
     await loadDefaultRentalAssets();
     renderRentalDraft();
     showToast("Предмет аренды добавлен");
@@ -1289,6 +1669,7 @@ function renderRentalIssued() {
 
 async function openRentalReturnHome(query = "") {
   try {
+    logicalParent = () => openRentalHub();
     const suffix = query ? `&query=${encodeURIComponent(query)}` : "";
     const orders = await api(`/rental/orders?order_status=issued${suffix}`);
     state.rental.drafts = orders;
@@ -1333,7 +1714,9 @@ function renderRentalReturnHome(query = "") {
 
 async function openRentalReturnOrder(orderId) {
   try {
+    recordRoute("order", { orderId });
     state.rental.order = await api(`/rental/orders/${orderId}`);
+    logicalParent = () => selectRentalCustomer(state.rental.order.customer_id);
     const assetRows = await Promise.all(state.rental.order.items.map(async (item) => {
       const matches = await api(`/api/operations/rental/assets?query=${encodeURIComponent(item.asset_number_snapshot)}`);
       return [item.rental_asset_id, matches.find((asset) => asset.id === item.rental_asset_id)];
@@ -1523,6 +1906,10 @@ function formatShortDate(value) {
 
 function formatMoney(value) {
   return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value);
+}
+
+function formatQuantity(value) {
+  return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 3 }).format(Number(value))} шт.`;
 }
 
 function formatPercent(value) {
