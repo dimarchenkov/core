@@ -15,7 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from core.activity.enums import ActivityEventType
 from core.activity.models import ActivityEvent
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
@@ -34,6 +34,7 @@ from core.pricing.models import Price
 from core.receipt.models import Receipt, ReceiptItem
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
 from core.rental.models import RentalAssetRecord
+from core.rental.repository import RentalAssetRepository
 from core.shared.db import Base
 from core.supplier.models import Supplier
 
@@ -53,6 +54,7 @@ def session() -> Generator[Session]:
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
             Image.__table__,
             ImageLink.__table__,
             Supplier.__table__,
@@ -543,6 +545,8 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
     assert all(asset.condition is AssetCondition.NEW for asset in rental_assets)
     assert all(asset.availability is RentalAvailability.AVAILABLE for asset in rental_assets)
     assert all(asset.created_by_id == first.id for asset in rental_assets)
+    assert RentalAssetRepository(session).get_by_asset_number("rent-000001") is not None
+    assert RentalAssetRepository(session).get_by_asset_number("RENT-000002") is not None
     completed = session.get(IntakeSession, UUID(intake_session["id"]))
     assert completed is not None
     assert completed.status.value == "completed"
@@ -647,8 +651,10 @@ def test_complete_new_product_creates_primary_image_catalog_and_stock(
     intake_session = _create_session(test_client)
     upload = test_client.post(
         f"/api/intake/sessions/{intake_session['id']}/items/new",
+        data={"manufacturer_barcode": "4601234567893"},
         files={"file": ("new.png", _png_bytes(), "image/png")},
     ).json()
+    assert upload["manufacturer_barcode"] == "4601234567893"
     test_client.patch(
         f"/api/intake/sessions/{intake_session['id']}/items/{upload['id']}",
         json={
@@ -687,6 +693,23 @@ def test_complete_new_product_creates_primary_image_catalog_and_stock(
     assert created_product.title == "Brand new rack"
     assert created_variant.title == "White"
     assert created_variant.created_by_id == first.id
+    assert {(row.value, row.source.value) for row in created_variant.barcodes} == {
+        (created_variant.barcode, "internal"),
+        ("4601234567893", "manufacturer"),
+    }
+    found = test_client.get(
+        "/api/catalog/variants/lookup/by-barcode",
+        params={"barcode": "4601234567893"},
+    )
+    assert found.status_code == 200
+    assert found.json()["id"] == str(created_variant.id)
+    repeat_session = _create_session(test_client)
+    repeated = test_client.post(
+        f"/api/intake/sessions/{repeat_session['id']}/items/existing",
+        json={"barcode": "4601234567893"},
+    )
+    assert repeated.status_code == 201
+    assert repeated.json()["variant_id"] == str(created_variant.id)
     link = session.scalar(select(ImageLink).where(ImageLink.entity_id == created_variant.id))
     assert link is not None
     assert link.image_id == UUID(upload["image_id"])

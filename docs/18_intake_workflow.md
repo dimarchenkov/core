@@ -15,6 +15,11 @@ The employee opens Intake and chooses the natural identification action:
 - scan or search for a known Variant;
 - take a photo for a new Product or Variant.
 
+Barcode entry is one workflow regardless of input device: manual typing, a keyboard-emulating
+scanner ending with Enter, and the browser camera all call the same exact lookup. A found code
+offers the existing Variant. An unknown valid code is carried into Photo First creation as its
+manufacturer barcode; the operator does not type it again.
+
 Supplier, quantity and prices are requested after the physical item has been identified. Supplier remains mandatory before completion because one completed IntakeSession produces exactly one Receipt.
 
 ## Photo policy
@@ -71,6 +76,7 @@ Common fields:
 - nullable `variant_id` for a known position;
 - nullable `product_id` for a new Variant of an existing Product;
 - nullable `image_id`;
+- nullable manufacturer barcode for a new Product/Variant;
 - new Product and Variant input fields;
 - quantity;
 - purchase price;
@@ -186,16 +192,21 @@ Catalog and Receipt cards remain reference and history views, not the employee's
 
 ### Implemented first-party client
 
-Core serves the first workflow client at `/app`. It is a small dependency-free web client delivered
-by the same FastAPI application, so deployment does not require a Node build or a separate frontend
-container. This is an implementation choice for the first operational screen, not a constraint on
-future React, native or franchise-specific clients.
+Core serves the first workflow client at `/app`. It is a small build-free web client delivered by
+the same FastAPI application, so deployment does not require Node or a separate frontend container.
+This is an implementation choice for the first operational screen, not a constraint on future
+React, native or franchise-specific clients.
 
 The client supports:
 
 - local email/password login with a token kept only for the browser session;
 - starting and resuming employee-owned drafts;
-- scanner-friendly barcode input plus SKU and Variant selection;
+- scanner-friendly multi-barcode input plus SKU and Variant selection;
+- camera scanning through the native `BarcodeDetector` API when it supports all required formats;
+- `@zxing/browser` 0.2.1 fallback for Safari/iOS and other browsers without BarcodeDetector,
+  loaded lazily from a version-pinned unpkg UMD URL with SHA-384 integrity verification;
+- manual fallback for denied camera access, unavailable cameras, failed recognition or dependency
+  loading failure;
 - camera or photo-library upload for a new Product;
 - visual confirmation using the existing Variant or Product primary image;
 - progressive item editing driven by derived missing requirements;
@@ -206,6 +217,12 @@ The client supports:
 Source images are delivered through an authenticated Media endpoint. The client fetches the bytes
 with its bearer token and creates a temporary browser URL; storage paths are never exposed as public
 filesystem routes.
+
+`@zxing/browser` is MIT-licensed, has no runtime package dependencies in its published browser
+bundle, and supports the required EAN-13, EAN-8, UPC-A and Code 128 readers. It is not a business
+dependency: both native and ZXing adapters emit a barcode string into the same visible input and
+the same Catalog lookup API. Camera access requires a secure context: HTTPS in production or the
+browser's special localhost exception during development.
 
 ## Outside the first implementation
 

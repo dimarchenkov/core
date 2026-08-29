@@ -51,6 +51,14 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Просрочен" in script.text
     assert "/api/operations/catalog/products" in script.text
     assert "/api/operations/rental/assets" in script.text
+    assert "📷 Сканировать камерой" in script.text
+    assert "startBarcodeCamera" in script.text
+    assert "acceptScannedBarcode" in script.text
+    assert "await lookupIntakeBarcode(input.value)" in script.text
+    assert "await identifyDraftManufacturerBarcode(input)" in script.text
+    assert "@zxing/browser@0.2.1" in script.text
+    assert 'facingMode: { ideal: "environment" }' in script.text
+    assert "getUserMedia" in script.text
     assert "/passport" in script.text
     assert "/maintenance" in script.text
     assert "/damages" in script.text

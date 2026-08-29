@@ -6,6 +6,7 @@ from decimal import Decimal
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
+from core.catalog.barcodes import normalize_barcode
 from core.intake.enums import (
     IntakeItemKind,
     IntakeItemRequirement,
@@ -90,6 +91,7 @@ class IntakeItemDraftUpdate(PydanticBaseModel):
     product_title: str | None = Field(default=None, min_length=1, max_length=255)
     product_description: str | None = None
     variant_title: str | None = Field(default=None, min_length=1, max_length=255)
+    manufacturer_barcode: str | None = Field(default=None, max_length=128)
     attributes: dict[str, str | int | bool] | None = None
     quantity: int | None = Field(default=None, gt=0)
     rental_quantity: int | None = Field(default=None, ge=0)
@@ -109,6 +111,12 @@ class IntakeItemDraftUpdate(PydanticBaseModel):
     def normalize_required_text(cls, value: str | None) -> str | None:
         """Trim future required names while allowing an omitted draft field."""
         return value.strip() if value is not None else None
+
+    @field_validator("manufacturer_barcode")
+    @classmethod
+    def validate_manufacturer_barcode(cls, value: str | None) -> str | None:
+        """Normalize and validate the code carried through Intake."""
+        return normalize_barcode(value) if value is not None else None
 
 
 class IntakeAbandon(PydanticBaseModel):
@@ -143,6 +151,7 @@ class IntakeItemDraftRead(PydanticBaseModel):
     product_title: str | None
     product_description: str | None
     variant_title: str | None
+    manufacturer_barcode: str | None
     attributes: dict[str, str | int | bool]
     quantity: int | None
     rental_quantity: int

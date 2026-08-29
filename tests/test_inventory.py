@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.identity.models import User
 from core.inventory.enums import MovementType, SourceType
 from core.inventory.models import StockMovement
@@ -40,6 +40,7 @@ def session() -> Generator[Session]:
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
             StockMovement.__table__,
         ],
     )

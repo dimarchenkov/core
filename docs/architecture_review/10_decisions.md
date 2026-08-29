@@ -172,3 +172,18 @@
   primary image is one Media service command that demotes the previous primary link.
 - Labels and AQSI remain independent modules and rebuild output from current authoritative Core
   data. AQSI stock synchronization is deferred because the current adapter has no stock contract.
+- `CatalogVariantBarcode` is the normalized globally unique collection of scanner identifiers.
+  Existing `CatalogVariant.barcode` remains the immutable primary INTERNAL EAN for migration and
+  backward compatibility; it is not a second independently editable identifier.
+- Migration `0027` copies every legacy EAN to the collection as `INTERNAL` without rewriting it.
+- Manufacturer barcodes are append-only assignments to a Variant. EAN-13, EAN-8 and UPC-A use
+  check-digit validation; other printable ASCII input is treated as Code 128 data.
+- Intake owns no barcode registry. Its application workflow carries an unknown manufacturer code
+  into Catalog Variant creation inside the existing completion transaction.
+- AQSI's one-barcode projection prefers a suitable numeric MANUFACTURER code and falls back to the
+  internal EAN. Product labels continue to encode the internal EAN; RentalAsset identity remains
+  the independent immutable `RENT-...` value.
+- Camera and keyboard scanners are input adapters only. Native `BarcodeDetector` is preferred when
+  it supports EAN-13, EAN-8, UPC-A and Code 128; otherwise the UI lazily loads the fixed
+  `@zxing/browser` 0.2.1 MIT UMD bundle. Both write the same manufacturer-barcode field and invoke
+  the same lookup function. Production camera access requires HTTPS.

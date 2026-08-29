@@ -14,7 +14,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.barcodes import BarcodeSource
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.config import Settings, get_settings
 from core.database import get_session
 from core.identity.models import User
@@ -202,6 +203,7 @@ def session() -> Generator[Session]:
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
             Image.__table__,
             ImageLink.__table__,
             Price.__table__,
@@ -318,6 +320,34 @@ def test_payload_builder_emits_only_minimal_confirmed_aqsi_fields(
     assert "productionCost" not in payload
     assert "img" not in payload
     assert "markingType" not in payload
+
+
+def test_aqsi_prefers_suitable_manufacturer_barcode(
+    session: Session,
+    variant: CatalogVariant,
+    aqsi_settings: Settings,
+) -> None:
+    """AQSI receives the manufacturer's numeric code while Core retains its internal EAN."""
+    variant.barcodes.extend(
+        [
+            CatalogVariantBarcode(
+                variant_id=variant.id,
+                value=variant.barcode,
+                source=BarcodeSource.INTERNAL,
+            ),
+            CatalogVariantBarcode(
+                variant_id=variant.id,
+                value="4601234567893",
+                source=BarcodeSource.MANUFACTURER,
+            ),
+        ]
+    )
+    session.commit()
+
+    payload = AqsiPayloadBuilder(session, aqsi_settings).build_goods(variant.id).as_aqsi_json()
+
+    assert payload["barcodes"] == ["4601234567893"]
+    assert variant.barcode == "2000000000015"
 
 
 def test_publication_request_is_attributed_and_idempotent_while_pending(

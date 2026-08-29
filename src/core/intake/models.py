@@ -136,6 +136,7 @@ class IntakeItemDraft(BaseModel):
     product_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     variant_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    manufacturer_barcode: Mapped[str | None] = mapped_column(String(128), nullable=True)
     attributes: Mapped[dict[str, str | int | bool]] = mapped_column(
         JSON,
         nullable=False,

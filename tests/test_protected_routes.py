@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.database import get_session
 from core.identity.models import PrivilegeAuditEvent, User
 from core.identity.service import IdentityService
@@ -35,6 +35,7 @@ def session() -> Generator[Session]:
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
             Image.__table__,
             ImageLink.__table__,
             PrivilegeAuditEvent.__table__,

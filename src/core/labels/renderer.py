@@ -33,6 +33,17 @@ class VariantLabelData:
     sku: str
 
 
+@dataclass(frozen=True, slots=True)
+class RentalAssetLabelData:
+    """Stable physical-asset identity rendered without commercial data."""
+
+    product_title: str
+    variant_title: str
+    asset_number: str
+    sku: str
+    status_text: str
+
+
 class VariantLabelRenderer:
     """Render vector product labels in one of two fixed physical profiles."""
 
@@ -243,3 +254,96 @@ class VariantLabel58x40Renderer(VariantLabelRenderer):
     def render(self, data: VariantLabelData, *, dpi: int = 203) -> bytes:
         """Render the standard profile for existing callers."""
         return super().render(data, profile=LabelProfile.STANDARD_58X40, dpi=dpi)
+
+
+class RentalAssetLabelRenderer(VariantLabelRenderer):
+    """Render an internal Code 128 label for one physical RentalAsset."""
+
+    def render(
+        self,
+        data: RentalAssetLabelData,
+        *,
+        profile: LabelProfile = LabelProfile.COMPACT_40X30,
+        dpi: int = 203,
+    ) -> bytes:
+        """Return one exact-size PDF whose scanned value is the RENT number."""
+        if dpi not in self.supported_dpi:
+            raise ValueError("Label printer DPI must be 203 or 300.")
+        self._validate_asset_number(data.asset_number)
+        self._register_fonts()
+        width, height = self.sizes[profile]
+        output = BytesIO()
+        canvas = Canvas(
+            output,
+            pagesize=(width, height),
+            pageCompression=1,
+            invariant=1,
+        )
+        canvas.setTitle(f"{data.asset_number} inventory label")
+        if profile is LabelProfile.COMPACT_40X30:
+            self._draw_asset_40x30(canvas, data)
+        else:
+            self._draw_asset_58x40(canvas, data)
+        canvas.showPage()
+        canvas.save()
+        return output.getvalue()
+
+    def _draw_asset_40x30(self, canvas: Canvas, data: RentalAssetLabelData) -> None:
+        canvas.setFont(self.bold_font, 6.5)
+        canvas.drawString(1.5 * mm, 27.2 * mm, "АРЕНДА")
+        self._draw_wrapped(canvas, data.product_title, 1.5, 23.9, 37, 6.2, 1, 2.6)
+        variant = self._truncate_text(data.variant_title, self.regular_font, 5.5, 37 * mm)
+        canvas.setFont(self.regular_font, 5.5)
+        canvas.drawString(1.5 * mm, 20.7 * mm, variant)
+        self._draw_code128(canvas, data.asset_number, 40 * mm, 37, 9.7, 8.5)
+        canvas.setFont(self.bold_font, 7.2)
+        canvas.drawCentredString(20 * mm, 5.1 * mm, data.asset_number)
+        if data.status_text:
+            status = self._truncate_text(data.status_text, self.regular_font, 4.2, 37 * mm)
+            canvas.setFont(self.regular_font, 4.2)
+            canvas.drawCentredString(20 * mm, 2.8 * mm, status)
+
+    def _draw_asset_58x40(self, canvas: Canvas, data: RentalAssetLabelData) -> None:
+        canvas.setFont(self.bold_font, 8)
+        canvas.drawString(2 * mm, 36.3 * mm, "АРЕНДА")
+        self._draw_wrapped(canvas, data.product_title, 2, 32.2, 54, 8.2, 2, 3.4)
+        variant = self._truncate_text(data.variant_title, self.regular_font, 6.3, 54 * mm)
+        canvas.setFont(self.regular_font, 6.3)
+        canvas.drawString(2 * mm, 24.7 * mm, variant)
+        self._draw_code128(canvas, data.asset_number, 58 * mm, 54, 13.8, 9.4)
+        canvas.setFont(self.bold_font, 9)
+        canvas.drawCentredString(29 * mm, 6 * mm, data.asset_number)
+        footer = " · ".join(value for value in (data.sku, data.status_text) if value)
+        footer = self._truncate_text(footer, self.regular_font, 4.7, 54 * mm)
+        canvas.setFont(self.regular_font, 4.7)
+        canvas.drawCentredString(29 * mm, 3 * mm, footer)
+
+    @staticmethod
+    def _draw_code128(
+        canvas: Canvas,
+        value: str,
+        page_width: float,
+        width_mm: float,
+        height_mm: float,
+        y_mm: float,
+    ) -> None:
+        drawing = createBarcodeDrawing(
+            "Code128",
+            value=value,
+            barHeight=height_mm * mm,
+            humanReadable=False,
+            quiet=True,
+        )
+        scale = width_mm * mm / drawing.width
+        left = (page_width - drawing.width * scale) / 2
+        canvas.saveState()
+        canvas.translate(left, y_mm * mm)
+        canvas.scale(scale, 1)
+        renderPDF.draw(drawing, canvas, 0, 0)
+        canvas.restoreState()
+
+    @staticmethod
+    def _validate_asset_number(asset_number: str) -> None:
+        prefix, separator, digits = asset_number.partition("-")
+        if prefix != "RENT" or separator != "-" or len(digits) < 6 or not digits.isdigit():
+            raise ValueError("RentalAsset label requires a canonical RENT number.")

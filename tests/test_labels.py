@@ -10,7 +10,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.barcodes import BarcodeSource
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
@@ -45,6 +46,7 @@ def session() -> Generator[Session]:
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
             Image.__table__,
             ImageLink.__table__,
             Price.__table__,
@@ -209,6 +211,32 @@ def test_label_service_uses_authoritative_variant_and_price(
     content = VariantLabelService(session).generate_58x40(variant.id)
 
     assert content.startswith(b"%PDF-")
+
+
+def test_label_keeps_internal_ean_when_manufacturer_barcode_exists(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    """The barcode blocker does not silently change existing product-label semantics."""
+    captured: list[VariantLabelData] = []
+
+    class CapturingRenderer:
+        def render(self, data: VariantLabelData, **_: object) -> bytes:
+            captured.append(data)
+            return b"%PDF-label"
+
+    variant.barcodes.append(
+        CatalogVariantBarcode(
+            variant_id=variant.id,
+            value="4601234567893",
+            source=BarcodeSource.MANUFACTURER,
+        )
+    )
+    session.commit()
+
+    VariantLabelService(session, renderer=CapturingRenderer()).generate_58x40(variant.id)  # type: ignore[arg-type]
+
+    assert captured[0].barcode == "2000000000015"
 
 
 def test_label_service_rejects_variant_before_ready_for_sale(

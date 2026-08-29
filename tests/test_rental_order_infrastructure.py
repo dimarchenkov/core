@@ -15,7 +15,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogProduct, CatalogVariant
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode
 from core.customers.customer import Customer
 from core.customers.models import CustomerRecord
 from core.customers.schemas import CustomerCreate
@@ -78,6 +78,7 @@ def session() -> Generator[Session]:
             CustomerRecord.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
             Image.__table__,
             ImageLink.__table__,
             Price.__table__,
@@ -601,7 +602,7 @@ def test_operational_catalog_links_product_asset_and_current_rental(
             price_type=PriceType.RETAIL,
             amount=Decimal("1500"),
             currency="RUB",
-            effective_from=NOW + timedelta(days=30),
+            effective_from=datetime.now(UTC) + timedelta(days=30),
         )
     )
     session.commit()

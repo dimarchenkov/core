@@ -12,6 +12,7 @@ from core.customers.routes import router as customer_router
 from core.identity.routes import router as identity_router
 from core.intake.routes import router as intake_router
 from core.integrations.aqsi.routes import router as aqsi_router
+from core.labels.routes import rental_asset_router as rental_asset_labels_router
 from core.labels.routes import router as labels_router
 from core.logging import configure_logging
 from core.media.routes import image_link_router, image_router
@@ -48,6 +49,7 @@ def create_app() -> FastAPI:
     app.include_router(intake_router)
     app.include_router(aqsi_router)
     app.include_router(labels_router)
+    app.include_router(rental_asset_labels_router)
     app.include_router(pricing_router)
     app.include_router(readiness_router)
     app.include_router(receipt_router)

@@ -2,6 +2,7 @@ const root = document.querySelector("#app");
 const toast = document.querySelector("#toast");
 let logicalParent = () => loadHome();
 let restoringHistory = false;
+let zxingLoader = null;
 
 function recordRoute(name, data = {}) {
   const route = { name, ...data };
@@ -61,6 +62,11 @@ const state = {
   imageUrls: new Map(),
   mode: null,
   result: null,
+  intakeBarcode: {
+    value: "",
+    result: null,
+    unknown: false,
+  },
   rental: {
     customers: [],
     customer: null,
@@ -405,9 +411,25 @@ function renderWorkspace() {
     } catch (error) { showToast(error.message, true); }
   });
   document.querySelector("#photo-action").addEventListener("click", () => {
+    state.intakeBarcode = { value: "", result: null, unknown: false };
     document.querySelector("#photo-input").click();
   });
   document.querySelector("#photo-input")?.addEventListener("change", uploadNewPhoto);
+  document.querySelector("#barcode-lookup-form")?.addEventListener("submit", lookupIntakeBarcode);
+  document.querySelectorAll("[data-barcode-camera]").forEach((button) => {
+    button.addEventListener("click", () => startBarcodeCamera(button.dataset.barcodeTarget));
+  });
+  document.querySelectorAll("[data-manufacturer-barcode]").forEach((input) => {
+    input.addEventListener("change", () => identifyDraftManufacturerBarcode(input));
+    input.addEventListener("paste", () => setTimeout(() => identifyDraftManufacturerBarcode(input), 0));
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      identifyDraftManufacturerBarcode(input);
+    });
+  });
+  document.querySelector("#barcode-create-new")?.addEventListener("click", () => document.querySelector("#photo-input").click());
+  document.querySelector("#barcode-use-existing")?.addEventListener("click", useLocatedBarcode);
   document.querySelector("#known-form")?.addEventListener("submit", addKnownItem);
   document.querySelectorAll("[data-item-form]").forEach((form) => form.addEventListener("submit", saveItem));
   document.querySelector("#supplier")?.addEventListener("change", saveSupplier);
@@ -416,15 +438,25 @@ function renderWorkspace() {
 }
 
 function renderActionPanel() {
-  const options = state.variants.map((variant) => {
+  const options = state.variants.flatMap((variant) => {
     const product = state.products.find((item) => item.id === variant.product_id);
-    return `<option value="${escapeHtml(variant.barcode)}">${escapeHtml(product?.title || "Товар")} · ${escapeHtml(variant.title)} · ${escapeHtml(variant.sku)}</option>`;
+    const barcodes = variant.barcodes?.length ? variant.barcodes : [{ value: variant.barcode }];
+    return barcodes.map((barcode) => `<option value="${escapeHtml(barcode.value)}">${escapeHtml(product?.title || "Товар")} · ${escapeHtml(variant.title)} · ${escapeHtml(variant.sku)}</option>`);
   }).join("");
+  const lookup = renderIntakeBarcodeResult();
   return `
     <input class="hidden" id="photo-input" type="file" accept="image/*" capture="environment">
     <section class="card ${state.mode === "known" ? "" : "hidden"}">
       <h2>Найти товар</h2>
-      <p class="muted small">Сканер введёт штрихкод сам. Можно также выбрать товар из подсказок.</p>
+      <p class="muted small">Введите код вручную, отсканируйте аппаратным сканером с Enter или используйте камеру.</p>
+      <form id="barcode-lookup-form" class="search-row barcode-lookup-row">
+        <input id="intake-barcode" name="barcode" value="${escapeHtml(state.intakeBarcode.value)}" autocomplete="off" placeholder="EAN, UPC или Code 128" required autofocus>
+        <button class="button" type="submit">Найти</button>
+        <button class="button secondary" data-barcode-camera data-barcode-target="intake-barcode" type="button">📷 Сканировать камерой</button>
+      </form>
+      <div id="barcode-lookup-result">${lookup}</div>
+      <hr>
+      <p class="muted small">Можно также найти существующую позицию по SKU или названию.</p>
       <form id="known-form">
         <div class="field"><label for="barcode">Штрихкод, SKU или название</label><input id="barcode" name="query" list="variant-options" autocomplete="off" required autofocus><datalist id="variant-options">${options}</datalist></div>
         <div class="field-row">
@@ -439,6 +471,221 @@ function renderActionPanel() {
         <button class="button full" type="submit">Добавить позицию</button>
       </form>
     </section>`;
+}
+
+function renderIntakeBarcodeResult() {
+  const lookup = state.intakeBarcode;
+  if (lookup.result) {
+    const variant = lookup.result;
+    const product = state.products.find((item) => item.id === variant.product_id);
+    return `<div class="card"><strong>${escapeHtml(product?.title || "Товар")} · ${escapeHtml(variant.title)}</strong><div class="muted small">${escapeHtml(variant.sku)} · ${escapeHtml(lookup.value)}</div><button class="button secondary full" id="barcode-use-existing" type="button">Использовать найденный товар</button></div>`;
+  }
+  if (lookup.unknown) {
+    return `<div class="card"><strong>Код ещё не зарегистрирован</strong><div class="muted small">${escapeHtml(lookup.value)} будет сохранён как штрихкод производителя.</div><button class="button secondary full" id="barcode-create-new" type="button">Создать новый товар</button></div>`;
+  }
+  return "";
+}
+
+async function lookupIntakeBarcode(eventOrValue) {
+  eventOrValue?.preventDefault?.();
+  const value = typeof eventOrValue === "string"
+    ? eventOrValue
+    : String(new FormData(eventOrValue.currentTarget).get("barcode") || "").trim();
+  if (!value) return;
+  try {
+    const result = await lookupVariantBarcode(value);
+    state.intakeBarcode = {
+      value,
+      result: result.variant,
+      unknown: !result.variant,
+    };
+  } catch (error) {
+    showToast(error.message, true);
+    return;
+  }
+  renderWorkspace();
+}
+
+async function lookupVariantBarcode(value) {
+  try {
+    return {
+      variant: await api(`/api/catalog/variants/lookup/by-barcode?barcode=${encodeURIComponent(value)}`),
+    };
+  } catch (error) {
+    if (error.message === "Variant not found.") return { variant: null };
+    throw error;
+  }
+}
+
+function useLocatedBarcode() {
+  const input = document.querySelector("#barcode");
+  input.value = state.intakeBarcode.value;
+  document.querySelector("#known-quantity").focus();
+}
+
+async function identifyDraftManufacturerBarcode(input) {
+  const value = input.value.trim();
+  const status = document.querySelector(`[data-barcode-status="${input.id}"]`);
+  if (!value) {
+    if (status) status.textContent = "";
+    return;
+  }
+  input.value = value;
+  if (status) status.textContent = "Проверяем штрихкод…";
+  try {
+    const result = await lookupVariantBarcode(value);
+    if (!status) return;
+    if (result.variant) {
+      const product = state.products.find((item) => item.id === result.variant.product_id);
+      status.textContent = `✓ Уже зарегистрирован: ${product?.title || "Товар"} · ${result.variant.title} · ${result.variant.sku}`;
+      status.className = "small danger-text";
+    } else {
+      status.textContent = "✓ Новый штрихкод — будет сохранён как код производителя";
+      status.className = "small available-text";
+    }
+  } catch (error) {
+    if (status) {
+      status.textContent = error.message;
+      status.className = "small danger-text";
+    }
+    showToast(error.message, true);
+  }
+}
+
+async function acceptScannedBarcode(inputId, value) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  input.value = String(value).trim();
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  if (inputId === "intake-barcode") await lookupIntakeBarcode(input.value);
+  else await identifyDraftManufacturerBarcode(input);
+}
+
+async function loadZxingBrowser() {
+  if (window.ZXingBrowser) return window.ZXingBrowser;
+  if (zxingLoader) return zxingLoader;
+  zxingLoader = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js";
+    script.integrity = "sha384-HRtzk9lZgkbSgvUyQrnfC/GxiXZgwaNyD7hC9wcXlsBpDhkS80ISl73juef2FRuf";
+    script.crossOrigin = "anonymous";
+    script.onload = () => resolve(window.ZXingBrowser);
+    script.onerror = () => reject(new Error("Не удалось загрузить модуль распознавания."));
+    document.head.append(script);
+  });
+  return zxingLoader;
+}
+
+async function createNativeBarcodeDetector() {
+  if (!("BarcodeDetector" in window)) return null;
+  const formats = ["ean_13", "ean_8", "upc_a", "code_128"];
+  try {
+    const supported = await BarcodeDetector.getSupportedFormats?.();
+    if (supported && !formats.every((format) => supported.includes(format))) return null;
+    return new BarcodeDetector({ formats });
+  } catch {
+    return null;
+  }
+}
+
+function cameraFailureMessage(error) {
+  if (!window.isSecureContext) return "Камера доступна только через HTTPS или localhost.";
+  if (["NotAllowedError", "SecurityError"].includes(error?.name)) {
+    return "Доступ к камере запрещён. Разрешите его в настройках браузера или введите код вручную.";
+  }
+  if (["NotFoundError", "NotReadableError", "OverconstrainedError"].includes(error?.name)) {
+    return "Камера недоступна. Введите штрихкод вручную.";
+  }
+  return "Сканирование камерой недоступно. Введите штрихкод вручную.";
+}
+
+async function startBarcodeCamera(inputId) {
+  if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
+    showToast(cameraFailureMessage({}), true);
+    document.getElementById(inputId)?.focus();
+    return;
+  }
+  const dialog = document.createElement("dialog");
+  dialog.className = "label-dialog barcode-scanner-dialog";
+  dialog.innerHTML = `<div><h2>Сканировать штрихкод</h2><div class="scanner-preview"><video autoplay muted playsinline></video><span class="scanner-guide" aria-hidden="true"></span></div><p class="muted small" data-scanner-status>Разрешите камеру и наведите её на EAN, UPC или Code 128.</p><button class="button secondary full" type="button">Закрыть</button></div>`;
+  document.body.append(dialog);
+  const video = dialog.querySelector("video");
+  const scannerStatus = dialog.querySelector("[data-scanner-status]");
+  let stream;
+  let controls;
+  let stopped = false;
+  let accepted = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    controls?.stop();
+    stream?.getTracks().forEach((track) => track.stop());
+    dialog.close();
+    dialog.remove();
+  };
+  dialog.querySelector("button").addEventListener("click", stop);
+  dialog.addEventListener("cancel", (event) => { event.preventDefault(); stop(); });
+  const accept = async (value) => {
+    if (accepted || stopped || !value) return;
+    accepted = true;
+    scannerStatus.textContent = `✓ Распознано: ${value}`;
+    scannerStatus.className = "small available-text";
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    stop();
+    await acceptScannedBarcode(inputId, value);
+    showToast("Штрихкод распознан и проверен");
+  };
+  dialog.showModal();
+  try {
+    const detector = await createNativeBarcodeDetector();
+    if (!detector) {
+      scannerStatus.textContent = "Запускаем совместимый сканер…";
+      const zxing = await loadZxingBrowser();
+      if (stopped) return;
+      const reader = new zxing.BrowserMultiFormatOneDReader();
+      reader.possibleFormats = [
+        zxing.BarcodeFormat.EAN_13,
+        zxing.BarcodeFormat.EAN_8,
+        zxing.BarcodeFormat.UPC_A,
+        zxing.BarcodeFormat.CODE_128,
+      ];
+      controls = await reader.decodeFromConstraints(
+        { video: { facingMode: { ideal: "environment" } }, audio: false },
+        video,
+        (result) => { if (result) accept(result.getText()); },
+      );
+      if (stopped) controls.stop();
+      return;
+    }
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false,
+    });
+    if (stopped) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    video.srcObject = stream;
+    await video.play();
+    const detect = async () => {
+      if (stopped) return;
+      try {
+        const codes = await detector.detect(video);
+        if (codes[0]?.rawValue) return accept(codes[0].rawValue);
+      } catch {
+        scannerStatus.textContent = "Не удалось распознать кадр. Попробуйте ещё раз или закройте сканер для ручного ввода.";
+      }
+      requestAnimationFrame(detect);
+    };
+    requestAnimationFrame(detect);
+  } catch (error) {
+    stop();
+    const message = error?.message === "Не удалось загрузить модуль распознавания."
+      ? `${error.message} Введите штрихкод вручную.`
+      : cameraFailureMessage(error);
+    showToast(message, true);
+    document.getElementById(inputId)?.focus();
+  }
 }
 
 function renderItem(item) {
@@ -479,10 +726,12 @@ function renderItem(item) {
 
 function renderNewItemFields(item) {
   const categories = state.categories.map((category) => `<option value="${category.id}" ${item.category_id === category.id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
+  const barcodeInputId = `manufacturer-barcode-${item.id}`;
   return `
     <div class="field"><label>Категория</label><select name="category_id" required><option value="">Выберите категорию</option>${categories}</select></div>
     <div class="field"><label>Название товара</label><input name="product_title" value="${escapeHtml(item.product_title || "")}" required></div>
     <div class="field"><label>Вариант — цвет, размер или исполнение</label><input name="variant_title" value="${escapeHtml(item.variant_title || "")}" required></div>
+    <div class="field"><label for="${barcodeInputId}">Штрихкод производителя <span class="muted">(необязательно)</span></label><input id="${barcodeInputId}" name="manufacturer_barcode" data-manufacturer-barcode value="${escapeHtml(item.manufacturer_barcode || "")}" autocomplete="off" inputmode="text"><button class="button secondary full" data-barcode-camera data-barcode-target="${barcodeInputId}" type="button">📷 Сканировать камерой</button><div class="small" data-barcode-status="${barcodeInputId}"></div></div>
     <div class="field"><label>Описание <span class="muted">(необязательно)</span></label><textarea name="product_description">${escapeHtml(item.product_description || "")}</textarea></div>`;
 }
 
@@ -502,10 +751,14 @@ async function uploadNewPhoto(event) {
   if (!file) return;
   const data = new FormData();
   data.append("file", file);
+  if (state.intakeBarcode.unknown && state.intakeBarcode.value) {
+    data.append("manufacturer_barcode", state.intakeBarcode.value);
+  }
   showToast("Сохраняем фото…");
   try {
     await saveAllItemForms();
     await api(`/api/intake/sessions/${state.session.id}/items/new`, { method: "POST", body: data });
+    state.intakeBarcode = { value: "", result: null, unknown: false };
     state.mode = null;
     await refreshSession();
     showToast("Фото сохранено. Теперь заполните товар.");
@@ -519,7 +772,8 @@ async function addKnownItem(event) {
   const normalized = query.toLocaleLowerCase("ru");
   const variant = state.variants.find((item) => {
     const product = state.products.find((value) => value.id === item.product_id);
-    return item.barcode === query || item.sku.toLocaleLowerCase("ru") === normalized || `${product?.title || ""} ${item.title}`.toLocaleLowerCase("ru") === normalized;
+    const matchesBarcode = (item.barcodes || [{ value: item.barcode }]).some((barcode) => barcode.value === query);
+    return matchesBarcode || item.sku.toLocaleLowerCase("ru") === normalized || `${product?.title || ""} ${item.title}`.toLocaleLowerCase("ru") === normalized;
   });
   const payload = {
     ...(variant ? { variant_id: variant.id } : { barcode: query }),
@@ -568,6 +822,7 @@ function buildItemPayload(form, item) {
       product_title: nullableText(data.get("product_title")),
       variant_title: nullableText(data.get("variant_title")),
       product_description: nullableText(data.get("product_description")),
+      manufacturer_barcode: nullableText(data.get("manufacturer_barcode")),
     });
   }
   return payload;
@@ -733,7 +988,7 @@ function renderOperationsProduct() {
   const variants = product.variants.length
     ? product.variants.map((variant) => `<article class="variant-commercial-card card">
         ${variant.primary_image_id ? `<img class="catalog-photo" data-image-id="${variant.primary_image_id}" alt="${escapeHtml(variant.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
-        <span class="variant-commercial-main"><strong>${escapeHtml(variant.title)}</strong><span class="muted small">${escapeHtml(variant.sku)}</span><span class="barcode-value">${escapeHtml(variant.barcode)}</span>
+        <span class="variant-commercial-main"><strong>${escapeHtml(variant.title)}</strong><span class="muted small">${escapeHtml(variant.sku)}</span>${renderVariantBarcodes(variant)}
           <span class="commercial-block"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span><button class="link-button" data-set-sale-price="${variant.id}">Изменить</button></span>
           <span class="commercial-block"><strong>Аренда</strong><span>Цена: ${variant.current_rental_price === null ? "не настроена" : formatMoney(variant.current_rental_price)}</span><span>Залог: ${variant.current_recommended_deposit === null ? "не указан" : formatMoney(variant.current_recommended_deposit)}</span><button class="link-button" data-set-rental-prices="${variant.id}">Изменить условия</button></span>
           ${renderAqsiState(variant)}
@@ -741,6 +996,7 @@ function renderOperationsProduct() {
         <span class="catalog-counts"><strong>На учёте ${formatQuantity(variant.physical_quantity)}</strong><span>Для продажи ${formatQuantity(variant.ordinary_quantity)}</span><span>Арендных экземпляров ${variant.rental_asset_count}</span><span class="available-text">Доступно сейчас ${variant.available_asset_count}</span><span>Выдано ${variant.rented_asset_count}</span></span>
         <span class="variant-actions">
           <button class="button secondary compact" data-edit-variant="${variant.id}">Редактировать</button>
+          <button class="button ghost compact" data-add-manufacturer-barcode="${variant.id}">Добавить штрихкод</button>
           ${Number(variant.ordinary_quantity) > 0 ? `<button class="button secondary compact" data-allocate-rental="${variant.id}">Выделить в аренду</button>` : ""}
           ${state.user?.is_admin ? `<button class="button ghost compact" data-adjust-inventory="${variant.id}">Корректировка остатка</button>` : ""}
           ${variant.current_retail_price !== null && variant.primary_image_id ? `<button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button><button class="button compact" data-print-label="${variant.id}">Печать</button>` : ""}
@@ -768,6 +1024,7 @@ function renderOperationsProduct() {
       <p class="muted small">Административная операция для дополнительной товарной позиции.</p>
       <form id="catalog-variant-create-form">
         <div class="field"><label>Название варианта</label><input name="title" required></div>
+        <div class="field"><label>Штрихкод производителя <span class="muted">(необязательно)</span></label><input name="manufacturer_barcode" autocomplete="off"></div>
         <div class="field"><label>Атрибуты JSON <span class="muted">(необязательно)</span></label><textarea name="attributes" placeholder='{"color":"blue"}'></textarea></div>
         <button class="button full" type="submit">Создать вариант</button>
       </form>
@@ -795,6 +1052,7 @@ function renderOperationsProduct() {
   document.querySelector("#catalog-variant-create-form").addEventListener("submit", createCatalogVariant);
   document.querySelector("#catalog-media-form").addEventListener("submit", uploadCatalogImage);
   document.querySelectorAll("[data-edit-variant]").forEach((button) => button.addEventListener("click", () => editCatalogVariant(button.dataset.editVariant)));
+  document.querySelectorAll("[data-add-manufacturer-barcode]").forEach((button) => button.addEventListener("click", () => addManufacturerBarcode(button.dataset.addManufacturerBarcode)));
   document.querySelectorAll("[data-set-sale-price]").forEach((button) => button.addEventListener("click", () => editCatalogSalePrice(button.dataset.setSalePrice)));
   document.querySelectorAll("[data-set-rental-prices]").forEach((button) => button.addEventListener("click", () => editCatalogRentalPrices(button.dataset.setRentalPrices)));
   document.querySelectorAll("[data-allocate-rental]").forEach((button) => button.addEventListener("click", () => allocateRental(button.dataset.allocateRental)));
@@ -815,13 +1073,15 @@ async function openVariantLabel(variantId, print) {
   openAuthenticatedFile(`/api/labels/variants/${variantId}/${profile}.pdf?dpi=203`, print);
 }
 
-function selectLabelProfile(previous, print) {
+function selectLabelProfile(previous, print, context = {}) {
   return new Promise((resolve) => {
     const dialog = document.createElement("dialog");
     dialog.className = "label-dialog";
     dialog.innerHTML = `
       <form method="dialog">
-        <h2>Размер этикетки</h2>
+        <h2>${escapeHtml(context.title || "Размер товарной этикетки")}</h2>
+        ${context.summary ? `<p><strong>${escapeHtml(context.summary)}</strong></p>` : ""}
+        ${context.detail ? `<p class="muted small">${escapeHtml(context.detail)}</p>` : ""}
         <p class="muted small">PDF откроется в точном физическом размере без полей браузера.</p>
         <label class="label-profile-option">
           <input type="radio" name="profile" value="40x30" ${previous === "40x30" ? "checked" : ""}>
@@ -879,7 +1139,35 @@ function renderAqsiState(variant) {
     title = "Ошибка синхронизации";
     detail = publication.last_error || "AQSI отклонил операцию";
   }
-  return `<span class="commercial-block aqsi-block"><strong>AQSI</strong><span class="${status === "failed" ? "danger-text" : status === "published" && !publication.is_outdated ? "available-text" : ""}">${escapeHtml(title)}</span>${detail ? `<span class="muted small">${escapeHtml(detail)}</span>` : ""}<span class="muted small">Цена: ${variant.current_retail_price === null ? "—" : formatMoney(variant.current_retail_price)} · Штрихкод: ${escapeHtml(variant.barcode)}</span></span>`;
+  return `<span class="commercial-block aqsi-block"><strong>AQSI</strong><span class="${status === "failed" ? "danger-text" : status === "published" && !publication.is_outdated ? "available-text" : ""}">${escapeHtml(title)}</span>${detail ? `<span class="muted small">${escapeHtml(detail)}</span>` : ""}<span class="muted small">Цена: ${variant.current_retail_price === null ? "—" : formatMoney(variant.current_retail_price)} · Штрихкод: ${escapeHtml(aqsiBarcode(variant))}</span></span>`;
+}
+
+function aqsiBarcode(variant) {
+  const manufacturer = (variant.barcodes || [])
+    .filter((barcode) => barcode.source === "manufacturer" && /^\d{4,22}$/.test(barcode.value))
+    .map((barcode) => barcode.value)
+    .sort();
+  return manufacturer[0] || variant.barcode;
+}
+
+function renderVariantBarcodes(variant) {
+  const values = variant.barcodes?.length
+    ? variant.barcodes
+    : [{ value: variant.barcode, source: "internal" }];
+  return `<span class="commercial-block"><strong>Штрихкоды</strong>${values.map((barcode) => `<span><span class="barcode-value">${escapeHtml(barcode.value)}</span> <span class="muted small">${barcode.source === "manufacturer" ? "Производитель" : "Core"}</span></span>`).join("")}</span>`;
+}
+
+async function addManufacturerBarcode(variantId) {
+  const value = window.prompt("Штрихкод производителя");
+  if (value === null || !value.trim()) return;
+  try {
+    await api(`/api/catalog/variants/${variantId}/barcodes`, {
+      method: "POST",
+      body: JSON.stringify({ value, source: "manufacturer" }),
+    });
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Штрихкод производителя зарегистрирован");
+  } catch (error) { showToast(error.message, true); }
 }
 
 function renderAqsiAction(variant) {
@@ -932,7 +1220,7 @@ async function createCatalogVariant(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   try {
-    await api("/api/catalog/variants", { method: "POST", body: JSON.stringify({ product_id: state.operations.product.id, title: data.get("title"), attributes: parseAttributes(data.get("attributes")), is_active: true }) });
+    await api("/api/catalog/variants", { method: "POST", body: JSON.stringify({ product_id: state.operations.product.id, title: data.get("title"), manufacturer_barcode: nullableText(data.get("manufacturer_barcode")), attributes: parseAttributes(data.get("attributes")), is_active: true }) });
     await openOperationsProduct(state.operations.product.id);
     showToast("Вариант создан");
   } catch (error) { showToast(error.message, true); }
@@ -1085,9 +1373,22 @@ function renderOperationsAssets(query, assetFilter, sort) {
   </div>`;
   bindTopbar();
   bindOperationsAssetRows();
-  document.querySelector("#operations-asset-search").addEventListener("submit", (event) => {
+  document.querySelector("#operations-asset-search").addEventListener("submit", async (event) => {
     event.preventDefault();
-    openOperationsAssets(String(new FormData(event.currentTarget).get("query") || "").trim(), assetFilter, sort);
+    const value = String(new FormData(event.currentTarget).get("query") || "").trim();
+    if (/^rent-\d+$/i.test(value)) {
+      try {
+        const asset = await api(`/api/rental/assets/by-number/${encodeURIComponent(value)}`);
+        await openOperationsAsset(asset.id);
+        return;
+      } catch (error) {
+        if (error.message !== "Rental asset not found.") {
+          showToast(error.message, true);
+          return;
+        }
+      }
+    }
+    openOperationsAssets(value, assetFilter, sort);
   });
   document.querySelectorAll("[data-asset-filter]").forEach((button) => {
     button.addEventListener("click", () => openOperationsAssets(query, button.dataset.assetFilter, sort));
@@ -1105,7 +1406,7 @@ function renderOperationsAssetRow(asset) {
       <span><strong>${escapeHtml(asset.product_title)} · ${escapeHtml(asset.variant_title)}</strong><br><span class="muted small">${escapeHtml(asset.asset_number)} · ${escapeHtml(asset.sku)}</span></span>
       <span class="chips compact-chips"><span class="chip ${asset.availability === "available" ? "good" : asset.is_lost ? "warn" : ""}">${asset.is_lost ? "LOST" : escapeHtml(availabilityLabel(asset.availability))}</span><span class="chip">${formatMoney(asset.economics.net_income)}</span>${asset.economics.flags.map(efficiencyChip).join("")}</span>
     </button>
-    ${asset.current_order_id ? `<button class="button ghost compact" data-asset-order="${asset.current_order_id}">${escapeHtml(asset.current_order_number)} →</button>` : ""}
+    <span class="inline-actions"><button class="button ghost compact" data-print-rental-label="${asset.id}">Печать RENT</button>${asset.current_order_id ? `<button class="button ghost compact" data-asset-order="${asset.current_order_id}">${escapeHtml(asset.current_order_number)} →</button>` : ""}</span>
   </article>`;
 }
 
@@ -1116,6 +1417,25 @@ function bindOperationsAssetRows() {
   document.querySelectorAll("[data-asset-order]").forEach((button) => {
     button.addEventListener("click", () => openRentalReturnOrder(button.dataset.assetOrder));
   });
+  document.querySelectorAll("[data-print-rental-label]").forEach((button) => {
+    button.addEventListener("click", () => openRentalAssetLabel(button.dataset.printRentalLabel));
+  });
+}
+
+async function openRentalAssetLabel(assetId, print = true) {
+  const asset = state.operations.asset?.id === assetId
+    ? state.operations.asset
+    : state.operations.assets.find((item) => item.id === assetId)
+      || state.operations.product?.rental_assets.find((item) => item.id === assetId);
+  const previous = localStorage.getItem("core.rental-label-profile") || "40x30";
+  const profile = await selectLabelProfile(previous, print, {
+    title: "Инвентарная этикетка RentalAsset",
+    summary: asset?.asset_number || "RENT",
+    detail: asset ? `${asset.product_title} · ${asset.variant_title} · ${availabilityLabel(asset.availability)}` : "Code 128",
+  });
+  if (profile === null) return;
+  localStorage.setItem("core.rental-label-profile", profile);
+  openAuthenticatedFile(`/api/labels/rental-assets/${assetId}/${profile}.pdf?dpi=203`, print);
 }
 
 async function openOperationsAsset(assetId) {
@@ -1156,6 +1476,7 @@ function renderOperationsAsset() {
     </section>
     <div class="actions horizontal-actions">
       <button class="button secondary" id="asset-open-product">← К товару</button>
+      <button class="button" id="asset-print-label">Печать инвентарной этикетки</button>
       ${asset.current_order_id ? `<button class="button" id="asset-open-order">Открыть аренду →</button>` : ""}
       ${asset.purpose === "rental" && asset.availability === "available" ? '<button class="button ghost" id="asset-withdraw-for-sale">Вывести из аренды</button>' : ""}
     </div>
@@ -1198,6 +1519,7 @@ function renderOperationsAsset() {
   bindTopbar();
   hydrateImages();
   document.querySelector("#asset-open-product").addEventListener("click", () => openOperationsProduct(asset.product_id));
+  document.querySelector("#asset-print-label").addEventListener("click", () => openRentalAssetLabel(asset.id));
   document.querySelector("#asset-open-order")?.addEventListener("click", () => openRentalReturnOrder(asset.current_order_id));
   document.querySelector("#asset-withdraw-for-sale")?.addEventListener("click", withdrawAssetForSale);
   document.querySelectorAll("[data-passport-order]").forEach((button) => button.addEventListener("click", () => openRentalReturnOrder(button.dataset.passportOrder)));

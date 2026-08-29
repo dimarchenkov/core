@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from core.catalog.models import CatalogProduct, CatalogVariant
@@ -43,6 +43,25 @@ class RentalAssetRepository:
             .with_for_update()
         )
         return self._session.scalar(statement)
+
+    def get_by_asset_number(
+        self,
+        asset_number: str,
+    ) -> tuple[RentalAssetRecord, str, str] | None:
+        """Resolve one exact case-insensitive scanner value with catalog titles."""
+        normalized = asset_number.strip().lower()
+        if not normalized:
+            return None
+        statement = (
+            select(RentalAssetRecord, CatalogProduct.title, CatalogVariant.title)
+            .join(CatalogVariant, CatalogVariant.id == RentalAssetRecord.variant_id)
+            .join(CatalogProduct, CatalogProduct.id == CatalogVariant.product_id)
+            .where(
+                func.lower(RentalAssetRecord.asset_number) == normalized,
+                RentalAssetRecord.deleted_at.is_(None),
+            )
+        )
+        return self._session.execute(statement).one_or_none()
 
     def list_for_intake_item(self, intake_item_id: UUIDv7) -> Sequence[RentalAssetRecord]:
         """Return assets created from one intake line in stable number order."""

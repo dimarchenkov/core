@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.inventory.enums import MovementType, SourceType
 from core.inventory.models import StockMovement
 from core.rental.allocation_schemas import InventoryAdjustmentReason
@@ -19,6 +19,7 @@ from core.rental.allocation_workflow import (
 )
 from core.rental.enums import AssetPurpose
 from core.rental.models import RentalAssetRecord
+from core.rental.repository import RentalAssetRepository
 from core.rental.service import RentalAssetService
 from core.shared.db import Base, generate_uuid_v7
 
@@ -37,6 +38,7 @@ def session() -> Generator[Session]:
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
             StockMovement.__table__,
             RentalAssetRecord.__table__,
         ],
@@ -86,6 +88,8 @@ def test_allocate_inventory_creates_numbered_assets_without_changing_physical_ba
     assert sum(movement.quantity_delta for movement in session.scalars(select(StockMovement))) == 5
     records = session.scalars(select(RentalAssetRecord))
     assert all(record.intake_item_id is None for record in records)
+    assert RentalAssetRepository(session).get_by_asset_number("rent-000001") is not None
+    assert RentalAssetRepository(session).get_by_asset_number("RENT-000002") is not None
 
 
 def test_allocate_rejects_more_than_ordinary_inventory(

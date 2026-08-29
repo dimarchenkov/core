@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from core.catalog.barcodes import BarcodeSource
 from core.shared.db import BaseModel, UUIDv7
+
+
+def _enum_values(enum_class: type[BarcodeSource]) -> list[str]:
+    return [member.value for member in enum_class]
 
 
 class Category(BaseModel):
@@ -77,6 +82,7 @@ class CatalogVariant(BaseModel):
     # TODO: Revisit whether this should become variant_name or display_name.
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     sku: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    # Backward-compatible primary INTERNAL EAN used by existing labels/readiness projections.
     barcode: Mapped[str] = mapped_column(String(22), nullable=False, unique=True, index=True)
     attributes: Mapped[dict[str, str | int | bool]] = mapped_column(
         JSON,
@@ -94,4 +100,34 @@ class CatalogVariant(BaseModel):
     product: Mapped[CatalogProduct] = relationship(
         "CatalogProduct",
         back_populates="variants",
+    )
+    barcodes: Mapped[list[CatalogVariantBarcode]] = relationship(
+        "CatalogVariantBarcode",
+        back_populates="variant",
+        cascade="all, delete-orphan",
+        order_by="CatalogVariantBarcode.source, CatalogVariantBarcode.value",
+        lazy="selectin",
+    )
+
+
+class CatalogVariantBarcode(BaseModel):
+    """Globally unique machine identifier assigned to one CatalogVariant."""
+
+    __tablename__ = "catalog_variant_barcodes"
+
+    variant_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("catalog_variants.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    value: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    source: Mapped[BarcodeSource] = mapped_column(
+        Enum(BarcodeSource, name="barcode_source", values_callable=_enum_values),
+        nullable=False,
+        index=True,
+    )
+
+    variant: Mapped[CatalogVariant] = relationship(
+        "CatalogVariant",
+        back_populates="barcodes",
     )

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from core.activity.service import ActivityEventService, elapsed_seconds
+from core.catalog.barcodes import normalize_barcode
 from core.catalog.repository import (
     CatalogProductRepository,
     CatalogVariantRepository,
@@ -166,11 +167,19 @@ class IntakeDraftWorkflow:
         *,
         actor_id: UUIDv7,
         product_id: UUIDv7 | None = None,
+        manufacturer_barcode: str | None = None,
     ) -> IntakeItemDraftRead:
         """Persist a new-item draft and its mandatory source photo together."""
         self._get_owned_draft(session_id, actor_id)
         if product_id is not None:
             self._ensure_product_is_active(product_id)
+        normalized_barcode = (
+            normalize_barcode(manufacturer_barcode)
+            if manufacturer_barcode is not None
+            else None
+        )
+        if normalized_barcode is not None and self._variants.get_by_barcode(normalized_barcode):
+            raise IntakeVariantError
 
         image: Image | None = None
         committed = False
@@ -189,6 +198,7 @@ class IntakeDraftWorkflow:
                 ),
                 product_id=product_id,
                 image_id=image.id,
+                manufacturer_barcode=normalized_barcode,
                 created_by_id=actor_id,
             )
             self._items.add(item)
@@ -337,13 +347,14 @@ class IntakeDraftWorkflow:
         if kind is IntakeItemKind.EXISTING_VARIANT:
             allowed = common
         elif kind is IntakeItemKind.NEW_VARIANT:
-            allowed = common | {"variant_title", "attributes"}
+            allowed = common | {"variant_title", "attributes", "manufacturer_barcode"}
         else:
             allowed = common | {
                 "category_id",
                 "product_title",
                 "product_description",
                 "variant_title",
+                "manufacturer_barcode",
                 "attributes",
             }
         if changes.keys() - allowed:

@@ -382,7 +382,8 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 **Status: 🚧 In Progress**
 
 Цель Epic — добавить полноценное управление карточками каталога после завершения основных
-бизнес-процессов. Текущий Sprint: **9.12 — AQSI Sync & Label Printing**.
+бизнес-процессов. Текущий Sprint: **9.11 — Catalog Management Foundation**, стадия
+**User Acceptance / Real-world readiness**. Sprint 9.12 не начат.
 
 Начиная с 9.11 используется формат `Epic.Sprint` с глобальным номером Sprint. Исторические
 названия Sprint 1–10G не переименовываются.
@@ -410,7 +411,8 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [x] Изменение фотографий, описаний и характеристик.
 - [x] Просмотр штрихкода, открытие и печать PDF-этикетки.
 - [x] Запуск существующей публикации актуальной карточки в AQSI.
-- [ ] Массовые операции, архивирование и управление штрихкодами.
+- [x] Несколько штрихкодов Variant: INTERNAL/MANUFACTURER, lookup и операторское добавление.
+- [ ] Массовые операции, архивирование и массовое управление штрихкодами.
 - [ ] QR label use cases:
   - открыть карточку Variant в Core;
   - открыть карточку RentalAsset;
@@ -418,9 +420,14 @@ Sprint 10G — Rental Economics & Business Insights ✅.
   - идентифицировать RENT;
   - поддержать обязательную маркировку, если она потребуется;
   - не смешивать внутренний QR Core с кодом обязательной маркировки.
-- [ ] RentalAsset / RENT labels.
+- [x] RentalAsset / RENT labels с Code 128 и точным scan routing.
 - [ ] Custom label designer и произвольные профили размеров.
 - [ ] Mass label printing.
+- [ ] QR for RentalAsset.
+- [ ] Scan-to-add RentalAsset into RentalOrder.
+- [ ] Scan-assisted return.
+- [ ] Rental transactions through AQSI как отдельный commercial/fiscal workflow.
+- [ ] Batch RENT label printing.
 
 ### UX debt
 
@@ -432,6 +439,15 @@ Sprint 10G — Rental Economics & Business Insights ✅.
   складского остатка после Intake; сейчас происхождение честно остаётся неизвестным.
 - [ ] Заменить prompt-based формы коммерческих условий, allocation и adjustment на полноценные
   операторские формы после проверки реальной эксплуатации.
+- [ ] Проверить camera barcode workflow на целевых телефонах и HTTPS-origin: Safari использует
+  `@zxing/browser` fallback, но ручной ввод и аппаратный scanner остаются обязательными.
+- [ ] При подготовке полностью автономного/offline deployment перевести фиксированный ZXing UMD
+  bundle с unpkg на локальную раздачу Core; текущий lazy CDN fallback имеет SRI и не влияет на
+  ручной/hardware ввод, но требует сети при первом camera scan в Safari.
+- [ ] Перед Sprint 9.12 отдельно зафиксировать контракт AQSI для нескольких штрихкодов: текущая
+  проверенная интеграция публикует один предпочтительный manufacturer code, затем internal EAN.
+- [ ] Определить нужны ли lifecycle-команды удаления/архивирования ошибочно привязанного
+  manufacturer barcode; текущий readiness-проход намеренно разрешает только append.
 
 ### Milestone
 

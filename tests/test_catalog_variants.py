@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.catalog.barcode import InternalBarcodeGenerator
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.barcodes import (
+    BarcodeFormat,
+    BarcodeSource,
+    BarcodeValidationError,
+    detect_barcode_format,
+    normalize_barcode,
+)
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.catalog.schemas import CatalogVariantCreate, CatalogVariantUpdate
 from core.catalog.service import CatalogVariantProductError, CatalogVariantService
 from core.catalog.sku import SkuGenerator
@@ -35,6 +42,7 @@ def session() -> Generator[Session]:
             Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
+            CatalogVariantBarcode.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -264,7 +272,7 @@ def test_variant_can_be_found_by_exact_barcode_and_archived_code_is_hidden(
 
     assert found.status_code == 200
     assert found.json()["id"] == created["id"]
-    assert client.get("/api/catalog/variants/by-barcode/9999999999999").status_code == 404
+    assert client.get("/api/catalog/variants/by-barcode/9999999999999").status_code == 422
 
     assert client.delete(f"/api/catalog/variants/{created['id']}").status_code == 204
     assert client.get(path).status_code == 404
@@ -274,3 +282,70 @@ def test_variant_update_schema_has_no_sku_field() -> None:
     """The update schema prevents any changes to stable generated SKUs."""
     assert "sku" not in CatalogVariantUpdate.model_fields
     assert "barcode" not in CatalogVariantUpdate.model_fields
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("4601234567893", BarcodeFormat.EAN_13),
+        ("12345670", BarcodeFormat.EAN_8),
+        ("036000291452", BarcodeFormat.UPC_A),
+        ("LOT-A/42", BarcodeFormat.CODE_128),
+    ],
+)
+def test_supported_manufacturer_barcode_formats(value: str, expected: BarcodeFormat) -> None:
+    """The shared validator accepts production scanner formats and detects them."""
+    assert normalize_barcode(f"  {value}\n") == value
+    assert detect_barcode_format(value) == expected
+
+
+def test_gtin_with_invalid_check_digit_is_rejected() -> None:
+    """A numeric GTIN-shaped value cannot silently fall back to Code 128."""
+    with pytest.raises(BarcodeValidationError, match="check digit"):
+        normalize_barcode("4601234567894")
+
+
+def test_variant_supports_multiple_globally_unique_barcodes(
+    client: TestClient,
+    active_product: CatalogProduct,
+) -> None:
+    """Internal and manufacturer codes resolve the same Variant and cannot be reassigned."""
+    first = client.post(
+        "/api/catalog/variants",
+        json={
+            "product_id": str(active_product.id),
+            "title": "Camera body",
+            "manufacturer_barcode": "4601234567893",
+        },
+    )
+    second = client.post(
+        "/api/catalog/variants",
+        json={"product_id": str(active_product.id), "title": "Camera kit"},
+    )
+
+    assert first.status_code == 201
+    assert {(row["value"], row["source"]) for row in first.json()["barcodes"]} == {
+        ("2000000000015", BarcodeSource.INTERNAL),
+        ("4601234567893", BarcodeSource.MANUFACTURER),
+    }
+    lookup = client.get(
+        "/api/catalog/variants/lookup/by-barcode",
+        params={"barcode": "4601234567893"},
+    )
+    assert lookup.status_code == 200
+    assert lookup.json()["id"] == first.json()["id"]
+    conflict = client.post(
+        f"/api/catalog/variants/{second.json()['id']}/barcodes",
+        json={"value": "4601234567893", "source": "manufacturer"},
+    )
+    assert conflict.status_code == 409
+    repeated = client.post(
+        f"/api/catalog/variants/{first.json()['id']}/barcodes",
+        json={"value": "4601234567893", "source": "manufacturer"},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == next(
+        row["id"]
+        for row in first.json()["barcodes"]
+        if row["source"] == BarcodeSource.MANUFACTURER
+    )

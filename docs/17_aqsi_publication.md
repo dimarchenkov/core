@@ -99,7 +99,7 @@ The first implementation sends only required AQSI fields plus the Core data need
   "paymentMethodType": 4,
   "sku": "<Variant SKU>",
   "price": 100.00,
-  "barcodes": ["<primary barcode>"]
+  "barcodes": ["<preferred sales-channel barcode>"]
 }
 ```
 
@@ -130,7 +130,7 @@ When an AQSI account has exactly one active shop, Core may select it automatical
 | `name` | Product title plus meaningful Variant title, limited to 128 characters |
 | `sku` | `CatalogVariant.sku`, limited to 64 characters |
 | `price` | current positive `retail` RUB Price |
-| `barcodes` | one-element array containing the primary Variant barcode |
+| `barcodes` | one-element array: first suitable manufacturer code, otherwise internal EAN |
 | `tax` | administrator-configured AQSI VAT code; `6` for the first installation |
 | `unit` | AQSI-module ordinary-goods constant `Штука` |
 | `unitCode` | AQSI-module ordinary-goods constant `0` |

@@ -219,6 +219,7 @@ async def add_new_intake_item(
     service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
     product_id: Annotated[UUIDv7 | None, Form()] = None,
+    manufacturer_barcode: Annotated[str | None, Form(max_length=128)] = None,
 ) -> IntakeItemDraftRead:
     """Start a new Product or Variant draft from its mandatory first photo."""
     content = await file.read(ImageService.max_source_size_bytes + 1)
@@ -229,6 +230,7 @@ async def add_new_intake_item(
             content,
             actor_id=current_user.id,
             product_id=product_id,
+            manufacturer_barcode=manufacturer_barcode,
         )
     except IntakeSessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Intake session not found.") from exc
@@ -236,6 +238,11 @@ async def add_new_intake_item(
         raise HTTPException(status_code=409, detail="Intake session is not a draft.") from exc
     except IntakeProductError as exc:
         raise HTTPException(status_code=400, detail="Intake Product is invalid.") from exc
+    except IntakeVariantError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Barcode already identifies an existing Variant.",
+        ) from exc
     except ImageFileTooLargeError as exc:
         raise HTTPException(status_code=413, detail="Image file exceeds the 15 MB limit.") from exc
     except UnsupportedImageError as exc:

@@ -246,6 +246,7 @@ class CompleteIntakeWorkflow:
                 product_id=product_id,
                 title=item.variant_title or "",
                 attributes=item.attributes,
+                manufacturer_barcode=item.manufacturer_barcode,
             ),
             actor_id=actor_id,
         )

@@ -3,8 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 
 from pydantic import BaseModel as PydanticBaseModel
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, computed_field, field_validator
 
+from core.catalog.barcodes import (
+    BarcodeFormat,
+    BarcodeSource,
+    detect_barcode_format,
+    normalize_barcode,
+)
 from core.shared.db import UUIDv7
 
 
@@ -92,6 +98,14 @@ class CatalogVariantCreate(CatalogVariantBase):
 
     model_config = ConfigDict(extra="forbid")
 
+    manufacturer_barcode: str | None = Field(default=None, max_length=128)
+
+    @field_validator("manufacturer_barcode")
+    @classmethod
+    def validate_manufacturer_barcode(cls, value: str | None) -> str | None:
+        """Normalize and validate an optional manufacturer code."""
+        return normalize_barcode(value) if value is not None else None
+
 
 class CatalogVariantUpdate(PydanticBaseModel):
     """Payload for updating mutable catalog variant fields."""
@@ -104,6 +118,21 @@ class CatalogVariantUpdate(PydanticBaseModel):
     is_active: bool | None = None
 
 
+class CatalogVariantBarcodeRead(PydanticBaseModel):
+    """One typed barcode registered to a Variant."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUIDv7
+    value: str
+    source: BarcodeSource
+    @computed_field
+    @property
+    def format(self) -> BarcodeFormat:
+        """Expose the detected symbology without persisting derived data."""
+        return detect_barcode_format(self.value)
+
+
 class CatalogVariantRead(CatalogVariantBase):
     """Catalog variant representation returned by the API."""
 
@@ -112,6 +141,22 @@ class CatalogVariantRead(CatalogVariantBase):
     id: UUIDv7
     sku: str
     barcode: str
+    barcodes: list[CatalogVariantBarcodeRead] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     version: int
+
+
+class CatalogVariantBarcodeCreate(PydanticBaseModel):
+    """Register an additional manufacturer barcode on an existing Variant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1, max_length=128)
+    source: BarcodeSource = BarcodeSource.MANUFACTURER
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: str) -> str:
+        """Normalize and validate the registered code."""
+        return normalize_barcode(value)

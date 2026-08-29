@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.models import (
+    CatalogProduct,
+    CatalogVariant,
+    CatalogVariantBarcode,
+    Category,
+)
 from core.shared.db import UUIDv7
 
 
@@ -127,15 +132,35 @@ class CatalogVariantRepository:
         return self._session.scalars(statement).all()
 
     def get_by_barcode(self, barcode: str) -> CatalogVariant | None:
-        """Return a variant by its globally unique Core barcode."""
-        statement = select(CatalogVariant).where(CatalogVariant.barcode == barcode)
+        """Return a variant by any globally unique registered barcode."""
+        statement = (
+            select(CatalogVariant)
+            .outerjoin(CatalogVariantBarcode)
+            .where(
+                or_(
+                    CatalogVariantBarcode.value == barcode,
+                    CatalogVariant.barcode == barcode,
+                )
+            )
+        )
         return self._session.scalar(statement)
 
     def get_active_by_barcode(self, barcode: str) -> CatalogVariant | None:
         """Return a non-archived variant by its exact barcode."""
-        statement = select(CatalogVariant).where(
-            CatalogVariant.barcode == barcode,
-            CatalogVariant.deleted_at.is_(None),
+        statement = (
+            select(CatalogVariant)
+            .outerjoin(CatalogVariantBarcode)
+            .where(
+                or_(
+                    CatalogVariantBarcode.value == barcode,
+                    CatalogVariant.barcode == barcode,
+                ),
+                or_(
+                    CatalogVariantBarcode.id.is_(None),
+                    CatalogVariantBarcode.deleted_at.is_(None),
+                ),
+                CatalogVariant.deleted_at.is_(None),
+            )
         )
         return self._session.scalar(statement)
 
@@ -149,3 +174,33 @@ class CatalogVariantRepository:
         if sku is None:
             return 1
         return int(sku.removeprefix("SKU-")) + 1
+
+
+class CatalogVariantBarcodeRepository:
+    """Persistence for globally unique Variant barcode assignments."""
+
+    def __init__(self, session: Session) -> None:
+        """Bind the repository to a transaction-scoped session."""
+        self._session = session
+
+    def add(self, barcode: CatalogVariantBarcode) -> CatalogVariantBarcode:
+        """Stage a barcode assignment."""
+        self._session.add(barcode)
+        return barcode
+
+    def get_by_value(self, value: str) -> CatalogVariantBarcode | None:
+        """Return the globally assigned barcode, if present."""
+        statement = select(CatalogVariantBarcode).where(CatalogVariantBarcode.value == value)
+        return self._session.scalar(statement)
+
+    def list_for_variant(self, variant_id: UUIDv7) -> Sequence[CatalogVariantBarcode]:
+        """List a Variant's barcodes in stable order."""
+        statement = (
+            select(CatalogVariantBarcode)
+            .where(
+                CatalogVariantBarcode.variant_id == variant_id,
+                CatalogVariantBarcode.deleted_at.is_(None),
+            )
+            .order_by(CatalogVariantBarcode.source, CatalogVariantBarcode.value)
+        )
+        return self._session.scalars(statement).all()

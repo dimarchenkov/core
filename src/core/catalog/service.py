@@ -5,9 +5,11 @@ from collections.abc import Sequence
 from sqlalchemy.orm import Session
 
 from core.catalog.barcode import InternalBarcodeGenerator
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.barcodes import BarcodeSource, normalize_barcode
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.catalog.repository import (
     CatalogProductRepository,
+    CatalogVariantBarcodeRepository,
     CatalogVariantRepository,
     CategoryRepository,
 )
@@ -56,7 +58,7 @@ class CatalogVariantProductError(Exception):
 
 
 class CatalogVariantBarcodeConflictError(Exception):
-    """Raised if an internally generated barcode unexpectedly already exists."""
+    """Raised when one barcode is already assigned to another Variant."""
 
 
 class CategoryService:
@@ -251,6 +253,7 @@ class CatalogVariantService:
         """Create a service using the given database session."""
         self._session = session
         self._repository = CatalogVariantRepository(session)
+        self._barcode_repository = CatalogVariantBarcodeRepository(session)
         self._product_repository = CatalogProductRepository(session)
 
     def list_variants(self) -> Sequence[CatalogVariant]:
@@ -266,7 +269,7 @@ class CatalogVariantService:
 
     def find_variant_by_barcode(self, barcode: str) -> CatalogVariant:
         """Resolve an exact scanner value to one non-archived catalog variant."""
-        variant = self._repository.get_active_by_barcode(barcode)
+        variant = self._repository.get_active_by_barcode(normalize_barcode(barcode))
         if variant is None:
             raise CatalogVariantNotFoundError
         return variant
@@ -284,15 +287,49 @@ class CatalogVariantService:
         barcode = InternalBarcodeGenerator.generate(identifier_number)
         if self._repository.get_by_barcode(barcode) is not None:
             raise CatalogVariantBarcodeConflictError
+        manufacturer_barcode = data.manufacturer_barcode
+        variant_data = data.model_dump(exclude={"manufacturer_barcode"})
         variant = CatalogVariant(
             sku=sku,
             barcode=barcode,
-            **data.model_dump(),
+            **variant_data,
             created_by_id=actor_id,
         )
         self._repository.add(variant)
         self._session.flush()
+        self._register_barcode(
+            variant,
+            barcode,
+            BarcodeSource.INTERNAL,
+            actor_id=actor_id,
+        )
+        if manufacturer_barcode is not None:
+            self._register_barcode(
+                variant,
+                manufacturer_barcode,
+                BarcodeSource.MANUFACTURER,
+                actor_id=actor_id,
+            )
+        self._session.flush()
         return variant
+
+    def register_manufacturer_barcode(
+        self,
+        variant_id: UUIDv7,
+        value: str,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> CatalogVariantBarcode:
+        """Idempotently register one validated manufacturer barcode."""
+        variant = self.get_variant(variant_id)
+        barcode = self._register_barcode(
+            variant,
+            value,
+            BarcodeSource.MANUFACTURER,
+            actor_id=actor_id,
+        )
+        self._session.flush()
+        return barcode
 
     def update_variant(
         self,
@@ -327,3 +364,27 @@ class CatalogVariantService:
         product = self._product_repository.get(product_id)
         if product is None or not product.is_active:
             raise CatalogVariantProductError
+
+    def _register_barcode(
+        self,
+        variant: CatalogVariant,
+        value: str,
+        source: BarcodeSource,
+        *,
+        actor_id: UUIDv7 | None,
+    ) -> CatalogVariantBarcode:
+        normalized = normalize_barcode(value)
+        existing = self._barcode_repository.get_by_value(normalized)
+        if existing is not None:
+            if existing.variant_id == variant.id and existing.source == source:
+                return existing
+            raise CatalogVariantBarcodeConflictError
+        barcode = CatalogVariantBarcode(
+            variant_id=variant.id,
+            value=normalized,
+            source=source,
+            created_by_id=actor_id,
+        )
+        self._barcode_repository.add(barcode)
+        variant.barcodes.append(barcode)
+        return barcode

@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
+from core.catalog.barcodes import BarcodeSource, is_aqsi_compatible
+from core.catalog.models import CatalogVariant
 from core.catalog.repository import CatalogVariantRepository
 from core.config import Settings
 from core.integrations.aqsi.schemas import AqsiDefaultCategoryPayload, AqsiGoodsPayload
@@ -67,7 +69,7 @@ class AqsiPayloadBuilder:
             tax=self._settings.aqsi_tax_code,
             sku=variant.sku,
             price=float(retail_price.amount),
-            barcodes=[variant.barcode],
+            barcodes=[self._aqsi_barcode(variant)],
         )
 
     def build_default_category(self) -> AqsiDefaultCategoryPayload:
@@ -77,6 +79,18 @@ class AqsiPayloadBuilder:
             name=self._settings.aqsi_default_group_name,
             defaultTax=self._settings.aqsi_tax_code,
         )
+
+    @staticmethod
+    def _aqsi_barcode(variant: CatalogVariant) -> str:
+        """Prefer a numeric manufacturer barcode accepted by AQSI, then Core's EAN."""
+        manufacturer = sorted(
+            barcode.value
+            for barcode in variant.barcodes
+            if barcode.source is BarcodeSource.MANUFACTURER
+            and barcode.deleted_at is None
+            and is_aqsi_compatible(barcode.value)
+        )
+        return manufacturer[0] if manufacturer else variant.barcode
 
     @staticmethod
     def canonical_hash(payload: AqsiGoodsPayload) -> str:

@@ -3,14 +3,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.barcodes import BarcodeSource, BarcodeValidationError
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.catalog.schemas import (
     CatalogProductCreate,
     CatalogProductRead,
     CatalogProductUpdate,
+    CatalogVariantBarcodeCreate,
+    CatalogVariantBarcodeRead,
     CatalogVariantCreate,
     CatalogVariantRead,
     CatalogVariantUpdate,
@@ -335,7 +339,13 @@ def create_variant(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Generated barcode already exists.",
+            detail="Barcode is already assigned to another Variant.",
+        ) from exc
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Barcode or SKU is already assigned.",
         ) from exc
     except Exception:
         session.rollback()
@@ -354,6 +364,62 @@ def find_variant_by_barcode(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Variant not found.",
+        ) from exc
+    except BarcodeValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@variant_router.get("/lookup/by-barcode", response_model=CatalogVariantRead)
+def lookup_variant_by_barcode(
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    barcode: Annotated[str, Query(min_length=1, max_length=128)],
+) -> CatalogVariant:
+    """Resolve any supported barcode, including Code 128 values unsafe in URL paths."""
+    try:
+        return service.find_variant_by_barcode(barcode)
+    except CatalogVariantNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Variant not found.") from exc
+    except BarcodeValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@variant_router.post(
+    "/{variant_id}/barcodes",
+    response_model=CatalogVariantBarcodeRead,
+)
+def register_variant_barcode(
+    variant_id: UUIDv7,
+    data: CatalogVariantBarcodeCreate,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogVariantBarcode:
+    """Register an additional manufacturer barcode without changing stable IDs."""
+    if data.source is not BarcodeSource.MANUFACTURER:
+        raise HTTPException(status_code=422, detail="Only manufacturer barcodes can be added.")
+    try:
+        barcode = service.register_manufacturer_barcode(
+            variant_id,
+            data.value,
+            actor_id=_actor_id(current_user),
+        )
+        session.commit()
+        session.refresh(barcode)
+        return barcode
+    except CatalogVariantNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Variant not found.") from exc
+    except CatalogVariantBarcodeConflictError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Barcode is already assigned to another Variant.",
+        ) from exc
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Barcode is already assigned to another Variant.",
         ) from exc
 
 
