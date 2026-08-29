@@ -22,6 +22,7 @@ htmlcov/
 # IDE
 .idea/
 .vscode/
+.gigaide/gigaide.properties
 
 # Storage
 storage/*
