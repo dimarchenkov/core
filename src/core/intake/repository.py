@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
 from core.intake.enums import IntakeSessionStatus
@@ -86,6 +86,21 @@ class IntakeItemDraftRepository:
         self._session.add(item)
         return item
 
+    def reserve_variant_number(self) -> int:
+        """Reserve the shared Catalog identity sequence before Intake completion."""
+        if self._session.bind is not None and self._session.bind.dialect.name == "postgresql":
+            return self._session.scalar(text("SELECT nextval('catalog_variant_sku_seq')"))
+        latest_catalog = self._session.scalar(
+            text("SELECT max(CAST(substr(sku, 5) AS INTEGER)) FROM catalog_variants")
+        )
+        latest_draft = self._session.scalar(
+            text(
+                "SELECT max(CAST(substr(reserved_sku, 5) AS INTEGER)) "
+                "FROM intake_item_drafts"
+            )
+        )
+        return max(latest_catalog or 0, latest_draft or 0) + 1
+
     def get(self, session_id: UUIDv7, item_id: UUIDv7) -> IntakeItemDraft | None:
         """Return one active item belonging to the requested IntakeSession."""
         statement = select(IntakeItemDraft).where(
@@ -94,3 +109,32 @@ class IntakeItemDraftRepository:
             IntakeItemDraft.deleted_at.is_(None),
         )
         return self._session.scalar(statement)
+
+    def has_active_dependents(self, session_id: UUIDv7, item_id: UUIDv7) -> bool:
+        """Return whether active Variant drafts depend on one draft Product item."""
+        statement = select(IntakeItemDraft.id).where(
+            IntakeItemDraft.session_id == session_id,
+            IntakeItemDraft.draft_product_item_id == item_id,
+            IntakeItemDraft.abandoned_at.is_(None),
+            IntakeItemDraft.deleted_at.is_(None),
+        ).limit(1)
+        return self._session.scalar(statement) is not None
+
+    def barcode_is_active_in_session(
+        self,
+        session_id: UUIDv7,
+        value: str,
+        *,
+        excluding_item_id: UUIDv7 | None = None,
+    ) -> bool:
+        """Prevent two active Variant drafts from claiming one manufacturer barcode."""
+        statement = select(IntakeItemDraft.id).where(
+            IntakeItemDraft.session_id == session_id,
+            IntakeItemDraft.manufacturer_barcode == value,
+            IntakeItemDraft.abandoned_at.is_(None),
+            IntakeItemDraft.deleted_at.is_(None),
+        )
+        if excluding_item_id is not None:
+            statement = statement.where(IntakeItemDraft.id != excluding_item_id)
+        statement = statement.limit(1)
+        return self._session.scalar(statement) is not None

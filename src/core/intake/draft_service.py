@@ -5,12 +5,14 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from core.activity.service import ActivityEventService, elapsed_seconds
+from core.catalog.barcode import InternalBarcodeGenerator
 from core.catalog.barcodes import normalize_barcode
 from core.catalog.repository import (
     CatalogProductRepository,
     CatalogVariantRepository,
     CategoryRepository,
 )
+from core.catalog.sku import SkuGenerator
 from core.intake.enums import (
     IntakeItemKind,
     IntakeSessionStatus,
@@ -66,6 +68,10 @@ class IntakeItemFieldError(Exception):
 
 class IntakeRentalQuantityError(Exception):
     """Raised when rental units exceed the total received quantity."""
+
+
+class IntakeItemHasDependentsError(Exception):
+    """Raised when a draft Product item still owns active Variant drafts."""
 
 
 class IntakeDraftWorkflow:
@@ -162,44 +168,62 @@ class IntakeDraftWorkflow:
     def add_new_item(
         self,
         session_id: UUIDv7,
-        original_filename: str,
-        content: bytes,
+        original_filename: str | None,
+        content: bytes | None,
         *,
         actor_id: UUIDv7,
         product_id: UUIDv7 | None = None,
+        draft_product_item_id: UUIDv7 | None = None,
         manufacturer_barcode: str | None = None,
     ) -> IntakeItemDraftRead:
-        """Persist a new-item draft and its mandatory source photo together."""
+        """Persist a Product/Variant draft and an optional Variant source photo."""
         self._get_owned_draft(session_id, actor_id)
+        if product_id is not None and draft_product_item_id is not None:
+            raise IntakeItemFieldError
         if product_id is not None:
             self._ensure_product_is_active(product_id)
+        if draft_product_item_id is not None:
+            root = self._get_draft_item(session_id, draft_product_item_id)
+            if root.kind is not IntakeItemKind.NEW_PRODUCT:
+                raise IntakeProductError
+        if product_id is None and draft_product_item_id is None and content is None:
+            raise IntakeItemFieldError
         normalized_barcode = (
             normalize_barcode(manufacturer_barcode)
             if manufacturer_barcode is not None
             else None
         )
-        if normalized_barcode is not None and self._variants.get_by_barcode(normalized_barcode):
-            raise IntakeVariantError
+        if normalized_barcode is not None:
+            if self._variants.get_by_barcode(normalized_barcode):
+                raise IntakeVariantError
+            if self._items.barcode_is_active_in_session(session_id, normalized_barcode):
+                raise IntakeVariantError
 
         image: Image | None = None
         committed = False
         try:
-            image = self._image_service.upload_source_image(
-                original_filename,
-                content,
-                actor_id=actor_id,
-            )
+            if content is not None:
+                image = self._image_service.upload_source_image(
+                    original_filename or "upload",
+                    content,
+                    actor_id=actor_id,
+                )
             item = IntakeItemDraft(
                 session_id=session_id,
                 kind=(
                     IntakeItemKind.NEW_VARIANT
-                    if product_id is not None
+                    if product_id is not None or draft_product_item_id is not None
                     else IntakeItemKind.NEW_PRODUCT
                 ),
                 product_id=product_id,
-                image_id=image.id,
+                draft_product_item_id=draft_product_item_id,
+                image_id=image.id if image is not None else None,
                 manufacturer_barcode=normalized_barcode,
+                reserved_sku=SkuGenerator.generate(self._items.reserve_variant_number()),
                 created_by_id=actor_id,
+            )
+            item.reserved_internal_barcode = InternalBarcodeGenerator.generate(
+                int(item.reserved_sku.removeprefix("SKU-"))
             )
             self._items.add(item)
             self._session.flush()
@@ -233,6 +257,19 @@ class IntakeDraftWorkflow:
         changes = data.model_dump(exclude_unset=True)
         self._ensure_fields_match_kind(item.kind, changes)
         self._ensure_rental_quantity_is_valid(item, changes)
+        if "manufacturer_barcode" in changes:
+            barcode = changes["manufacturer_barcode"]
+            normalized = normalize_barcode(barcode) if barcode is not None else None
+            if normalized != item.manufacturer_barcode and normalized is not None:
+                if self._variants.get_by_barcode(normalized):
+                    raise IntakeVariantError
+                if self._items.barcode_is_active_in_session(
+                    session_id,
+                    normalized,
+                    excluding_item_id=item.id,
+                ):
+                    raise IntakeVariantError
+            changes["manufacturer_barcode"] = normalized
         if "category_id" in changes and data.category_id is not None:
             self._ensure_category_is_active(data.category_id)
         if "purchase_price" in changes and data.purchase_price is not None:
@@ -246,6 +283,41 @@ class IntakeDraftWorkflow:
         self._session.refresh(item)
         return self._reads.build_item_read(item)
 
+    def replace_item_image(
+        self,
+        session_id: UUIDv7,
+        item_id: UUIDv7,
+        original_filename: str,
+        content: bytes,
+        *,
+        actor_id: UUIDv7,
+    ) -> IntakeItemDraftRead:
+        """Replace a draft photo through Media without changing Catalog or Inventory facts."""
+        self._get_owned_draft(session_id, actor_id)
+        item = self._get_draft_item(session_id, item_id)
+        previous_image_id = item.image_id
+        image: Image | None = None
+        committed = False
+        try:
+            image = self._image_service.upload_source_image(
+                original_filename,
+                content,
+                actor_id=actor_id,
+            )
+            item.image_id = image.id
+            item.updated_by_id = actor_id
+            if previous_image_id is not None:
+                self._image_service.delete_image(previous_image_id, actor_id=actor_id)
+            self._session.commit()
+            committed = True
+            self._session.refresh(item)
+            return self._reads.build_item_read(item)
+        except Exception:
+            self._session.rollback()
+            if image is not None and not committed:
+                self._image_service.discard_uncommitted_source(image)
+            raise
+
     def abandon_item(
         self,
         session_id: UUIDv7,
@@ -257,6 +329,8 @@ class IntakeDraftWorkflow:
         """Explicitly abandon one unfinished position without deleting evidence."""
         self._get_owned_draft(session_id, actor_id)
         item = self._get_draft_item(session_id, item_id)
+        if self._items.has_active_dependents(session_id, item_id):
+            raise IntakeItemHasDependentsError
         item.abandoned_at = datetime.now(UTC)
         item.abandonment_reason = reason
         item.updated_by_id = actor_id

@@ -69,6 +69,12 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Цена продажи" in script.text
     assert "Нужно указать цену" in script.text
     assert "/api/labels/variants/" in script.text
+    assert "/api/labels/variants/print-capability" in script.text
+    assert "groupIntakeItems" in script.text
+    assert "renderProductGroup" in script.text
+    assert 'pluralizeRu(productCount, "товар", "товара", "товаров")' in script.text
+    assert "Варианты ·" in script.text
+    assert "Удалить товар из приёмки" in script.text
     assert styles.status_code == 200
     assert "viewport-fit=cover" in page.text
 

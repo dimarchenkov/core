@@ -12,22 +12,28 @@ from sqlalchemy.pool import StaticPool
 
 from core.catalog.barcodes import BarcodeSource
 from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
+from core.config import Settings
 from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
+from core.labels.printing import (
+    LabelPrinterUnavailableError,
+    LabelPrintResult,
+    VariantLabelPrintService,
+)
 from core.labels.renderer import (
     LabelProfile,
     VariantLabel58x40Renderer,
     VariantLabelData,
     VariantLabelRenderer,
 )
-from core.labels.service import LabelVariantNotReadyError, VariantLabelService
+from core.labels.routes import get_variant_label_print_service
+from core.labels.service import VariantLabelService
 from core.main import create_app
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import Image, ImageLink
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
-from core.readiness.enums import ReadyForSaleRequirement
 from core.shared.db import Base
 
 
@@ -188,6 +194,46 @@ def test_label_profiles_have_exact_single_page_media_box(
     assert b"QR" not in content
 
 
+def test_compact_label_quantity_creates_exact_page_count() -> None:
+    content = VariantLabelRenderer().render(
+        VariantLabelData(
+            product_title="Нидл Nice Can",
+            variant_details="Dr Pepper",
+            price=Decimal("250"),
+            barcode="2000000000015",
+            sku="SKU-000011",
+        ),
+        profile=LabelProfile.COMPACT_40X30,
+        quantity=10,
+    )
+
+    assert content.count(b"/Type /Page\n") == 10
+
+
+def test_default_variant_name_is_not_rendered_as_artificial_label_text() -> None:
+    data = VariantLabelData(
+        product_title="Клей-карандаш",
+        variant_details="Default",
+        price=Decimal("0"),
+        barcode="2000000000015",
+        sku="SKU-000001",
+    )
+
+    assert VariantLabelRenderer._combined_title(data) == "Клей-карандаш"
+
+
+def test_meaningful_variant_name_is_preserved_on_compact_label() -> None:
+    data = VariantLabelData(
+        product_title="Нидл Nice Can",
+        variant_details="Dr Pepper",
+        price=Decimal("0"),
+        barcode="2000000000015",
+        sku="SKU-000011",
+    )
+
+    assert VariantLabelRenderer._combined_title(data) == "Нидл Nice Can - Dr Pepper"
+
+
 def test_label_rejects_invalid_ean_check_digit() -> None:
     """A visually plausible but invalid EAN-13 is never printed."""
     with pytest.raises(ValueError, match="check digit"):
@@ -239,18 +285,55 @@ def test_label_keeps_internal_ean_when_manufacturer_barcode_exists(
     assert captured[0].barcode == "2000000000015"
 
 
-def test_label_service_rejects_variant_before_ready_for_sale(
+def test_label_service_does_not_require_ready_for_sale(
     session: Session,
     variant: CatalogVariant,
 ) -> None:
-    """Photo First and pricing requirements block premature label generation."""
-    variant.is_active = False
+    """Label identity is printable without a price, photo, Inventory, or AQSI state."""
+    session.query(Price).delete()
+    session.query(ImageLink).delete()
+    session.query(Image).delete()
     session.commit()
 
-    with pytest.raises(LabelVariantNotReadyError) as error:
-        VariantLabelService(session).generate_58x40(variant.id)
+    content = VariantLabelService(session).generate(
+        variant.id,
+        LabelProfile.COMPACT_40X30,
+    )
 
-    assert ReadyForSaleRequirement.INACTIVE_VARIANT in error.value.missing_requirements
+    assert content.startswith(b"%PDF-")
+
+
+def test_direct_print_uses_configured_queue_and_quantity(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class CapturingPrinter:
+        def print_pdf(self, content: bytes, **kwargs: object) -> LabelPrintResult:
+            calls.append({"content": content, **kwargs})
+            return LabelPrintResult(str(kwargs["printer_name"]), int(kwargs["quantity"]), "job-7")
+
+    settings = Settings(jwt_secret="test-secret", label_printer_name="Xprinter_XP_365B")
+    result = VariantLabelPrintService(
+        VariantLabelService(session), settings, CapturingPrinter()
+    ).print(variant.id, quantity=11)
+
+    assert result.quantity == 11
+    assert calls[0]["printer_name"] == "Xprinter_XP_365B"
+    assert calls[0]["profile"] is LabelProfile.COMPACT_40X30
+    assert bytes(calls[0]["content"]).count(b"/Type /Page\n") == 1
+
+
+def test_direct_print_requires_configured_printer(
+    session: Session,
+    variant: CatalogVariant,
+) -> None:
+    settings = Settings(jwt_secret="test-secret", label_printer_name=None, _env_file=None)
+    with pytest.raises(LabelPrinterUnavailableError):
+        VariantLabelPrintService(VariantLabelService(session), settings).print(
+            variant.id, quantity=1
+        )
 
 
 def test_label_api_is_authenticated_and_returns_inline_pdf(
@@ -269,3 +352,63 @@ def test_label_api_is_authenticated_and_returns_inline_pdf(
     assert response.headers["content-type"] == "application/pdf"
     assert response.headers["content-disposition"].startswith("inline;")
     assert response.content.startswith(b"%PDF-")
+
+
+def test_label_api_returns_requested_number_of_exact_size_pages(
+    client: TestClient,
+    variant: CatalogVariant,
+    user: User,
+) -> None:
+    response = client.get(
+        f"/api/labels/variants/{variant.id}/40x30.pdf?quantity=3",
+        headers=authorization_header(client, user),
+    )
+
+    assert response.status_code == 200
+    assert response.content.count(b"/Type /Page\n") == 3
+
+
+def test_print_capability_reports_runtime_boundary(
+    client: TestClient,
+    user: User,
+) -> None:
+    """UI can select direct print or PDF fallback without provoking a known 503."""
+    response = client.get(
+        "/api/labels/variants/print-capability",
+        headers=authorization_header(client, user),
+    )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {
+        "available",
+        "command_available",
+        "printer_configured",
+        "printer_name",
+        "fallback",
+    }
+    assert response.json()["fallback"] == "pdf"
+
+
+def test_direct_print_api_returns_adapter_acknowledgement(
+    client: TestClient,
+    variant: CatalogVariant,
+    user: User,
+) -> None:
+    class SuccessfulPrintService:
+        def print(self, *_: object, **__: object) -> LabelPrintResult:
+            return LabelPrintResult("Xprinter_XP_365B", 7, "Xprinter_XP_365B-42")
+
+    app = client.app
+    app.dependency_overrides[get_variant_label_print_service] = lambda: SuccessfulPrintService()
+    response = client.post(
+        f"/api/labels/variants/{variant.id}/40x30/print?quantity=7",
+        headers=authorization_header(client, user),
+    )
+    app.dependency_overrides.pop(get_variant_label_print_service, None)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "printer_name": "Xprinter_XP_365B",
+        "quantity": 7,
+        "job_id": "Xprinter_XP_365B-42",
+    }

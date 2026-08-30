@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     aqsi_timeout_seconds: float = Field(default=10.0, gt=0)
     aqsi_verification_attempts: int = Field(default=5, ge=1, le=20)
     aqsi_verification_interval_seconds: float = Field(default=1.0, ge=0)
+    label_printer_name: str | None = Field(default=None, min_length=1)
+    label_printer_command: str = Field(default="lp", min_length=1)
 
 
 @lru_cache

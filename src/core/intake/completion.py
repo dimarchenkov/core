@@ -86,6 +86,7 @@ class CompleteIntakeWorkflow:
                 raise IntakeCompletionAbandonedError
 
             active_items = [item for item in intake_session.items if item.abandoned_at is None]
+            active_items.sort(key=lambda item: item.kind is not IntakeItemKind.NEW_PRODUCT)
             self._validate_completion(intake_session, active_items)
 
             receipt = self._receipt_service.open_receipt(
@@ -98,8 +99,13 @@ class CompleteIntakeWorkflow:
             )
 
             completed_items: list[IntakeCompletionItemRead] = []
+            materialized_products: dict[UUIDv7, UUIDv7] = {}
             for item in active_items:
-                product_id, variant_id = self._materialize_item(item, actor_id=actor_id)
+                product_id, variant_id = self._materialize_item(
+                    item,
+                    materialized_products=materialized_products,
+                    actor_id=actor_id,
+                )
                 self._receipt_item_service.add_item(
                     receipt.id,
                     ReceiptItemCreate(
@@ -111,6 +117,7 @@ class CompleteIntakeWorkflow:
                 )
                 item.product_id = product_id
                 item.variant_id = variant_id
+                item.draft_product_item_id = None
                 item.updated_by_id = actor_id
                 self._rental_service.create_from_intake(
                     variant_id=variant_id,
@@ -195,15 +202,34 @@ class CompleteIntakeWorkflow:
                 if variant is None or not variant.is_active:
                     raise IntakeCompletionIncompleteError
             else:
-                if item.image_id is None or self._images.get(item.image_id) is None:
-                    raise IntakeCompletionIncompleteError
-                if not (item.variant_title or "").strip():
+                if (
+                    item.kind is IntakeItemKind.NEW_VARIANT
+                    and not (item.variant_title or "").strip()
+                ):
                     raise IntakeCompletionIncompleteError
                 if item.kind is IntakeItemKind.NEW_VARIANT:
-                    product = self._products.get(item.product_id) if item.product_id else None
-                    if product is None or not product.is_active:
+                    if item.image_id is not None and self._images.get(item.image_id) is None:
+                        raise IntakeCompletionIncompleteError
+                    if item.product_id is not None:
+                        product = self._products.get(item.product_id)
+                        if product is None or not product.is_active:
+                            raise IntakeCompletionIncompleteError
+                    elif item.draft_product_item_id is not None:
+                        root = next(
+                            (
+                                candidate
+                                for candidate in items
+                                if candidate.id == item.draft_product_item_id
+                            ),
+                            None,
+                        )
+                        if root is None or root.kind is not IntakeItemKind.NEW_PRODUCT:
+                            raise IntakeCompletionIncompleteError
+                    else:
                         raise IntakeCompletionIncompleteError
                 else:
+                    if item.image_id is None or self._images.get(item.image_id) is None:
+                        raise IntakeCompletionIncompleteError
                     category = self._categories.get(item.category_id) if item.category_id else None
                     if (
                         category is None
@@ -216,6 +242,7 @@ class CompleteIntakeWorkflow:
         self,
         item: IntakeItemDraft,
         *,
+        materialized_products: dict[UUIDv7, UUIDv7],
         actor_id: UUIDv7,
     ) -> tuple[UUIDv7, UUIDv7]:
         """Resolve a known Variant or create one catalog position and primary image."""
@@ -236,29 +263,55 @@ class CompleteIntakeWorkflow:
                 actor_id=actor_id,
             )
             product_id = product.id
+            materialized_products[item.id] = product_id
+            self._image_link_service.create_link(
+                ImageLinkCreate(
+                    image_id=item.image_id,
+                    entity_type=ImageLinkEntityType.CATALOG_PRODUCT,
+                    entity_id=product.id,
+                    role=ImageLinkRole.PRIMARY,
+                ),
+                actor_id=actor_id,
+            )
         else:
-            if item.product_id is None:
-                raise IntakeCompletionIncompleteError
             product_id = item.product_id
+            if product_id is None and item.draft_product_item_id is not None:
+                product_id = materialized_products.get(item.draft_product_item_id)
+            if product_id is None:
+                raise IntakeCompletionIncompleteError
 
         variant = self._variant_service.create_variant(
             CatalogVariantCreate(
                 product_id=product_id,
-                title=item.variant_title or "",
+                title=item.variant_title or "Default",
                 attributes=item.attributes,
                 manufacturer_barcode=item.manufacturer_barcode,
             ),
             actor_id=actor_id,
+            reserved_sku=item.reserved_sku,
+            reserved_barcode=item.reserved_internal_barcode,
         )
-        self._image_link_service.create_link(
-            ImageLinkCreate(
-                image_id=item.image_id,
-                entity_type=ImageLinkEntityType.CATALOG_VARIANT,
-                entity_id=variant.id,
-                role=ImageLinkRole.PRIMARY,
-            ),
-            actor_id=actor_id,
-        )
+        image_id = item.image_id
+        if image_id is None and item.draft_product_item_id is not None:
+            root = next(
+                (
+                    candidate
+                    for candidate in item.session.items
+                    if candidate.id == item.draft_product_item_id
+                ),
+                None,
+            )
+            image_id = root.image_id if root is not None else None
+        if image_id is not None:
+            self._image_link_service.create_link(
+                ImageLinkCreate(
+                    image_id=image_id,
+                    entity_type=ImageLinkEntityType.CATALOG_VARIANT,
+                    entity_id=variant.id,
+                    role=ImageLinkRole.PRIMARY,
+                ),
+                actor_id=actor_id,
+            )
         return product_id, variant.id
 
     def _build_existing_result(self, intake_session: IntakeSession) -> IntakeCompletionRead:

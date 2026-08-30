@@ -12,33 +12,63 @@
 
 **Stage: User Acceptance / Real-world readiness**
 
+### UAT pass: Intake Product Autosave / Catalog Media
+
+- Product-поля черновика (category, name, description) сохраняются существующим PATCH:
+  select — сразу, text — debounce 600 мс; запросы сериализованы, ошибки видны inline с retry.
+- Product Save удалён только из Intake; Variant «Сохранить позицию» сохранён.
+- Catalog Media управляется рядом с Product/Variant; отдельные Camera/Gallery inputs,
+  primary/additional/unlink через существующие ImageLink API, явно обозначенный Product fallback.
+- Domain model, reserved SKU/barcode и Media storage не менялись.
+- Проверка реального iPhone/Safari Camera/Gallery и авторизованный UI smoke-test ещё нужны.
+  Автоматические JS-проверки: `node --test tests/web_uat.test.cjs` (без npm/build pipeline).
+- После autosave подсказки готовности Variant обновляются из ответа backend без
+  перерисовки формы; добавлен regression test для устаревших подсказок категории/названия.
+- Результаты прохода: полный pytest — 336 passed; JS — 7 passed; Ruff, JS syntax,
+  `git diff --check` успешны; Alembic head — `0029_intake_label_identity`;
+  Docker Compose работает, `/health` возвращает `{"status":"ok"}`.
+- Browser smoke: `/app` открывается, но проверка карточек остановлена на авторизации.
+
 Начиная с этого Sprint номер записывается как `Epic.Sprint`, при этом номер Sprint глобальный и
 не сбрасывается между Epic. Исторические названия Sprint 1–10G сохраняются.
 
 ## Goal
 
-Устранить последние эксплуатационные blockers Sprint 9.11 перед реальной приёмкой товара. В
-текущем проходе Variant получает несколько штрихкодов, а Intake становится barcode-first без
-изменения границ Catalog, Inventory, Rental и AQSI.
+По результатам реальной User Acceptance устранить концептуальный gap **Intake Workspace /
+Ready-for-Sale Workflow**. Intake должен стать полным рабочим местом от создания или выбора
+Product до маркировки, проведения и запуска публикации в AQSI без обязательного перехода в
+Catalog. Sprint 9.11 остаётся открытым; Sprint 9.12 не начат.
 
 ## Scope
 
-- несколько глобально уникальных штрихкодов Variant с источниками `INTERNAL` и `MANUFACTURER`;
-- миграция существующих внутренних EAN без изменения их значений;
-- единый barcode lookup для EAN-13, EAN-8, UPC-A и Code 128;
-- Intake: ручной ввод, аппаратный сканер с Enter и камера используют один lookup;
-- неизвестный код переносится в новый Product/Variant как manufacturer barcode;
-- Catalog показывает и позволяет добавить manufacturer barcode;
-- AQSI предпочитает подходящий manufacturer barcode и откатывается к внутреннему EAN;
-- товарные этикетки сохраняют прежний внутренний EAN, RENT остаётся отдельной идентичностью.
+- одна позиция Intake включает Product с одним или несколькими Variant;
+- Product содержит только общие данные и фото, а SKU, barcode, variant photo и коммерческие
+  условия принадлежат Variant; quantity относится к Variant в Intake/Inventory;
+- default Variant существует даже без видимых вариантов и может быть скрыт UI;
+- draft Intake позволяет добавлять, удалять и редактировать Variant;
+- label доступна сохранённому Variant со штрихкодом до Complete Intake и независимо от экрана
+  создания;
+- Complete Intake атомарно фиксирует Inventory и исторические закупочные факты;
+- после Complete Intake доступна публикация всех нужных Variant в AQSI с per-variant status/retry;
+- Catalog остаётся управлением существующим каталогом, а не обязательным продолжением Intake;
+- barcode однозначно идентифицирует Variant; общий manufacturer barcode нескольких Variant не
+  поддерживается;
+- camera scanning требует HTTPS deployment; ручной ввод и аппаратный scanner остаются fallback.
+- товарная этикетка 40 × 30 мм отделена от Ready-for-Sale; direct print использует настраиваемый
+  CUPS adapter при host-mode запуске, а Docker сохраняет PDF/system-print fallback.
 
 ## Definition of Done
 
-- существующие Variant сохраняют прежний internal EAN и получают запись `INTERNAL`;
-- один Variant принимает несколько кодов, но один код не может принадлежать двум Variant;
-- Intake находит существующий Variant по любому коду и не требует повторного ввода неизвестного;
-- камера имеет понятный fallback на ручной ввод при отсутствии API, разрешения или распознавания;
-- AQSI получает manufacturer barcode только когда он соответствует текущему контракту;
-- legacy labels и RENT identity не меняют семантику;
+- оператор завершает обычную приёмку до состояния ready-for-sale без перехода в Catalog;
+- одна Intake position корректно работает с одним и несколькими Variant;
+- Product не получает quantity или цены; каждый товар имеет как минимум один Variant;
+- варианты draft Intake можно добавлять, редактировать и удалять;
+- label сохранённого Variant со штрихкодом доступна до проведения и из Catalog;
+- проведение атомарно создаёт ожидаемые Inventory movements и purchase facts без дублей;
+- AQSI запускается для Intake после проведения, показывает результат каждого Variant и позволяет
+  повторить ошибки;
+- один barcode не принадлежит нескольким Variant, ambiguous lookup отсутствует;
+- camera scan проверен по HTTPS на целевых телефонах, fallback понятен;
+- существующие barcode, legacy labels и RENT identity не меняют семантику;
 - Ruff, тесты, миграционная цепочка, Docker smoke test и `/health` проходят;
-- ручной UI smoke-test и ограничения физического сканирования честно зафиксированы в отчёте.
+- результаты ручного real-world smoke-test честно зафиксированы.

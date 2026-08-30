@@ -3,7 +3,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from core.catalog.service import CatalogProductCategoryError, CatalogVariantProductError
@@ -21,6 +31,7 @@ from core.intake.draft_service import (
     IntakeCategoryError,
     IntakeDraftWorkflow,
     IntakeItemFieldError,
+    IntakeItemHasDependentsError,
     IntakeItemNotDraftError,
     IntakeItemNotFoundError,
     IntakeProductError,
@@ -30,6 +41,7 @@ from core.intake.draft_service import (
     IntakeVariantError,
 )
 from core.intake.enums import IntakeSessionStatus
+from core.intake.labels import IntakeDraftLabelNotFoundError, IntakeDraftLabelService
 from core.intake.read_service import IntakeDraftReadService, IntakeSessionNotFoundError
 from core.intake.schemas import (
     ExistingIntakeItemCreate,
@@ -43,6 +55,12 @@ from core.intake.schemas import (
     IntakeSessionUpdate,
 )
 from core.intake.service import IntakeService
+from core.labels.printing import (
+    CupsCommandLabelPrinter,
+    LabelPrinterUnavailableError,
+    LabelPrintFailedError,
+)
+from core.labels.renderer import LabelProfile
 from core.media.inspection import UnsupportedImageError
 from core.media.service import (
     ImageFileTooLargeError,
@@ -92,6 +110,13 @@ def get_complete_intake_workflow(
 ) -> CompleteIntakeWorkflow:
     """Provide the workflow that atomically completes an Intake session."""
     return CompleteIntakeWorkflow(session)
+
+
+def get_intake_draft_label_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> IntakeDraftLabelService:
+    """Provide pre-completion label rendering for saved Intake variants."""
+    return IntakeDraftLabelService(session)
 
 
 @router.post(
@@ -215,21 +240,23 @@ def add_existing_intake_item(
 )
 async def add_new_intake_item(
     session_id: UUIDv7,
-    file: Annotated[UploadFile, File(...)],
     service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
+    file: Annotated[UploadFile | None, File()] = None,
     product_id: Annotated[UUIDv7 | None, Form()] = None,
+    draft_product_item_id: Annotated[UUIDv7 | None, Form()] = None,
     manufacturer_barcode: Annotated[str | None, Form(max_length=128)] = None,
 ) -> IntakeItemDraftRead:
-    """Start a new Product or Variant draft from its mandatory first photo."""
-    content = await file.read(ImageService.max_source_size_bytes + 1)
+    """Start a Product draft or add a Variant with an optional source photo."""
+    content = await file.read(ImageService.max_source_size_bytes + 1) if file else None
     try:
         return service.add_new_item(
             session_id,
-            file.filename or "upload",
+            file.filename if file else None,
             content,
             actor_id=current_user.id,
             product_id=product_id,
+            draft_product_item_id=draft_product_item_id,
             manufacturer_barcode=manufacturer_barcode,
         )
     except IntakeSessionNotFoundError as exc:
@@ -242,6 +269,11 @@ async def add_new_intake_item(
         raise HTTPException(
             status_code=409,
             detail="Barcode already identifies an existing Variant.",
+        ) from exc
+    except IntakeItemFieldError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="A new Product needs a photo; a Variant needs exactly one Product reference.",
         ) from exc
     except ImageFileTooLargeError as exc:
         raise HTTPException(status_code=413, detail="Image file exceeds the 15 MB limit.") from exc
@@ -267,6 +299,11 @@ def update_intake_item(
         raise HTTPException(status_code=404, detail="Intake item not found.") from exc
     except (IntakeSessionNotDraftError, IntakeItemNotDraftError) as exc:
         raise HTTPException(status_code=409, detail="Intake item is not mutable.") from exc
+    except IntakeItemHasDependentsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Remove this draft Product's additional Variants first.",
+        ) from exc
     except IntakeCategoryError as exc:
         raise HTTPException(status_code=400, detail="Intake Category is invalid.") from exc
     except IntakeItemFieldError as exc:
@@ -276,6 +313,42 @@ def update_intake_item(
             status_code=400,
             detail="Rental quantity cannot exceed received quantity.",
         ) from exc
+    except IntakeVariantError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Barcode already identifies a Variant.",
+        ) from exc
+
+
+@router.put(
+    "/sessions/{session_id}/items/{item_id}/image",
+    response_model=IntakeItemDraftRead,
+)
+async def replace_intake_item_image(
+    session_id: UUIDv7,
+    item_id: UUIDv7,
+    service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    file: Annotated[UploadFile, File(...)],
+) -> IntakeItemDraftRead:
+    """Replace a Product or Variant draft photo before completion."""
+    content = await file.read(ImageService.max_source_size_bytes + 1)
+    try:
+        return service.replace_item_image(
+            session_id,
+            item_id,
+            file.filename or "upload",
+            content,
+            actor_id=current_user.id,
+        )
+    except (IntakeSessionNotFoundError, IntakeItemNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail="Intake item not found.") from exc
+    except (IntakeSessionNotDraftError, IntakeItemNotDraftError) as exc:
+        raise HTTPException(status_code=409, detail="Intake item is not mutable.") from exc
+    except ImageFileTooLargeError as exc:
+        raise HTTPException(status_code=413, detail="Image file exceeds the 15 MB limit.") from exc
+    except UnsupportedImageError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
 
 
 @router.post(
@@ -301,6 +374,11 @@ def abandon_intake_item(
         raise HTTPException(status_code=404, detail="Intake item not found.") from exc
     except (IntakeSessionNotDraftError, IntakeItemNotDraftError) as exc:
         raise HTTPException(status_code=409, detail="Intake item is not mutable.") from exc
+    except IntakeItemHasDependentsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Remove this draft Product's additional Variants first.",
+        ) from exc
 
 
 @router.post("/sessions/{session_id}/abandon", response_model=IntakeSessionRead)
@@ -338,3 +416,76 @@ def complete_intake_session(
         raise HTTPException(status_code=409, detail="Intake session was abandoned.") from exc
     except IntakeCompletionIncompleteError as exc:
         raise HTTPException(status_code=409, detail="Intake session is incomplete.") from exc
+
+
+@router.get(
+    "/sessions/{session_id}/items/{item_id}/labels/{profile}.pdf",
+    response_class=Response,
+)
+def generate_intake_draft_label(
+    session_id: UUIDv7,
+    item_id: UUIDv7,
+    profile: LabelProfile,
+    service: Annotated[IntakeDraftLabelService, Depends(get_intake_draft_label_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    dpi: int = 203,
+    quantity: Annotated[int, Query(ge=1, le=500)] = 1,
+) -> Response:
+    """Return exact-size labels for a saved Variant before Intake completion."""
+    try:
+        content = service.generate(
+            session_id,
+            item_id,
+            actor_id=current_user.id,
+            profile=profile,
+            dpi=dpi,
+            quantity=quantity,
+        )
+    except IntakeDraftLabelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Intake Variant label is unavailable.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return Response(content=content, media_type="application/pdf")
+
+
+@router.post("/sessions/{session_id}/items/{item_id}/labels/{profile}/print")
+def print_intake_draft_label(
+    session_id: UUIDv7,
+    item_id: UUIDv7,
+    profile: LabelProfile,
+    service: Annotated[IntakeDraftLabelService, Depends(get_intake_draft_label_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    quantity: Annotated[int, Query(ge=1, le=500)] = 1,
+) -> dict[str, object]:
+    """Send a pre-completion Variant label to the configured CUPS adapter."""
+    if settings.label_printer_name is None:
+        raise HTTPException(status_code=503, detail="Default label printer is not configured.")
+    try:
+        content = service.generate(
+            session_id,
+            item_id,
+            actor_id=current_user.id,
+            profile=profile,
+            quantity=1,
+        )
+        result = CupsCommandLabelPrinter(settings.label_printer_command).print_pdf(
+            content,
+            printer_name=settings.label_printer_name,
+            profile=profile,
+            quantity=quantity,
+            job_name=f"Core Intake {item_id} {profile.value}",
+        )
+    except IntakeDraftLabelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Intake Variant label is unavailable.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LabelPrinterUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LabelPrintFailedError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "printer_name": result.printer_name,
+        "quantity": result.quantity,
+        "job_id": result.job_id,
+    }

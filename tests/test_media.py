@@ -413,6 +413,50 @@ def test_image_link_service_enforces_one_primary_link(
     assert ImageService(session).get_image(first_image.id).id == first_image.id
 
 
+def test_variant_media_ownership_and_unlink_are_isolated(
+    session: Session,
+    product: CatalogProduct,
+) -> None:
+    """One asset may be linked without copying; Variant A cannot change B or Product."""
+    variants = [
+        CatalogVariant(
+            product_id=product.id, title=title, sku=f"SKU-{index}",
+            barcode=f"20000000000{index}", attributes={},
+        )
+        for index, title in enumerate(["A", "B"], 1)
+    ]
+    session.add_all(variants)
+    session.flush()
+    images = ImageService(session)
+    image = images.create_image(ImageCreate(**image_payload()))
+    links = ImageLinkService(session)
+    owners = [
+        (ImageLinkEntityType.CATALOG_PRODUCT, product.id),
+        *[(ImageLinkEntityType.CATALOG_VARIANT, variant.id) for variant in variants],
+    ]
+    created = [
+        links.create_link(ImageLinkCreate(
+            image_id=image.id, entity_type=entity_type, entity_id=entity_id,
+            role=ImageLinkRole.PRIMARY,
+        ))
+        for entity_type, entity_id in owners
+    ]
+    second_payload = image_payload()
+    second_payload["source_key"] = "images/source/variant-a.jpg"
+    second = images.create_image(ImageCreate(**second_payload))
+    additional = links.create_link(ImageLinkCreate(
+        image_id=second.id, entity_type=ImageLinkEntityType.CATALOG_VARIANT,
+        entity_id=variants[0].id, role=ImageLinkRole.GALLERY,
+    ))
+    links.set_primary(additional.id)
+    assert created[1].role is ImageLinkRole.GALLERY
+    assert created[0].role is ImageLinkRole.PRIMARY
+    assert created[2].role is ImageLinkRole.PRIMARY
+    links.delete_link(additional.id)
+    assert images.get_image(second.id).id == second.id
+    assert links.get_link(created[2].id).image_id == image.id
+
+
 def test_set_primary_demotes_previous_link_atomically(
     session: Session,
     product: CatalogProduct,

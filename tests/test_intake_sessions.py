@@ -164,6 +164,33 @@ def _create_session(client: TestClient) -> dict[str, object]:
     return response.json()
 
 
+def test_product_autosave_partial_patches_survive_reload(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+) -> None:
+    """Independent Product autosaves persist without changing Variant draft data."""
+    test_client, _, _, _ = client
+    intake = _create_session(test_client)
+    base = f"/api/intake/sessions/{intake['id']}"
+    created = test_client.post(
+        f"{base}/items/new", files={"file": ("photo.png", _png_bytes(), "image/png")}
+    ).json()
+    endpoint = f"{base}/items/{created['id']}"
+    values = {
+        "category_id": str(catalog[0].id),
+        "product_title": "Autosaved product",
+        "product_description": "Autosaved description",
+    }
+    for key, value in values.items():
+        assert test_client.patch(endpoint, json={key: value}).status_code == 200
+    resumed = test_client.get(base).json()["items"][0]
+    for key, value in values.items():
+        assert resumed[key] == value
+    assert resumed["reserved_sku"] == created["reserved_sku"]
+    assert resumed["reserved_internal_barcode"] == created["reserved_internal_barcode"]
+    assert resumed["quantity"] == created["quantity"]
+
+
 def test_session_starts_before_supplier_and_is_resumable(
     client: tuple[TestClient, User, User, Path],
     session: Session,
@@ -268,7 +295,6 @@ def test_new_product_must_start_with_photo_and_can_be_completed_later(
     assert set(uploaded["missing_requirements"]) == {
         "missing_category",
         "missing_product_title",
-        "missing_variant_title",
         "missing_quantity",
         "missing_purchase_price",
     }
@@ -719,6 +745,171 @@ def test_complete_new_product_creates_primary_image_catalog_and_stock(
     )
     assert movement is not None
     assert movement.quantity_delta == 4
+
+
+def test_complete_new_product_with_multiple_variants_uses_one_product_and_separate_stock(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """One draft Product can own several Variant facts without duplicating the Product."""
+    test_client, _, _, _ = client
+    category, _, _ = catalog
+    intake_session = _create_session(test_client)
+    root = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/new",
+        files={"file": ("product.png", _png_bytes(), "image/png")},
+    ).json()
+    child = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/new",
+        data={"draft_product_item_id": root["id"]},
+    )
+    assert child.status_code == 201
+    assert child.json()["image_id"] is None
+    assert child.json()["draft_product_item_id"] == root["id"]
+    assert root["reserved_sku"].startswith("SKU-")
+    assert len(root["reserved_internal_barcode"]) == 13
+    assert child.json()["reserved_internal_barcode"] != root["reserved_internal_barcode"]
+    for item, title, quantity, price in (
+        (root, "Pepsi", 8, "299"),
+        (child.json(), "Fanta", 11, "319"),
+    ):
+        payload = {
+            "variant_title": title,
+            "quantity": quantity,
+            "purchase_price": "140",
+            "retail_price": price,
+        }
+        if item["id"] == root["id"]:
+            payload.update(
+                category_id=str(category.id),
+                product_title="Needle Can",
+                product_description="Canned drinks",
+            )
+        response = test_client.patch(
+            f"/api/intake/sessions/{intake_session['id']}/items/{item['id']}",
+            json=payload,
+        )
+        assert response.status_code == 200
+    test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+
+    completed = test_client.post(f"/api/intake/sessions/{intake_session['id']}/complete")
+
+    assert completed.status_code == 200
+    result = completed.json()
+    assert len(result["items"]) == 2
+    assert len({item["product_id"] for item in result["items"]}) == 1
+    variant_ids = [UUID(item["variant_id"]) for item in result["items"]]
+    variants = session.scalars(
+        select(CatalogVariant).where(CatalogVariant.id.in_(variant_ids))
+    ).all()
+    assert {variant.title for variant in variants} == {"Pepsi", "Fanta"}
+    assert {variant.barcode for variant in variants} == {
+        root["reserved_internal_barcode"],
+        child.json()["reserved_internal_barcode"],
+    }
+    movements = session.scalars(
+        select(StockMovement).where(StockMovement.variant_id.in_(variant_ids))
+    ).all()
+    assert sorted(movement.quantity_delta for movement in movements) == [8, 11]
+    prices = session.scalars(select(Price).where(Price.variant_id.in_(variant_ids))).all()
+    assert {price.amount for price in prices} == {Decimal("299.00"), Decimal("319.00")}
+
+
+def test_saved_new_variant_label_is_available_before_complete(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+) -> None:
+    """Stable draft identity makes exact-size labels independent from Inventory posting."""
+    test_client, _, _, _ = client
+    category, _, _ = catalog
+    intake_session = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/new",
+        files={"file": ("product.png", _png_bytes(), "image/png")},
+    ).json()
+    saved = test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}/items/{item['id']}",
+        json={
+            "category_id": str(category.id),
+            "product_title": "Needle Can",
+            "variant_title": "Dr Pepper",
+            "quantity": 5,
+            "purchase_price": "140",
+        },
+    )
+
+    label = test_client.get(
+        f"/api/intake/sessions/{intake_session['id']}/items/{item['id']}/labels/40x30.pdf",
+        params={"quantity": 5},
+    )
+
+    assert saved.status_code == 200
+    assert label.status_code == 200
+    assert label.headers["content-type"] == "application/pdf"
+    assert label.content.startswith(b"%PDF")
+
+
+def test_draft_photo_can_be_replaced_before_complete(
+    client: tuple[TestClient, User, User, Path],
+    session: Session,
+) -> None:
+    """Draft photo replacement keeps immutable Media metadata and changes no stock facts."""
+    test_client, _, _, _ = client
+    intake_session = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/new",
+        files={"file": ("first.png", _png_bytes(), "image/png")},
+    ).json()
+
+    replaced = test_client.put(
+        f"/api/intake/sessions/{intake_session['id']}/items/{item['id']}/image",
+        files={"file": ("replacement.png", _png_bytes(), "image/png")},
+    )
+
+    assert replaced.status_code == 200
+    assert replaced.json()["image_id"] != item["image_id"]
+    previous = session.get(Image, UUID(item["image_id"]))
+    assert previous is not None
+    assert previous.deleted_at is not None
+    assert session.scalars(select(StockMovement)).all() == []
+
+
+def test_draft_product_cannot_be_removed_before_its_variants(
+    client: tuple[TestClient, User, User, Path],
+) -> None:
+    """Draft cleanup preserves the Product root while active Variant drafts depend on it."""
+    test_client, _, _, _ = client
+    intake_session = _create_session(test_client)
+    root = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/new",
+        files={"file": ("product.png", _png_bytes(), "image/png")},
+    ).json()
+    child = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/new",
+        data={"draft_product_item_id": root["id"]},
+    ).json()
+
+    blocked = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/{root['id']}/abandon",
+        json={"reason": "Wrong product"},
+    )
+    removed_child = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/{child['id']}/abandon",
+        json={"reason": "Wrong variant"},
+    )
+    removed_root = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/{root['id']}/abandon",
+        json={"reason": "Wrong product"},
+    )
+
+    assert blocked.status_code == 409
+    assert removed_child.status_code == 200
+    assert removed_root.status_code == 200
 
 
 def test_incomplete_session_cannot_create_receipt(

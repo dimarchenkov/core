@@ -144,8 +144,33 @@ Engine.
 После завершения Epic 3 сотрудник может выполнить основной цикл приёмки с телефона без
 технической админки.
 
-**Production-ready milestone: ✅ v0.5.0 — первый production-ready релиз основного процесса
-приёмки Core.**
+Предыдущий мобильный vertical slice поставлен под повторную проверку: реальная User Acceptance
+показала, что без обязательного перехода в Catalog он не доводит товар до ready-for-sale.
+
+### Major gap — Intake Workspace / Ready-for-Sale Workflow
+
+Связанные наблюдения ведутся как один продуктовый gap, а не как россыпь независимых UI-багов:
+
+- [x] Одна Intake position поддерживает Product с одним или несколькими Variant.
+- [x] Product form содержит только название, категорию, описание и общее фото.
+- [ ] Каждый товар имеет Variant; единственный default Variant может быть визуально скрыт.
+- [ ] Для каждого Variant доступны SKU, barcode, variant photo, quantity этой Intake, purchase
+  price, retail price и rental commercial terms.
+- [x] Draft Intake позволяет добавлять, удалять и редактировать Variant, включая замену фото
+  через существующий Media context.
+- [x] Label сохранённого Variant со штрихкодом доступна до Complete Intake и независимо от экрана
+  его создания.
+- [x] Complete Intake атомарно фиксирует Inventory и исторические purchase facts.
+- [x] После Complete Intake оператор публикует все нужные Variant в AQSI и видит per-variant
+  status/retry.
+- [x] Обычная Intake завершается без обязательного перехода в Catalog.
+- [ ] Camera scanning проверено на целевых телефонах по HTTPS; ручной и hardware fallback
+  сохранены.
+- [x] Barcode остаётся однозначной identity Variant; одинаковый manufacturer barcode разных
+  Variant и ambiguous lookup не поддерживаются.
+
+**Production-ready milestone: 🚧 повторно открыт до закрытия Intake Workspace /
+Ready-for-Sale Workflow в Sprint 9.11.**
 
 ---
 
@@ -423,6 +448,8 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [x] RentalAsset / RENT labels с Code 128 и точным scan routing.
 - [ ] Custom label designer и произвольные профили размеров.
 - [ ] Mass label printing.
+- [ ] Непривилегированный macOS host print agent для direct CUPS printing из Docker Desktop;
+  очередь текущей рабочей станции — `Xprinter_XP_365B`, USB не пробрасывать в container.
 - [ ] QR for RentalAsset.
 - [ ] Scan-to-add RentalAsset into RentalOrder.
 - [ ] Scan-assisted return.
@@ -431,8 +458,14 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 
 ### UX debt
 
-- [ ] Быстрое создание категории непосредственно из Intake.
-- [ ] Быстрое создание поставщика непосредственно из Intake.
+- [ ] Принять Product autosave и contextual Catalog Media на телефоне: дождаться
+  «Сохранено», reload черновика; Camera/Gallery для Product и трёх Variant, primary/unlink
+  и общий fallback. Авторизованный ручной smoke-test и физический iPhone/Safari остаются
+  отдельными критериями приёмки Sprint 9.11, не заменяются API/JS-тестами.
+
+- [ ] **Intake Workspace / Ready-for-Sale Workflow** — крупный gap Epic 3, повторно открытый в
+  Sprint 9.11; его канонический scope и критерии перечислены выше и не дробятся на отдельные
+  несвязанные UI-fixes.
 - [ ] Согласовать ledger-операции физического выбытия для RentalAsset `LOST` и `RETIRED`:
   текущий lifecycle сохраняет историю, но не уменьшает Inventory balance.
 - [ ] Определить политику acquisition cost для RentalAsset, выделенного из уже смешанного

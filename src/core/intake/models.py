@@ -94,12 +94,18 @@ class IntakeItemDraft(BaseModel):
             name="ck_intake_item_drafts_existing_variant_required",
         ),
         CheckConstraint(
-            "kind = 'existing_variant' OR image_id IS NOT NULL",
-            name="ck_intake_item_drafts_new_image_required",
+            "kind != 'new_product' OR image_id IS NOT NULL",
+            name="ck_intake_item_drafts_new_product_image_required",
         ),
         CheckConstraint(
-            "kind != 'new_variant' OR product_id IS NOT NULL",
+            "kind != 'new_variant' OR product_id IS NOT NULL "
+            "OR draft_product_item_id IS NOT NULL",
             name="ck_intake_item_drafts_new_variant_product_required",
+        ),
+        CheckConstraint(
+            "kind != 'new_variant' OR product_id IS NULL "
+            "OR draft_product_item_id IS NULL",
+            name="ck_intake_item_drafts_new_variant_product_exclusive",
         ),
     )
 
@@ -123,6 +129,11 @@ class IntakeItemDraft(BaseModel):
         nullable=True,
         index=True,
     )
+    draft_product_item_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("intake_item_drafts.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     image_id: Mapped[UUIDv7 | None] = mapped_column(
         ForeignKey("images.id", ondelete="RESTRICT"),
         nullable=True,
@@ -137,6 +148,10 @@ class IntakeItemDraft(BaseModel):
     product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     variant_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     manufacturer_barcode: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reserved_sku: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    reserved_internal_barcode: Mapped[str | None] = mapped_column(
+        String(22), nullable=True, unique=True
+    )
     attributes: Mapped[dict[str, str | int | bool]] = mapped_column(
         JSON,
         nullable=False,

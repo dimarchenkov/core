@@ -49,6 +49,10 @@ button, select { cursor: pointer; }
 
 .login-card { width: min(100%, 420px); padding: 28px; }
 .card { padding: 18px; margin: 14px 0; }
+.product-group { border-width: 2px; }
+.product-group > .catalog-photo { margin-bottom: 8px; }
+.variant-list { display: grid; gap: 10px; margin: 10px 0 14px; }
+.variant-card { margin: 0; background: #f8f6ef; box-shadow: none; }
 
 .brand {
   display: flex;
@@ -182,11 +186,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .filter-chip.active { color: white; background: var(--green); }
 .catalog-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; width: 100%; padding: 16px; text-align: left; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
 .catalog-photo { width: 72px; height: 82px; object-fit: cover; border-radius: 13px; background: #e5e2d8; }
-.variant-commercial-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; }
+.variant-commercial-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; }
 .variant-commercial-main { display: grid; gap: 4px; min-width: 0; }
 .commercial-block { display: grid; gap: 4px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .barcode-value { display: inline-block; width: fit-content; padding: 5px 8px; color: #27332b; background: #eeeae0; border-radius: 7px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; letter-spacing: .08em; }
-.variant-actions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.variant-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .catalog-counts { display: grid; justify-items: end; gap: 2px; color: var(--muted); font-size: .75rem; font-weight: 720; }
 .available-text { color: var(--green); }
 .asset-catalog-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
@@ -207,6 +211,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .condition-photo img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 11px; background: #e5e2d8; }
 .condition-photo figcaption { padding: 8px 3px 2px; color: var(--muted); font-size: .78rem; }
 .catalog-media-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.contextual-media { min-width: 0; margin-bottom: 12px; }
+.variant-commercial-card > .contextual-media { grid-column: 1 / -1; }
+.media-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.media-actions label { position: relative; overflow: hidden; cursor: pointer; }
+.media-file-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.media-actions label:focus-within { outline: 2px solid currentColor; outline-offset: 2px; }
 .catalog-media-item { margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: 16px; }
 .catalog-media-item img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 11px; background: #e5e2d8; }
 .catalog-media-item figcaption { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; }
@@ -270,7 +280,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
   .action-card { min-height: 112px; }
   .catalog-row { grid-template-columns: auto 1fr; }
   .catalog-row .catalog-counts { grid-column: 1 / -1; }
-  .variant-commercial-card { grid-template-columns: auto 1fr; }
+  .variant-commercial-card { grid-template-columns: minmax(0, 1fr); }
   .variant-commercial-card .catalog-counts, .variant-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .condition-photos { grid-template-columns: 1fr; }
   .catalog-counts { grid-template-columns: repeat(3, auto); justify-content: start; gap: 10px; }

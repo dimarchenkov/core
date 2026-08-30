@@ -18,6 +18,7 @@ class IntakeItemAvailability:
     variant: bool = False
     image: bool = False
     product: bool = False
+    draft_product: bool = False
     category: bool = False
 
 
@@ -30,11 +31,11 @@ def derive_item_requirements(
     if item.kind is IntakeItemKind.EXISTING_VARIANT:
         if not availability.variant:
             missing.append(IntakeItemRequirement.MISSING_VARIANT)
-    elif not availability.image:
+    elif item.kind is IntakeItemKind.NEW_PRODUCT and not availability.image:
         missing.append(IntakeItemRequirement.MISSING_IMAGE)
 
     if item.kind is IntakeItemKind.NEW_VARIANT:
-        if not availability.product:
+        if not availability.product and not availability.draft_product:
             missing.append(IntakeItemRequirement.MISSING_PRODUCT)
     elif item.kind is IntakeItemKind.NEW_PRODUCT:
         if not availability.category:
@@ -42,10 +43,7 @@ def derive_item_requirements(
         if not (item.product_title or "").strip():
             missing.append(IntakeItemRequirement.MISSING_PRODUCT_TITLE)
 
-    if (
-        item.kind in {IntakeItemKind.NEW_PRODUCT, IntakeItemKind.NEW_VARIANT}
-        and not (item.variant_title or "").strip()
-    ):
+    if item.kind is IntakeItemKind.NEW_VARIANT and not (item.variant_title or "").strip():
         missing.append(IntakeItemRequirement.MISSING_VARIANT_TITLE)
     if item.quantity is None:
         missing.append(IntakeItemRequirement.MISSING_QUANTITY)

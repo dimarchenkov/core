@@ -284,9 +284,21 @@ catalog/
 Правило:
 
 ```text
-Product не имеет SKU, цены и остатков.
-Variant имеет SKU, штрихкод, цены, остатки и публикации.
+Product содержит название, категорию, основное описание и общее фото. Product не имеет SKU,
+штрихкода, quantity, закупочной цены, цены продажи или rental commercial terms.
+
+Variant существует всегда. Даже товар без видимых вариантов имеет один default Variant, который
+клиентский UI может скрывать, пока он единственный. Variant имеет SKU, barcode, variant photo,
+коммерческие условия и публикации. Quantity существует только для Variant в контексте Intake и
+Inventory и изменяется через складской ledger.
+
+Один barcode глобально и однозначно идентифицирует один Variant. Несколько кодов одного Variant
+допустимы, но одинаковый manufacturer barcode у разных Variant, Product-level barcode и
+ambiguous barcode lookup пока не поддерживаются.
 ```
+
+Catalog управляет уже существующим каталогом: исправляет карточки, меняет коммерческие данные,
+перепечатывает labels и повторяет публикации. Он не является обязательным вторым шагом Intake.
 
 ---
 
@@ -410,9 +422,24 @@ snapshot данных, необходимых для исторического 
 
 Rental и Inventory не координируют друг друга напрямую.
 
-При завершении Intake создание отдельных `RentalAsset` для арендуемого `Variant` выполняет
-`CompleteIntakeWorkflow`. Он координирует Catalog, Receipt, Inventory и Rental и является
-единственным владельцем общей SQL-транзакции.
+Intake является application orchestration workflow и полным рабочим местом подготовки товара до
+`ready-for-sale`. Одна пользовательская позиция Intake представляет Product и один или несколько
+Variant, поступивших сейчас. Draft допускает добавление, удаление и редактирование вариантов.
+
+Сохранённый Variant со штрихкодом должен иметь доступную barcode label до Complete Intake и
+независимо от экрана, на котором Variant был создан. Генерация label зависит от сохранённой
+identity Variant, а не от наличия StockMovement или завершённой Intake.
+
+Для нового Variant Intake резервирует следующий номер общей Catalog sequence и сохраняет
+`reserved_sku` вместе с соответствующим internal EAN-13. Резервация не создаёт Catalog Variant
+или Inventory fact, не переиспользуется после удаления draft и атомарно переносится в настоящий
+Variant при Complete. Поэтому label до Complete и Catalog после Complete печатают одну и ту же
+физическую identity без временных браузерных кодов.
+
+При завершении `CompleteIntakeWorkflow` координирует Catalog, Pricing, Receipt, Inventory и Rental
+и является единственным владельцем общей SQL-транзакции. Проведение атомарно фиксирует складские
+движения и исторические закупочные факты для каждого Variant; создание отдельных `RentalAsset`
+выполняется в той же границе, когда это требуется сценарием.
 
 Доменные сервисы и репозитории Rental и Inventory:
 
@@ -428,6 +455,41 @@ flowchart LR
     Intake["CompleteIntakeWorkflow"] --> Inventory["Inventory"]
     Intake --> Rental["Rental"]
 ```
+
+После commit отдельная Intake-level операция оркестрирует публикацию всех Variant этой Intake,
+которым нужна отправка в AQSI. Результат хранится и показывается отдельно по каждому Variant;
+ошибки допускают безопасный retry и не переписывают проведённые Inventory или purchase facts.
+
+### Печать товарных этикеток
+
+`Labels` формирует векторные PDF с точным физическим размером 40 × 30 или 58 × 40 мм. Готовность
+этикетки означает наличие сохранённой Variant identity и корректного internal EAN-13; она не
+зависит от Inventory, фото, retail price, AQSI или Complete Intake. Печать является отдельным
+side effect и никогда не входит в транзакцию проведения Intake.
+
+Граница прямой печати:
+
+```text
+Intake / Catalog UI
+    -> VariantLabelPrintService
+    -> LabelPrinterAdapter
+    -> macOS CUPS queue
+    -> Xprinter
+```
+
+`CupsCommandLabelPrinter` использует стандартную команду `lp`, имя очереди задаётся через
+`CORE_LABEL_PRINTER_NAME` и не зашивается в бизнес-код. PDF fallback остаётся доступным всегда.
+В Docker Desktop контейнер не имеет host CUPS socket и команды `lp`, а локальный macOS CUPS не
+публикует принтеры в сеть. Поэтому direct print работает при host-mode запуске Core; для
+контейнерного deployment нужен отдельный непривилегированный host print agent. Проброс USB и
+privileged container не используются.
+Точная форма команды, хранения batch-состояния и границы существующего AQSI adapter этим
+документом не предписываются.
+
+Архитектурный acceptance criterion:
+
+> Если после обычной приёмки оператор вынужден открыть Catalog, чтобы закончить подготовку товара
+> к продаже, Intake workflow считается незавершённым.
 
 Связь с будущим Sales пока не является действующей зависимостью. В Sprint 9 Rental может только
 вывести экземпляр из прокатного фонда с назначением `SALE`; фактическая продажа будет
@@ -551,9 +613,16 @@ storage/
 - работает с телефона;
 - позволяет сделать фото камерой;
 - позволяет выбрать фото из библиотеки;
+- позволяет создать Product с одним или несколькими Variant;
+- позволяет добавлять, удалять и редактировать Variant в draft;
+- позволяет печатать label сохранённого Variant со штрихкодом до завершения;
 - не дает завершить приемку без фото;
-- создает черновик товара;
+- атомарно фиксирует Inventory и закупочные факты при завершении;
+- после завершения позволяет отправить нужные Variant Intake в AQSI со статусом и retry;
 - не публикует товар автоматически.
+
+Camera barcode scanning требует secure context: production deployment mobile UI должен быть
+доступен по HTTPS. Ручной ввод и аппаратный scanner не зависят от Camera API и остаются fallback.
 
 ---
 
@@ -661,6 +730,12 @@ tilda_publisher.publish(variant)"
 ### 5. Сначала backend, потом frontend
 
 Core должен быть полезен даже без красивого интерфейса.
+
+### 6. Intake завершается ready-for-sale, а не переходом в Catalog
+
+Intake координирует создание Product и Variant, маркировку, проведение Inventory и последующую
+публикацию в AQSI. Catalog остаётся самостоятельным интерфейсом управления существующими
+карточками и не компенсирует незавершённость Intake.
 
 ---
 

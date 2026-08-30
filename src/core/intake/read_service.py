@@ -106,12 +106,16 @@ class IntakeDraftReadService:
         active_products = self._active_ids(CatalogProduct, product_ids)
         active_categories = self._active_ids(Category, category_ids)
         available_images = self._present_ids(Image, image_ids)
+        active_draft_ids = {
+            item.id for item in items if item.abandoned_at is None and item.deleted_at is None
+        }
 
         return {
             item.id: IntakeItemAvailability(
                 variant=item.variant_id in active_variants,
                 image=item.image_id in available_images,
                 product=item.product_id in active_products,
+                draft_product=item.draft_product_item_id in active_draft_ids,
                 category=item.category_id in active_categories,
             )
             for item in items

@@ -41,7 +41,6 @@ def test_new_product_completeness_reports_domain_facts_in_stable_order() -> None
         IntakeItemRequirement.MISSING_IMAGE,
         IntakeItemRequirement.MISSING_CATEGORY,
         IntakeItemRequirement.MISSING_PRODUCT_TITLE,
-        IntakeItemRequirement.MISSING_VARIANT_TITLE,
         IntakeItemRequirement.MISSING_QUANTITY,
         IntakeItemRequirement.MISSING_PURCHASE_PRICE,
     ]

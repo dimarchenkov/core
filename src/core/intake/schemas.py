@@ -146,12 +146,15 @@ class IntakeItemDraftRead(PydanticBaseModel):
     kind: IntakeItemKind
     variant_id: UUIDv7 | None
     product_id: UUIDv7 | None
+    draft_product_item_id: UUIDv7 | None
     image_id: UUIDv7 | None
     category_id: UUIDv7 | None
     product_title: str | None
     product_description: str | None
     variant_title: str | None
     manufacturer_barcode: str | None
+    reserved_sku: str | None
+    reserved_internal_barcode: str | None
     attributes: dict[str, str | int | bool]
     quantity: int | None
     rental_quantity: int

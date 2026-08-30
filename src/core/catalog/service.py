@@ -279,12 +279,20 @@ class CatalogVariantService:
         data: CatalogVariantCreate,
         *,
         actor_id: UUIDv7 | None = None,
+        reserved_sku: str | None = None,
+        reserved_barcode: str | None = None,
     ) -> CatalogVariant:
         """Validate and stage a generated variant for the command owner to commit."""
         self._ensure_product_is_active(data.product_id)
-        identifier_number = self._repository.next_sku_number()
-        sku = SkuGenerator.generate(identifier_number)
-        barcode = InternalBarcodeGenerator.generate(identifier_number)
+        if (reserved_sku is None) != (reserved_barcode is None):
+            raise ValueError("Reserved SKU and barcode must be supplied together.")
+        if reserved_sku is None:
+            identifier_number = self._repository.next_sku_number()
+            sku = SkuGenerator.generate(identifier_number)
+            barcode = InternalBarcodeGenerator.generate(identifier_number)
+        else:
+            sku = reserved_sku
+            barcode = reserved_barcode
         if self._repository.get_by_barcode(barcode) is not None:
             raise CatalogVariantBarcodeConflictError
         manufacturer_barcode = data.manufacturer_barcode

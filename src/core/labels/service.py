@@ -16,8 +16,6 @@ from core.labels.renderer import (
 )
 from core.pricing.enums import PriceType
 from core.pricing.repository import PriceRepository
-from core.readiness.enums import ReadyForSaleRequirement
-from core.readiness.service import ReadinessVariantNotFoundError, ReadyForSaleService
 from core.rental.enums import AssetPurpose, RentalAvailability
 from core.rental.models import RentalAssetRecord, RentalOrderItemRecord
 from core.rental.order_enums import RentalOrderItemStatus
@@ -26,15 +24,6 @@ from core.shared.db import UUIDv7
 
 class LabelVariantNotFoundError(Exception):
     """Raised when the requested Variant is missing or archived."""
-
-
-class LabelVariantNotReadyError(Exception):
-    """Raised when a sale label is requested before required work is complete."""
-
-    def __init__(self, missing_requirements: list[ReadyForSaleRequirement]) -> None:
-        """Preserve actionable readiness reasons for the API response."""
-        self.missing_requirements = missing_requirements
-        super().__init__("Variant is not ready for sale.")
 
 
 class LabelRentalAssetNotFoundError(Exception):
@@ -52,7 +41,6 @@ class VariantLabelService:
         """Create a label service with repositories and a PDF renderer."""
         self._variant_repository = CatalogVariantRepository(session)
         self._price_repository = PriceRepository(session)
-        self._readiness_service = ReadyForSaleService(session)
         self._renderer = renderer or VariantLabelRenderer()
 
     def generate(
@@ -61,10 +49,13 @@ class VariantLabelService:
         profile: LabelProfile,
         *,
         dpi: int = 203,
+        quantity: int = 1,
         at: datetime | None = None,
     ) -> bytes:
         """Generate one fixed-profile sale label from authoritative current data."""
-        return self._generate(variant_id, profile=profile, dpi=dpi, at=at)
+        return self._generate(
+            variant_id, profile=profile, dpi=dpi, quantity=quantity, at=at
+        )
 
     def generate_58x40(self, variant_id: UUIDv7, *, at: datetime | None = None) -> bytes:
         """Generate one 58 x 40 mm sale label for a currently ready Variant."""
@@ -72,6 +63,7 @@ class VariantLabelService:
             variant_id,
             profile=LabelProfile.STANDARD_58X40,
             dpi=203,
+            quantity=1,
             at=at,
         )
 
@@ -81,23 +73,17 @@ class VariantLabelService:
         *,
         profile: LabelProfile,
         dpi: int,
+        quantity: int,
         at: datetime | None,
     ) -> bytes:
         effective_at = at or datetime.now(UTC)
-        try:
-            readiness = self._readiness_service.check_variant(variant_id, at=effective_at)
-        except ReadinessVariantNotFoundError as exc:
-            raise LabelVariantNotFoundError from exc
-        if not readiness.is_ready:
-            raise LabelVariantNotReadyError(readiness.missing_requirements)
-
         variant = self._variant_repository.get(variant_id)
         price = self._price_repository.get_current(
             variant_id,
             PriceType.RETAIL,
             at=effective_at,
         )
-        if variant is None or price is None:
+        if variant is None:
             raise LabelVariantNotFoundError
 
         attribute_values = [str(value) for _, value in sorted(variant.attributes.items())]
@@ -106,12 +92,13 @@ class VariantLabelService:
             VariantLabelData(
                 product_title=variant.product.title,
                 variant_details=details,
-                price=price.amount,
+                price=price.amount if price is not None else None,
                 barcode=variant.barcode,
                 sku=variant.sku,
             ),
             profile=profile,
             dpi=dpi,
+            quantity=quantity,
         )
 
 

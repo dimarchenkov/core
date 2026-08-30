@@ -28,7 +28,7 @@ class VariantLabelData:
 
     product_title: str
     variant_details: str
-    price: Decimal
+    price: Decimal | None
     barcode: str
     sku: str
 
@@ -61,10 +61,13 @@ class VariantLabelRenderer:
         *,
         profile: LabelProfile = LabelProfile.STANDARD_58X40,
         dpi: int = 203,
+        quantity: int = 1,
     ) -> bytes:
         """Return one single-page vector PDF with an exact physical MediaBox."""
         if dpi not in self.supported_dpi:
             raise ValueError("Label printer DPI must be 203 or 300.")
+        if not 1 <= quantity <= 500:
+            raise ValueError("Label quantity must be between 1 and 500.")
         self._validate_barcode(data.barcode)
         self._register_fonts()
         width, height = self.sizes[profile]
@@ -76,30 +79,32 @@ class VariantLabelRenderer:
             invariant=1,
         )
         canvas.setTitle(f"{data.sku} {profile.value} label")
-        if profile is LabelProfile.COMPACT_40X30:
-            self._draw_40x30(canvas, data)
-        else:
-            self._draw_58x40(canvas, data)
-        canvas.showPage()
+        for _ in range(quantity):
+            if profile is LabelProfile.COMPACT_40X30:
+                self._draw_40x30(canvas, data)
+            else:
+                self._draw_58x40(canvas, data)
+            canvas.showPage()
         canvas.save()
         return output.getvalue()
 
     def _draw_40x30(self, canvas: Canvas, data: VariantLabelData) -> None:
-        """Prioritize barcode and price within the compact 40 x 30 mm profile."""
-        self._draw_wrapped(canvas, self._combined_title(data), 1.5, 28, 37, 6.8, 2, 3)
-        canvas.setFont(self.bold_font, 12)
-        canvas.drawRightString(38.5 * mm, 19.5 * mm, self._price_text(data.price))
+        """Fit sale identity, price, and a scannable barcode on 40 x 30 mm media."""
+        self._draw_wrapped(canvas, self._combined_title(data), 1.5, 26.5, 37, 7.2, 2, 3.2)
+        if data.price is not None:
+            canvas.setFont(self.bold_font, 8.5)
+            canvas.drawCentredString(20 * mm, 18.2 * mm, self._price_text(data.price))
         self._draw_barcode(
             canvas,
             data.barcode,
             page_width=40 * mm,
             width_mm=37,
-            height_mm=9.5,
-            y_mm=4.2,
+            height_mm=10.5,
+            y_mm=5.2,
         )
         sku = self._truncate_text(data.sku, self.regular_font, 4.8, 37 * mm)
         canvas.setFont(self.regular_font, 4.8)
-        canvas.drawCentredString(20 * mm, 1.1 * mm, sku)
+        canvas.drawCentredString(20 * mm, 1.3 * mm, sku)
 
     def _draw_58x40(self, canvas: Canvas, data: VariantLabelData) -> None:
         """Use the full standard label while preserving barcode quiet zones."""
@@ -107,8 +112,9 @@ class VariantLabelRenderer:
         details = self._truncate_text(data.variant_details, self.regular_font, 6.2, 54 * mm)
         canvas.setFont(self.regular_font, 6.2)
         canvas.drawString(2 * mm, 29.8 * mm, details)
-        canvas.setFont(self.bold_font, 16)
-        canvas.drawRightString(56 * mm, 23.2 * mm, self._price_text(data.price))
+        if data.price is not None:
+            canvas.setFont(self.bold_font, 16)
+            canvas.drawRightString(56 * mm, 23.2 * mm, self._price_text(data.price))
         self._draw_barcode(
             canvas,
             data.barcode,
@@ -167,6 +173,8 @@ class VariantLabelRenderer:
     @staticmethod
     def _combined_title(data: VariantLabelData) -> str:
         details = data.variant_details.strip()
+        if details.casefold() in {"default", "default variant", "основной"}:
+            details = ""
         return (
             f"{data.product_title.strip()} - {details}" if details else data.product_title.strip()
         )

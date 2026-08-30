@@ -34,6 +34,7 @@ function routeFromLocation() {
 async function restoreRoute(route) {
   restoringHistory = true;
   try {
+    await flushProductAutosaves();
     if (!route || route.name === "workspace") await loadHome();
     else if (route.name === "catalog") await openOperationsCatalog();
     else if (route.name === "product") await openOperationsProduct(route.productId);
@@ -42,6 +43,8 @@ async function restoreRoute(route) {
     else if (route.name === "order") await openRentalReturnOrder(route.orderId);
     else if (route.name === "intake") await openSession(route.sessionId);
     else await loadHome();
+  } catch (error) {
+    showToast(error.message, true);
   } finally {
     restoringHistory = false;
   }
@@ -60,6 +63,7 @@ const state = {
   variants: [],
   itemDisplay: new Map(),
   imageUrls: new Map(),
+  printCapability: { available: false, printer_name: null, fallback: "pdf" },
   mode: null,
   result: null,
   intakeBarcode: {
@@ -67,6 +71,7 @@ const state = {
     result: null,
     unknown: false,
   },
+  intakeAqsi: new Map(),
   rental: {
     customers: [],
     customer: null,
@@ -129,6 +134,10 @@ function escapeHtml(value = "") {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function visibleVariantTitle(value, fallback = "") {
+  return ["default", "default variant", "основной"].includes(String(value || "").trim().toLocaleLowerCase("ru")) ? fallback : (value || fallback);
 }
 
 function showToast(message, error = false) {
@@ -335,11 +344,12 @@ async function startSession() {
 
 async function loadReferences() {
   if (state.categories.length) return;
-  [state.categories, state.suppliers, state.products, state.variants] = await Promise.all([
+  [state.categories, state.suppliers, state.products, state.variants, state.printCapability] = await Promise.all([
     api("/api/catalog/categories"),
     api("/api/purchasing/suppliers"),
     api("/api/catalog/products"),
     api("/api/catalog/variants"),
+    api("/api/labels/variants/print-capability"),
   ]);
 }
 
@@ -357,6 +367,7 @@ async function openSession(id) {
 }
 
 async function refreshSession() {
+  await flushProductAutosaves();
   state.session = await api(`/api/intake/sessions/${state.session.id}`);
   await loadItemDisplays();
   renderWorkspace();
@@ -387,6 +398,9 @@ async function loadItemDisplays() {
 function renderWorkspace() {
   if (state.result) return renderResult();
   const activeItems = state.session.items.filter((item) => !item.abandoned_at);
+  const productGroups = groupIntakeItems(activeItems);
+  const productCount = productGroups.length;
+  const variantCount = activeItems.length;
   root.innerHTML = `
     <div class="shell">
       ${topbar(true)}
@@ -396,10 +410,11 @@ function renderWorkspace() {
       <div class="actions">
         <button class="action-card" id="known-action"><span class="action-icon">▦</span><strong>Сканировать или найти</strong><span class="muted small">Повторная поставка</span></button>
         <button class="action-card" id="photo-action"><span class="action-icon">◉</span><strong>Сфотографировать</strong><span class="muted small">Новый товар</span></button>
+        <button class="action-card" id="variant-action"><span class="action-icon">＋</span><strong>Новый вариант</strong><span class="muted small">Для товара из Catalog</span></button>
       </div>
       ${renderActionPanel()}
-      <h2>Позиции · ${activeItems.length}</h2>
-      <div>${activeItems.length ? activeItems.map(renderItem).join("") : '<div class="empty">Добавьте первый товар</div>'}</div>
+      <h2>${productCount} ${pluralizeRu(productCount, "товар", "товара", "товаров")} · ${variantCount} ${pluralizeRu(variantCount, "вариант", "варианта", "вариантов")}</h2>
+      <div>${productGroups.length ? productGroups.map(renderProductGroup).join("") : '<div class="empty">Добавьте первый товар</div>'}</div>
       ${renderSessionFinish()}
     </div>`;
   bindTopbar();
@@ -414,10 +429,42 @@ function renderWorkspace() {
     state.intakeBarcode = { value: "", result: null, unknown: false };
     document.querySelector("#photo-input").click();
   });
+  document.querySelector("#variant-action").addEventListener("click", async () => {
+    try {
+      await saveAllItemForms();
+      state.mode = "new_variant";
+      renderWorkspace();
+    } catch (error) { showToast(error.message, true); }
+  });
   document.querySelector("#photo-input")?.addEventListener("change", uploadNewPhoto);
   document.querySelector("#barcode-lookup-form")?.addEventListener("submit", lookupIntakeBarcode);
   document.querySelectorAll("[data-barcode-camera]").forEach((button) => {
     button.addEventListener("click", () => startBarcodeCamera(button.dataset.barcodeTarget));
+  });
+  document.querySelectorAll("[data-print-intake-label]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const quantity = Number(button.dataset.defaultQuantity || 1);
+      if (state.printCapability.available) {
+        printVariantLabels(button.dataset.printIntakeLabel, quantity);
+      } else {
+        openVariantLabel(button.dataset.printIntakeLabel, true, quantity);
+      }
+    });
+  });
+  document.querySelectorAll("[data-open-label]").forEach((button) => {
+    button.addEventListener("click", () => openVariantLabel(button.dataset.openLabel, false));
+  });
+  document.querySelectorAll("[data-open-draft-label]").forEach((button) => {
+    button.addEventListener("click", () => openDraftLabel(button.dataset.openDraftLabel));
+  });
+  document.querySelectorAll("[data-print-draft-label]").forEach((button) => {
+    button.addEventListener("click", () => printDraftLabels(
+      button.dataset.printDraftLabel,
+      Number(button.dataset.defaultQuantity || 1),
+    ));
+  });
+  document.querySelectorAll("[data-print-draft-system]").forEach((button) => {
+    button.addEventListener("click", () => openDraftLabel(button.dataset.printDraftSystem, true));
   });
   document.querySelectorAll("[data-manufacturer-barcode]").forEach((input) => {
     input.addEventListener("change", () => identifyDraftManufacturerBarcode(input));
@@ -431,10 +478,65 @@ function renderWorkspace() {
   document.querySelector("#barcode-create-new")?.addEventListener("click", () => document.querySelector("#photo-input").click());
   document.querySelector("#barcode-use-existing")?.addEventListener("click", useLocatedBarcode);
   document.querySelector("#known-form")?.addEventListener("submit", addKnownItem);
+  document.querySelector("#existing-product-variant-form")?.addEventListener("submit", addVariantToExistingProduct);
+  document.querySelectorAll("[data-product-form]").forEach(bindProductAutosave);
   document.querySelectorAll("[data-item-form]").forEach((form) => form.addEventListener("submit", saveItem));
+  document.querySelectorAll("[data-replace-item-image]").forEach((input) => input.addEventListener("change", () => replaceDraftImage(input)));
+  document.querySelectorAll("[data-add-draft-variant]").forEach((button) => button.addEventListener("click", () => addDraftVariant(button.dataset.addDraftVariant)));
+  document.querySelectorAll("[data-abandon-item]").forEach((button) => button.addEventListener("click", () => abandonDraftItem(button.dataset.abandonItem)));
   document.querySelector("#supplier")?.addEventListener("change", saveSupplier);
   document.querySelector("#complete-session")?.addEventListener("click", completeSession);
   hydrateImages();
+}
+
+function pluralizeRu(value, one, few, many) {
+  const mod100 = Math.abs(value) % 100;
+  const mod10 = mod100 % 10;
+  if (mod100 > 10 && mod100 < 20) return many;
+  if (mod10 === 1) return one;
+  if (mod10 >= 2 && mod10 <= 4) return few;
+  return many;
+}
+
+function groupIntakeItems(items) {
+  const groups = new Map();
+  items.forEach((item) => {
+    const display = state.itemDisplay.get(item.id);
+    const key = item.kind === "new_product"
+      ? `draft:${item.id}`
+      : item.draft_product_item_id
+        ? `draft:${item.draft_product_item_id}`
+        : `catalog:${item.product_id || display?.product?.id || item.id}`;
+    if (!groups.has(key)) groups.set(key, { key, root: null, product: display?.product || null, items: [] });
+    const group = groups.get(key);
+    group.items.push(item);
+    if (item.kind === "new_product") group.root = item;
+    if (!group.product && display?.product) group.product = display.product;
+  });
+  return [...groups.values()];
+}
+
+function renderProductGroup(group) {
+  const rootItem = group.root;
+  const title = rootItem?.product_title || group.product?.title || "Новый товар";
+  const categoryOptions = state.categories.map((category) => `<option value="${category.id}" ${rootItem?.category_id === category.id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
+  const productForm = rootItem ? `<form class="drawer" data-product-form="${rootItem.id}">
+    <div class="field"><label>Общее фото товара</label><input type="file" accept="image/*" capture="environment" data-replace-item-image="${rootItem.id}"></div>
+    <div class="field"><label>Категория</label><select name="category_id" required><option value="">Выберите категорию</option>${categoryOptions}</select></div>
+    <div class="field"><label>Название товара</label><input name="product_title" value="${escapeHtml(rootItem.product_title || "")}" required></div>
+    <div class="field"><label>Описание <span class="muted">(необязательно)</span></label><textarea name="product_description">${escapeHtml(rootItem.product_description || "")}</textarea></div>
+    <span class="muted small" data-save-status role="status" aria-live="polite">Сохранено</span>
+    <button class="link-button hidden" data-save-retry type="button">Повторить сохранение</button>
+  </form>` : `<p class="muted small">Товар уже существует в Catalog. В приёмке редактируются только данные поступивших вариантов.</p>`;
+  return `<section class="card product-group">
+    <p class="eyebrow">Товар</p>
+    <h2>${escapeHtml(title)}</h2>
+    ${rootItem?.image_id ? `<img class="catalog-photo" data-image-id="${rootItem.image_id}" alt="${escapeHtml(title)}">` : ""}
+    ${productForm}
+    <h3>Варианты · ${group.items.length}</h3>
+    <div class="variant-list">${group.items.map((item) => renderVariantCard(item, rootItem)).join("")}</div>
+    ${rootItem ? `<button class="button ghost full" type="button" data-add-draft-variant="${rootItem.id}">＋ Добавить вариант этого товара</button><button class="button ghost full danger-text" type="button" data-abandon-item="${rootItem.id}">Удалить товар из приёмки</button>` : ""}
+  </section>`;
 }
 
 function renderActionPanel() {
@@ -444,6 +546,7 @@ function renderActionPanel() {
     return barcodes.map((barcode) => `<option value="${escapeHtml(barcode.value)}">${escapeHtml(product?.title || "Товар")} · ${escapeHtml(variant.title)} · ${escapeHtml(variant.sku)}</option>`);
   }).join("");
   const lookup = renderIntakeBarcodeResult();
+  const productOptions = state.products.map((product) => `<option value="${product.id}">${escapeHtml(product.title)}</option>`).join("");
   return `
     <input class="hidden" id="photo-input" type="file" accept="image/*" capture="environment">
     <section class="card ${state.mode === "known" ? "" : "hidden"}">
@@ -470,6 +573,14 @@ function renderActionPanel() {
         </div>
         <button class="button full" type="submit">Добавить позицию</button>
       </form>
+    </section>
+    <section class="card ${state.mode === "new_variant" ? "" : "hidden"}">
+      <h2>Новый вариант существующего товара</h2>
+      <form id="existing-product-variant-form">
+        <div class="field"><label>Товар</label><select name="product_id" required><option value="">Выберите товар</option>${productOptions}</select></div>
+        <div class="field"><label>Фото варианта <span class="muted">(необязательно)</span></label><input name="file" type="file" accept="image/*" capture="environment"></div>
+        <button class="button full" type="submit">Добавить вариант в приёмку</button>
+      </form>
     </section>`;
 }
 
@@ -493,6 +604,7 @@ async function lookupIntakeBarcode(eventOrValue) {
     : String(new FormData(eventOrValue.currentTarget).get("barcode") || "").trim();
   if (!value) return;
   try {
+    await flushProductAutosaves();
     const result = await lookupVariantBarcode(value);
     state.intakeBarcode = {
       value,
@@ -688,27 +800,38 @@ async function startBarcodeCamera(inputId) {
   }
 }
 
-function renderItem(item) {
-  const display = state.itemDisplay.get(item.id);
-  const isExisting = item.kind === "existing_variant";
-  const title = isExisting ? display?.product?.title || "Существующий товар" : item.product_title || "Новый товар";
-  const subtitle = isExisting ? display?.variant?.title || "Вариант" : item.variant_title || "Заполните карточку";
-  const imageId = isExisting ? display?.imageId : item.image_id;
-  const requirements = item.missing_requirements.length
+function renderItemRequirements(item) {
+  return item.missing_requirements.length
     ? item.missing_requirements.map((value) => `<span class="chip warn">${escapeHtml(requirementLabels[value] || value)}</span>`).join("")
     : '<span class="chip good">Позиция заполнена</span>';
+}
+
+function updateItemRequirements(item) {
+  const chips = document.querySelector(`[data-item-requirements="${item.id}"]`);
+  if (chips) chips.innerHTML = renderItemRequirements(item);
+}
+
+function renderVariantCard(item, rootItem = null) {
+  const display = state.itemDisplay.get(item.id);
+  const isExisting = item.kind === "existing_variant";
+  const subtitle = isExisting ? visibleVariantTitle(display?.variant?.title, "Единственный вариант") : item.variant_title || (item.kind === "new_product" ? "Единственный вариант" : "Заполните вариант");
+  const imageId = isExisting ? display?.imageId : item.kind === "new_variant" ? item.image_id || rootItem?.image_id : rootItem?.image_id;
   return `
-    <article class="card">
+    <article class="card variant-card">
       <div class="item">
-        ${imageId ? `<img class="item-photo" data-image-id="${imageId}" alt="${escapeHtml(title)}">` : '<div class="photo-placeholder">◎</div>'}
+        ${imageId ? `<img class="item-photo" data-image-id="${imageId}" alt="${escapeHtml(subtitle)}">` : '<div class="photo-placeholder">◎</div>'}
         <div class="item-main">
-          <h3 class="item-title">${escapeHtml(title)}</h3>
-          <div class="muted small">${escapeHtml(subtitle)}${display?.variant ? ` · ${escapeHtml(display.variant.sku)}` : ""}</div>
+          <h3 class="item-title">${escapeHtml(subtitle)}</h3>
+          <div class="muted small">${display?.variant ? escapeHtml(display.variant.sku) : "Variant"}</div>
           ${item.rental_quantity ? `<div class="rental-summary">В аренду: ${item.rental_quantity} шт.</div>` : ""}
-          <div class="chips">${requirements}</div>
+          ${item.reserved_internal_barcode ? `<div class="muted small">Barcode: ${escapeHtml(item.reserved_internal_barcode)} · ${escapeHtml(item.reserved_sku)}</div>` : ""}
+          <div class="chips" data-item-requirements="${item.id}" aria-live="polite">${renderItemRequirements(item)}</div>
+          ${display?.variant ? `<div class="inline-actions"><button class="button ghost compact" type="button" data-open-label="${display.variant.id}">Открыть PDF</button><button class="button compact" type="button" data-print-intake-label="${display.variant.id}" data-default-quantity="${item.quantity || 1}">${state.printCapability.available ? "Печать этикеток" : "Системная печать"}</button></div>` : ""}
+          ${item.reserved_internal_barcode ? `<div class="inline-actions"><button class="button ghost compact" type="button" data-open-draft-label="${item.id}">Открыть PDF</button>${state.printCapability.available ? `<button class="button compact" type="button" data-print-draft-label="${item.id}" data-default-quantity="${item.quantity || 1}">Печать этикеток</button>` : `<button class="button compact" type="button" data-print-draft-system="${item.id}">Системная печать</button>`}</div>` : ""}
         </div>
       </div>
       <form class="drawer" data-item-form="${item.id}">
+        ${item.kind === "new_variant" ? `<div class="field"><label>${item.image_id ? "Заменить фото варианта" : "Фото варианта (необязательно)"}</label><input type="file" accept="image/*" capture="environment" data-replace-item-image="${item.id}"></div>` : ""}
         ${isExisting ? "" : renderNewItemFields(item)}
         <div class="field-row">
           <div class="field"><label>Количество</label><input name="quantity" type="number" inputmode="numeric" min="1" value="${item.quantity ?? ""}" required></div>
@@ -720,19 +843,19 @@ function renderItem(item) {
           <p class="muted small">Каждый предмет аренды получит собственный инвентарный номер.</p>
         </div>
         <button class="button secondary full" type="submit">Сохранить позицию</button>
+        ${item.kind !== "new_product" ? `<button class="button ghost full danger-text" type="button" data-abandon-item="${item.id}">Удалить вариант из приёмки</button>` : ""}
       </form>
     </article>`;
 }
 
 function renderNewItemFields(item) {
-  const categories = state.categories.map((category) => `<option value="${category.id}" ${item.category_id === category.id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
   const barcodeInputId = `manufacturer-barcode-${item.id}`;
+  if (item.kind === "new_variant") return `
+    <div class="field"><label>Название варианта — цвет, размер или исполнение</label><input name="variant_title" value="${escapeHtml(item.variant_title || "")}" required></div>
+    <div class="field"><label for="${barcodeInputId}">Штрихкод производителя <span class="muted">(необязательно)</span></label><input id="${barcodeInputId}" name="manufacturer_barcode" data-manufacturer-barcode value="${escapeHtml(item.manufacturer_barcode || "")}" autocomplete="off"><button class="button secondary full" data-barcode-camera data-barcode-target="${barcodeInputId}" type="button">📷 Сканировать камерой</button><div class="small" data-barcode-status="${barcodeInputId}"></div></div>`;
   return `
-    <div class="field"><label>Категория</label><select name="category_id" required><option value="">Выберите категорию</option>${categories}</select></div>
-    <div class="field"><label>Название товара</label><input name="product_title" value="${escapeHtml(item.product_title || "")}" required></div>
-    <div class="field"><label>Вариант — цвет, размер или исполнение</label><input name="variant_title" value="${escapeHtml(item.variant_title || "")}" required></div>
-    <div class="field"><label for="${barcodeInputId}">Штрихкод производителя <span class="muted">(необязательно)</span></label><input id="${barcodeInputId}" name="manufacturer_barcode" data-manufacturer-barcode value="${escapeHtml(item.manufacturer_barcode || "")}" autocomplete="off" inputmode="text"><button class="button secondary full" data-barcode-camera data-barcode-target="${barcodeInputId}" type="button">📷 Сканировать камерой</button><div class="small" data-barcode-status="${barcodeInputId}"></div></div>
-    <div class="field"><label>Описание <span class="muted">(необязательно)</span></label><textarea name="product_description">${escapeHtml(item.product_description || "")}</textarea></div>`;
+    <div class="field"><label>Вариант — цвет, размер или исполнение <span class="muted">(необязательно, если вариант один)</span></label><input name="variant_title" value="${escapeHtml(item.variant_title || "")}"></div>
+    <div class="field"><label for="${barcodeInputId}">Штрихкод производителя <span class="muted">(необязательно)</span></label><input id="${barcodeInputId}" name="manufacturer_barcode" data-manufacturer-barcode value="${escapeHtml(item.manufacturer_barcode || "")}" autocomplete="off" inputmode="text"><button class="button secondary full" data-barcode-camera data-barcode-target="${barcodeInputId}" type="button">📷 Сканировать камерой</button><div class="small" data-barcode-status="${barcodeInputId}"></div></div>`;
 }
 
 function renderSessionFinish() {
@@ -765,6 +888,73 @@ async function uploadNewPhoto(event) {
   } catch (error) { showToast(error.message, true); }
 }
 
+async function addDraftVariant(draftProductItemId) {
+  try {
+    await saveAllItemForms();
+    const data = new FormData();
+    data.append("draft_product_item_id", draftProductItemId);
+    await api(`/api/intake/sessions/${state.session.id}/items/new`, { method: "POST", body: data });
+    await refreshSession();
+    showToast("Вариант добавлен. Заполните его данные.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addVariantToExistingProduct(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const data = new FormData();
+  data.append("product_id", form.get("product_id"));
+  const file = form.get("file");
+  if (file?.size) data.append("file", file);
+  try {
+    await api(`/api/intake/sessions/${state.session.id}/items/new`, { method: "POST", body: data });
+    state.mode = null;
+    await refreshSession();
+    showToast("Новый вариант добавлен в приёмку");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function abandonDraftItem(itemId) {
+  if (!window.confirm("Удалить эту позицию из черновика приёмки?")) return;
+  try {
+    await flushProductAutosaves();
+    await api(`/api/intake/sessions/${state.session.id}/items/${itemId}/abandon`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "Удалено оператором из черновика" }),
+    });
+    await refreshSession();
+    showToast("Позиция удалена из черновика");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function replaceDraftImage(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const data = new FormData();
+  data.append("file", file);
+  try {
+    await flushProductAutosaves();
+    await api(`/api/intake/sessions/${state.session.id}/items/${input.dataset.replaceItemImage}/image`, { method: "PUT", body: data });
+    await refreshSession();
+    showToast("Фото обновлено");
+  } catch (error) { showToast(error.message, true); }
+}
+
+function openDraftLabel(itemId, print = false) {
+  openAuthenticatedFile(`/api/intake/sessions/${state.session.id}/items/${itemId}/labels/40x30.pdf?dpi=203`, print);
+}
+
+async function printDraftLabels(itemId, defaultQuantity) {
+  const quantity = promptLabelQuantity(defaultQuantity);
+  if (quantity === null) return;
+  try {
+    const result = await api(`/api/intake/sessions/${state.session.id}/items/${itemId}/labels/40x30/print?quantity=${quantity}`, { method: "POST" });
+    showToast(`${result.quantity} этикеток отправлено на ${result.printer_name}`);
+  } catch (error) {
+    showToast(`${error.message} Можно открыть PDF и напечатать системным способом.`, true);
+  }
+}
+
 async function addKnownItem(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
@@ -792,11 +982,42 @@ async function addKnownItem(event) {
 
 async function saveItem(event) {
   event.preventDefault();
+  const form = event.currentTarget;
   try {
-    await persistItemForm(event.currentTarget);
+    await flushProductAutosaves();
+    await persistItemForm(form);
     await refreshSession();
     showToast("Позиция сохранена");
   } catch (error) { showToast(error.message, true); }
+}
+
+const productAutosaves = new WeakMap();
+
+function bindProductAutosave(form) {
+  const entry = { dirty: false, timer: null, running: null, revision: 0 };
+  productAutosaves.set(form, entry);
+  const change = (immediate) => {
+    entry.dirty = true;
+    entry.revision += 1;
+    clearTimeout(entry.timer);
+    form.querySelector("[data-save-status]").textContent = "Ожидает сохранения…";
+    entry.timer = setTimeout(() => persistProductForm(form).catch(() => {}), immediate ? 0 : 600);
+  };
+  form.querySelectorAll("input[name], textarea[name]").forEach((input) => input.addEventListener("input", () => change(false)));
+  form.querySelectorAll("select[name]").forEach((input) => input.addEventListener("change", () => change(true)));
+  form.addEventListener("submit", (event) => { event.preventDefault(); persistProductForm(form).catch(() => {}); });
+  form.querySelector("[data-save-retry]").addEventListener("click", () => persistProductForm(form).catch(() => {}));
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if ([...document.querySelectorAll("[data-product-form]")].some((form) => productAutosaves.get(form)?.dirty)) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+
+async function flushProductAutosaves() {
+  await Promise.all([...document.querySelectorAll("[data-product-form]")].map(persistProductForm));
 }
 
 function nullableText(value) {
@@ -818,14 +1039,55 @@ function buildItemPayload(form, item) {
   };
   if (item.kind !== "existing_variant") {
     Object.assign(payload, {
-      category_id: nullableText(data.get("category_id")),
-      product_title: nullableText(data.get("product_title")),
       variant_title: nullableText(data.get("variant_title")),
-      product_description: nullableText(data.get("product_description")),
       manufacturer_barcode: nullableText(data.get("manufacturer_barcode")),
     });
   }
   return payload;
+}
+
+async function persistProductForm(form) {
+  const entry = productAutosaves.get(form);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  if (entry.running) return entry.running;
+  if (!entry.dirty) return;
+  entry.running = (async () => {
+    try {
+      while (entry.dirty) {
+        const revision = entry.revision;
+        form.querySelector("[data-save-status]").textContent = "Сохраняется…";
+        form.querySelector("[data-save-retry]").classList.add("hidden");
+        await sendProductForm(form);
+        entry.dirty = revision !== entry.revision;
+      }
+      form.querySelector("[data-save-status]").textContent = "Сохранено";
+    } catch (error) {
+      form.querySelector("[data-save-status]").textContent = `Не удалось сохранить: ${error.message}`;
+      form.querySelector("[data-save-retry]").classList.remove("hidden");
+      throw error;
+    } finally {
+      entry.running = null;
+    }
+  })();
+  return entry.running;
+}
+
+async function sendProductForm(form) {
+  const item = state.session.items.find((value) => value.id === form.dataset.productForm);
+  if (!item) return;
+  const data = new FormData(form);
+  const updated = await api(`/api/intake/sessions/${state.session.id}/items/${item.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      category_id: nullableText(data.get("category_id")),
+      product_title: nullableText(data.get("product_title")),
+      product_description: nullableText(data.get("product_description")),
+    }),
+  });
+  state.session.items = state.session.items.map((value) => value.id === updated.id ? updated : value);
+  // Refresh only backend-derived hints: never replace unsaved Variant form inputs.
+  updateItemRequirements(updated);
 }
 
 async function persistItemForm(form) {
@@ -840,7 +1102,9 @@ async function persistItemForm(form) {
 
 async function saveAllItemForms() {
   if (!state.session || state.session.status !== "draft") return;
+  const productForms = [...document.querySelectorAll("[data-product-form]")];
   const forms = [...document.querySelectorAll("[data-item-form]")];
+  await Promise.all(productForms.map(persistProductForm));
   await Promise.all(forms.map(persistItemForm));
 }
 
@@ -863,6 +1127,7 @@ async function completeSession() {
   try {
     await saveAllItemForms();
     state.result = await api(`/api/intake/sessions/${state.session.id}/complete`, { method: "POST" });
+    await loadIntakeAqsi();
     renderResult();
   } catch (error) {
     showToast(error.message, true);
@@ -884,6 +1149,16 @@ function renderResult() {
     const reasons = readiness.missing_requirements.map((value) => `<span class="chip warn">${escapeHtml(requirementLabels[value] || value)}</span>`).join("");
     return `<div class="attention-row"><strong>${escapeHtml(title)}${variant ? ` · ${escapeHtml(variant)}` : ""}</strong><div class="chips">${reasons}</div></div>`;
   }).join("");
+  const aqsiRows = state.result.items.map((mapping) => {
+    const source = state.session.items.find((item) => item.id === mapping.item_id);
+    const draftRoot = source?.draft_product_item_id ? state.session.items.find((item) => item.id === source.draft_product_item_id) : null;
+    const display = source ? state.itemDisplay.get(source.id) : null;
+    const title = source?.product_title || draftRoot?.product_title || display?.product?.title || "Товар";
+    const variant = source?.variant_title || display?.variant?.title || "";
+    const publication = state.intakeAqsi.get(mapping.variant_id);
+    const statusText = publication ? aqsiStatusText(publication) : "Не отправлен";
+    return `<div class="session-row"><span><strong>${escapeHtml(title)}${variant ? ` · ${escapeHtml(variant)}` : ""}</strong><br><span class="muted small">${escapeHtml(statusText)}</span></span></div>`;
+  }).join("");
   root.innerHTML = `<div class="shell">
     ${topbar()}
     <div class="result" style="margin-top:36px">
@@ -895,11 +1170,54 @@ function renderResult() {
         ${pending ? `<span class="chip warn">Требует внимания: ${pending}</span>` : ""}
       </div>
       ${attention ? `<div class="attention-list"><h3>Что нужно сделать дальше</h3>${attention}</div>` : ""}
+      <div class="attention-list"><h3>AQSI</h3>${aqsiRows}<button class="button full" id="publish-intake-aqsi">Отправить готовые товары в AQSI</button><button class="button ghost full" id="refresh-intake-aqsi">Обновить статусы</button></div>
       <button class="button full" id="finish-home" style="margin-top:20px">Готово</button>
     </div>
   </div>`;
   bindTopbar();
   document.querySelector("#finish-home").addEventListener("click", loadHome);
+  document.querySelector("#publish-intake-aqsi").addEventListener("click", publishIntakeAqsi);
+  document.querySelector("#refresh-intake-aqsi").addEventListener("click", refreshIntakeAqsi);
+}
+
+function aqsiStatusText(publication) {
+  if (publication.status === "published" && !publication.is_outdated) return "✓ Опубликован";
+  if (publication.status === "failed") return `Ошибка: ${publication.last_error || "публикация отклонена"}`;
+  if (publication.status === "published") return "Есть изменения — требуется повторная отправка";
+  return "Отправлен, ожидаем подтверждения";
+}
+
+async function loadIntakeAqsi() {
+  state.intakeAqsi = new Map();
+  await Promise.all(state.result.items.map(async (mapping) => {
+    try {
+      const publication = await api(`/api/publishing/aqsi/variants/${mapping.variant_id}`);
+      state.intakeAqsi.set(mapping.variant_id, publication);
+    } catch (error) {
+      if (error.message !== "AQSI publication not found.") throw error;
+    }
+  }));
+}
+
+async function publishIntakeAqsi() {
+  const readyIds = state.result.readiness.filter((item) => item.is_ready).map((item) => item.variant_id);
+  if (!readyIds.length) {
+    showToast("Нет готовых к публикации товаров", true);
+    return;
+  }
+  const results = await Promise.allSettled(readyIds.map((variantId) => api(`/api/publishing/aqsi/variants/${variantId}`, { method: "POST" })));
+  await loadIntakeAqsi();
+  renderResult();
+  const failed = results.filter((result) => result.status === "rejected").length;
+  showToast(failed ? `Не удалось отправить: ${failed}. Исправьте причины и повторите.` : "Все готовые товары отправлены в AQSI", failed > 0);
+}
+
+async function refreshIntakeAqsi() {
+  try {
+    await loadIntakeAqsi();
+    renderResult();
+    showToast("Статусы AQSI обновлены");
+  } catch (error) { showToast(error.message, true); }
 }
 
 async function openOperationsCatalog(query = "", productFilter = "all", sort = "title") {
@@ -987,8 +1305,8 @@ function renderOperationsProduct() {
   const categoryOptions = state.categories.map((category) => `<option value="${category.id}" ${category.id === product.category_id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
   const variants = product.variants.length
     ? product.variants.map((variant) => `<article class="variant-commercial-card card">
-        ${variant.primary_image_id ? `<img class="catalog-photo" data-image-id="${variant.primary_image_id}" alt="${escapeHtml(variant.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
-        <span class="variant-commercial-main"><strong>${escapeHtml(variant.title)}</strong><span class="muted small">${escapeHtml(variant.sku)}</span>${renderVariantBarcodes(variant)}
+        ${renderCatalogMedia("catalog_variant", variant.id, product)}
+        <span class="variant-commercial-main"><strong>${escapeHtml(visibleVariantTitle(variant.title, "Единственный вариант"))}</strong><span class="muted small">${escapeHtml(variant.sku)}</span>${renderVariantBarcodes(variant)}
           <span class="commercial-block"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span><button class="link-button" data-set-sale-price="${variant.id}">Изменить</button></span>
           <span class="commercial-block"><strong>Аренда</strong><span>Цена: ${variant.current_rental_price === null ? "не настроена" : formatMoney(variant.current_rental_price)}</span><span>Залог: ${variant.current_recommended_deposit === null ? "не указан" : formatMoney(variant.current_recommended_deposit)}</span><button class="link-button" data-set-rental-prices="${variant.id}">Изменить условия</button></span>
           ${renderAqsiState(variant)}
@@ -999,7 +1317,9 @@ function renderOperationsProduct() {
           <button class="button ghost compact" data-add-manufacturer-barcode="${variant.id}">Добавить штрихкод</button>
           ${Number(variant.ordinary_quantity) > 0 ? `<button class="button secondary compact" data-allocate-rental="${variant.id}">Выделить в аренду</button>` : ""}
           ${state.user?.is_admin ? `<button class="button ghost compact" data-adjust-inventory="${variant.id}">Корректировка остатка</button>` : ""}
-          ${variant.current_retail_price !== null && variant.primary_image_id ? `<button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button><button class="button compact" data-print-label="${variant.id}">Печать</button>` : ""}
+          <button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button>
+          <button class="button ghost compact" data-print-label="${variant.id}">Системная печать</button>
+          ${state.printCapability.available ? `<button class="button compact" data-direct-print-label="${variant.id}">Печать этикеток</button>` : ""}
           ${renderAqsiAction(variant)}
         </span>
       </article>`).join("")
@@ -1011,6 +1331,7 @@ function renderOperationsProduct() {
     ${topbar(true)}
     <p class="eyebrow">Карточка товара</p>
     <h1>${escapeHtml(product.title)}</h1>
+    ${renderCatalogMedia("catalog_product", product.id, product)}
     ${product.description ? `<p>${escapeHtml(product.description)}</p>` : '<p class="muted">Описание не заполнено.</p>'}
     <details class="card"><summary><strong>Управление товаром</strong></summary>
       <form id="catalog-product-form">
@@ -1041,7 +1362,6 @@ function renderOperationsProduct() {
     </section>
     <div class="section-heading"><h2>Варианты</h2><span class="muted small">${product.variant_count}</span></div>
     <div class="session-list">${variants}</div>
-    ${renderCatalogMedia(product)}
     <div class="section-heading"><h2>Предметы аренды</h2></div>
     <div class="session-list">${assets}</div>
   </div>`;
@@ -1050,7 +1370,7 @@ function renderOperationsProduct() {
   hydrateImages();
   document.querySelector("#catalog-product-form").addEventListener("submit", saveCatalogProduct);
   document.querySelector("#catalog-variant-create-form").addEventListener("submit", createCatalogVariant);
-  document.querySelector("#catalog-media-form").addEventListener("submit", uploadCatalogImage);
+  document.querySelectorAll("[data-media-upload]").forEach((input) => input.addEventListener("change", () => uploadCatalogImage(input)));
   document.querySelectorAll("[data-edit-variant]").forEach((button) => button.addEventListener("click", () => editCatalogVariant(button.dataset.editVariant)));
   document.querySelectorAll("[data-add-manufacturer-barcode]").forEach((button) => button.addEventListener("click", () => addManufacturerBarcode(button.dataset.addManufacturerBarcode)));
   document.querySelectorAll("[data-set-sale-price]").forEach((button) => button.addEventListener("click", () => editCatalogSalePrice(button.dataset.setSalePrice)));
@@ -1063,14 +1383,39 @@ function renderOperationsProduct() {
   document.querySelectorAll("[data-delete-link]").forEach((button) => button.addEventListener("click", () => deleteCatalogImageLink(button.dataset.deleteLink)));
   document.querySelectorAll("[data-open-label]").forEach((button) => button.addEventListener("click", () => openVariantLabel(button.dataset.openLabel, false)));
   document.querySelectorAll("[data-print-label]").forEach((button) => button.addEventListener("click", () => openVariantLabel(button.dataset.printLabel, true)));
+  document.querySelectorAll("[data-direct-print-label]").forEach((button) => button.addEventListener("click", () => printVariantLabels(button.dataset.directPrintLabel, 1)));
 }
 
-async function openVariantLabel(variantId, print) {
+async function openVariantLabel(variantId, print, defaultQuantity = 1) {
   const previous = localStorage.getItem("core.label-profile") || "40x30";
   const profile = await selectLabelProfile(previous, print);
   if (profile === null) return;
   localStorage.setItem("core.label-profile", profile);
-  openAuthenticatedFile(`/api/labels/variants/${variantId}/${profile}.pdf?dpi=203`, print);
+  const quantity = print ? promptLabelQuantity(defaultQuantity) : 1;
+  if (quantity === null) return;
+  openAuthenticatedFile(`/api/labels/variants/${variantId}/${profile}.pdf?dpi=203&quantity=${quantity}`, print);
+}
+
+function promptLabelQuantity(defaultQuantity) {
+  const value = window.prompt("Количество этикеток", String(defaultQuantity));
+  if (value === null) return null;
+  const quantity = Number(value);
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 500) {
+    showToast("Количество этикеток должно быть от 1 до 500", true);
+    return null;
+  }
+  return quantity;
+}
+
+async function printVariantLabels(variantId, defaultQuantity) {
+  const quantity = promptLabelQuantity(defaultQuantity);
+  if (quantity === null) return;
+  try {
+    const result = await api(`/api/labels/variants/${variantId}/40x30/print?quantity=${quantity}`, { method: "POST" });
+    showToast(`${result.quantity} этикеток отправлено на ${result.printer_name}`);
+  } catch (error) {
+    showToast(`${error.message} Можно открыть PDF и напечатать системным способом.`, true);
+  }
 }
 
 function selectLabelProfile(previous, print, context = {}) {
@@ -1182,19 +1527,27 @@ function renderAqsiAction(variant) {
   return `<button class="button ghost compact" data-publish-aqsi="${variant.id}">Синхронизировать повторно</button>`;
 }
 
-function renderCatalogMedia(product) {
-  const entityIds = new Set([product.id, ...product.variants.map((variant) => variant.id)]);
-  const links = state.operations.imageLinks.filter((link) => entityIds.has(link.entity_id));
-  const targetOptions = [`<option value="catalog_product:${product.id}">Товар целиком</option>`, ...product.variants.map((variant) => `<option value="catalog_variant:${variant.id}">Вариант: ${escapeHtml(variant.title)}</option>`)].join("");
+function renderCatalogMedia(entityType, entityId, product) {
+  const links = state.operations.imageLinks.filter((link) => link.entity_type === entityType && link.entity_id === entityId);
+  const primary = links.find((link) => link.role === "primary") || links[0];
+  const fallback = !links.length && entityType === "catalog_variant"
+    ? state.operations.imageLinks.find((link) => link.entity_type === "catalog_product" && link.entity_id === product.id && link.role === "primary")
+    : null;
+  const image = primary || fallback;
   const gallery = links.length ? links.map((link) => `<figure class="catalog-media-item">
     <img data-image-id="${link.image_id}" alt="Фото товара">
     <figcaption><span class="chip ${link.role === "primary" ? "good" : ""}">${link.role === "primary" ? "Основное" : "Галерея"}</span>
       ${link.role !== "primary" ? `<button class="link-button" data-primary-link="${link.id}">Сделать основным</button>` : ""}
       <button class="link-button danger-text" data-delete-link="${link.id}">Отвязать</button></figcaption>
   </figure>`).join("") : '<div class="empty">Фотографий пока нет</div>';
-  return `<section class="card"><div class="section-heading"><h2>Фотографии</h2><span class="muted small">${links.length}</span></div>
-    <div class="catalog-media-grid">${gallery}</div>
-    <form id="catalog-media-form"><div class="field"><label>К чему относится фото</label><select name="target">${targetOptions}</select></div><div class="field"><label>Новое фото</label><input name="file" type="file" accept="image/*" capture="environment" required></div><button class="button full" type="submit">Добавить фото</button></form>
+  return `<section class="contextual-media" aria-label="${entityType === "catalog_product" ? "Фото товара" : "Фото варианта"}">
+    ${image ? `<img class="catalog-photo" data-image-id="${image.image_id}" alt="${entityType === "catalog_product" ? "Фото товара" : "Фото варианта"}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
+    ${fallback ? '<p class="muted small">Используется общее фото товара</p>' : ""}
+    <div class="media-actions">
+      <label class="button secondary compact">Сфотографировать<input class="media-file-input" type="file" accept="image/*" capture="environment" data-media-upload="${entityType}" data-media-entity="${entityId}" aria-label="Сфотографировать"></label>
+      <label class="button secondary compact">Выбрать фото<input class="media-file-input" type="file" accept="image/*" data-media-upload="${entityType}" data-media-entity="${entityId}" aria-label="Выбрать фото"></label>
+    </div>
+    ${links.length ? `<details><summary>Фото: ${links.length} · Управление</summary><div class="catalog-media-grid">${gallery}</div></details>` : ""}
   </section>`;
 }
 
@@ -1288,19 +1641,24 @@ async function adjustInventory(variantId) {
   } catch (error) { showToast(error.message, true); }
 }
 
-async function uploadCatalogImage(event) {
-  event.preventDefault();
-  const data = new FormData(event.currentTarget);
-  const [entityType, entityId] = String(data.get("target")).split(":");
+async function uploadCatalogImage(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const entityType = input.dataset.mediaUpload;
+  const entityId = input.dataset.mediaEntity;
+  const productId = state.operations.product.id;
   const links = state.operations.imageLinks.filter((link) => link.entity_type === entityType && link.entity_id === entityId);
   const upload = new FormData();
-  upload.set("file", data.get("file"));
+  upload.set("file", file);
+  const controls = input.closest(".contextual-media").querySelectorAll("input");
+  controls.forEach((control) => { control.disabled = true; });
   try {
     const image = await api("/api/media/images/upload", { method: "POST", body: upload });
-    await api("/api/media/image-links", { method: "POST", body: JSON.stringify({ image_id: image.id, entity_type: entityType, entity_id: entityId, role: links.length ? "gallery" : "primary", sort_order: links.length }) });
-    await openOperationsProduct(state.operations.product.id);
+    await api("/api/media/image-links", { method: "POST", body: JSON.stringify({ image_id: image.id, entity_type: entityType, entity_id: entityId, role: links.some((link) => link.role === "primary") ? "gallery" : "primary", sort_order: links.length }) });
+    if (input.isConnected) await openOperationsProduct(productId);
     showToast("Фото добавлено");
   } catch (error) { showToast(error.message, true); }
+  finally { controls.forEach((control) => { control.disabled = false; }); input.value = ""; }
 }
 
 async function selectCatalogPrimary(linkId) {
