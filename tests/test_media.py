@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from struct import pack
@@ -283,6 +284,131 @@ def test_upload_rejects_invalid_image_content(upload_client: TestClient) -> None
     )
 
     assert response.status_code == 415
+
+
+@pytest.mark.parametrize("mime", [
+    "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence",
+    "application/octet-stream", "image/jpeg",
+])
+def test_heic_upload_normalizes_real_content_and_delivers_preview(
+    upload_client: TestClient, heic_bytes: bytes, mime: str,
+) -> None:
+    response = upload_client.post(
+        "/api/media/images/upload", files={"file": ("photo.bin", heic_bytes, mime)}
+    )
+    assert response.status_code == 201
+    image = response.json()
+    assert image["mime_type"] == "image/webp"
+    assert image["source_key"].endswith(".webp")
+    assert (image["width"], image["height"]) == (48, 32)
+    preview = upload_client.get(f"/api/media/images/{image['id']}/source")
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "image/webp"
+    assert image["checksum"] == sha256(preview.content).hexdigest()
+    assert image["size_bytes"] == len(preview.content)
+    assert preview.content != heic_bytes
+    with PillowImage.open(BytesIO(preview.content)) as decoded:
+        assert decoded.format == "WEBP"
+        assert decoded.getexif().get(274, 1) == 1
+        assert decoded.info.get("icc_profile")
+        assert decoded.getpixel((4, 16))[2] > 200  # Blue half rotated to the left.
+        assert decoded.getpixel((44, 16))[0] > 200
+
+
+@pytest.mark.parametrize("image_format", ["JPEG", "PNG", "WEBP"])
+def test_existing_formats_still_preserve_bytes(
+    upload_client: TestClient, image_format: str,
+) -> None:
+    content = image_bytes(image_format)
+    response = upload_client.post(
+        "/api/media/images/upload", files={"file": ("wrong.heic", content, "image/heic")}
+    )
+    assert response.status_code == 201
+    assert upload_client.get(f"/api/media/images/{response.json()['id']}/source").content == content
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_invalid_heic_has_safe_russian_error(
+    upload_client: TestClient, heic_bytes: bytes, corrupt: bool,
+) -> None:
+    content = heic_bytes[:len(heic_bytes) // 2] if corrupt else b"not an image"
+    response = upload_client.post(
+        "/api/media/images/upload", files={"file": ("photo.heic", content, "image/heic")}
+    )
+    assert response.status_code == 415
+    assert response.json()["detail"].startswith("Не удалось обработать изображение.")
+
+
+def test_heic_catalog_product_and_variant_associations(
+    upload_client: TestClient, session: Session, product: CatalogProduct, heic_bytes: bytes,
+) -> None:
+    variant = CatalogVariant(
+        product_id=product.id, title="HEIC", sku="HEIC-1", barcode="2000000000015", attributes={}
+    )
+    session.add(variant)
+    session.commit()
+    for entity_type, entity_id in [
+        ("catalog_product", product.id), ("catalog_variant", variant.id),
+    ]:
+        image = upload_client.post(
+            "/api/media/images/upload", files={"file": ("photo.heif", heic_bytes, "image/heif")}
+        ).json()
+        linked = upload_client.post("/api/media/image-links", json={
+            "image_id": image["id"], "entity_type": entity_type,
+            "entity_id": str(entity_id), "role": "primary",
+        })
+        assert linked.status_code == 201
+        primary = upload_client.get(f"/api/media/image-links/primary/{entity_type}/{entity_id}")
+        assert primary.status_code == 200
+        assert primary.json()["id"] == image["id"]
+
+
+def test_heic_pixel_limit_is_checked_before_decode(
+    upload_client: TestClient, heic_bytes: bytes, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.media.inspection import ImageInspector
+
+    monkeypatch.setattr(ImageInspector, "max_pixels", 100)
+    response = upload_client.post(
+        "/api/media/images/upload", files={"file": ("photo.heic", heic_bytes, "image/heic")}
+    )
+    assert response.status_code == 415
+
+
+def test_rejected_image_logs_safe_diagnostics(caplog: pytest.LogCaptureFixture) -> None:
+    from core.media.inspection import ImageInspector, UnsupportedImageError
+
+    with pytest.raises(UnsupportedImageError):
+        ImageInspector().inspect(b"private-photo-content")
+    assert "stage=open" in caplog.text
+    assert "bytes=21" in caplog.text
+    assert "error=UnidentifiedImageError" in caplog.text
+    assert "private-photo-content" not in caplog.text
+
+
+@pytest.mark.parametrize("mime", ["image/jpeg", "image/mpo", "application/octet-stream"])
+def test_ios_mpo_upload_normalizes_primary_photo(
+    upload_client: TestClient, mpo_bytes: bytes, mime: str,
+) -> None:
+    with PillowImage.open(BytesIO(mpo_bytes)) as original:
+        assert original.format == "MPO"
+        assert original.n_frames == 2
+    response = upload_client.post(
+        "/api/media/images/upload", files={"file": ("IMG_9978.jpg", mpo_bytes, mime)}
+    )
+    assert response.status_code == 201
+    image = response.json()
+    assert image["mime_type"] == "image/webp"
+    assert (image["width"], image["height"]) == (48, 32)
+    preview = upload_client.get(f"/api/media/images/{image['id']}/source")
+    assert preview.status_code == 200
+    with PillowImage.open(BytesIO(preview.content)) as decoded:
+        assert decoded.format == "WEBP"
+        assert getattr(decoded, "n_frames", 1) == 1
+        assert decoded.getexif().get(274, 1) == 1
+        assert decoded.info.get("icc_profile")
+        assert decoded.getpixel((4, 16))[2] > 200
+        assert decoded.getpixel((44, 16))[0] > 200
 
 
 def test_upload_rejects_unsupported_actual_format(upload_client: TestClient) -> None:

@@ -949,9 +949,9 @@ async function printDraftLabels(itemId, defaultQuantity) {
   if (quantity === null) return;
   try {
     const result = await api(`/api/intake/sessions/${state.session.id}/items/${itemId}/labels/40x30/print?quantity=${quantity}`, { method: "POST" });
-    showToast(`${result.quantity} этикеток отправлено на ${result.printer_name}`);
+    showToast(`Задание отправлено на печать · ${result.quantity} шт.`);
   } catch (error) {
-    showToast(`${error.message} Можно открыть PDF и напечатать системным способом.`, true);
+    showToast("Не удалось отправить на печать. Откройте PDF и используйте системную печать.", true);
   }
 }
 
@@ -1412,9 +1412,9 @@ async function printVariantLabels(variantId, defaultQuantity) {
   if (quantity === null) return;
   try {
     const result = await api(`/api/labels/variants/${variantId}/40x30/print?quantity=${quantity}`, { method: "POST" });
-    showToast(`${result.quantity} этикеток отправлено на ${result.printer_name}`);
+    showToast(`Задание отправлено на печать · ${result.quantity} шт.`);
   } catch (error) {
-    showToast(`${error.message} Можно открыть PDF и напечатать системным способом.`, true);
+    showToast("Не удалось отправить на печать. Откройте PDF и используйте системную печать.", true);
   }
 }
 

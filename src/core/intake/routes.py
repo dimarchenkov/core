@@ -56,7 +56,7 @@ from core.intake.schemas import (
 )
 from core.intake.service import IntakeService
 from core.labels.printing import (
-    CupsCommandLabelPrinter,
+    CupsPrintingAdapter,
     LabelPrinterUnavailableError,
     LabelPrintFailedError,
 )
@@ -459,7 +459,7 @@ def print_intake_draft_label(
     quantity: Annotated[int, Query(ge=1, le=500)] = 1,
 ) -> dict[str, object]:
     """Send a pre-completion Variant label to the configured CUPS adapter."""
-    if settings.label_printer_name is None:
+    if settings.cups_printer is None:
         raise HTTPException(status_code=503, detail="Default label printer is not configured.")
     try:
         content = service.generate(
@@ -469,9 +469,14 @@ def print_intake_draft_label(
             profile=profile,
             quantity=1,
         )
-        result = CupsCommandLabelPrinter(settings.label_printer_command).print_pdf(
+        result = CupsPrintingAdapter(
+            enabled=settings.printing_enabled,
+            server=settings.cups_server,
+            user=settings.cups_user,
+            ipp_version=settings.cups_ipp_version,
+        ).print_pdf(
             content,
-            printer_name=settings.label_printer_name,
+            printer_name=settings.cups_printer,
             profile=profile,
             quantity=quantity,
             job_name=f"Core Intake {item_id} {profile.value}",
@@ -485,7 +490,9 @@ def print_intake_draft_label(
     except LabelPrintFailedError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
+        "status": result.status,
         "printer_name": result.printer_name,
         "quantity": result.quantity,
+        "external_job_id": result.job_id,
         "job_id": result.job_id,
     }

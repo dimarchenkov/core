@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from collections.abc import Generator
 from decimal import Decimal
 
@@ -17,7 +18,9 @@ from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
 from core.labels.printing import (
+    CupsPrintingAdapter,
     LabelPrinterUnavailableError,
+    LabelPrintFailedError,
     LabelPrintResult,
     VariantLabelPrintService,
 )
@@ -314,7 +317,11 @@ def test_direct_print_uses_configured_queue_and_quantity(
             calls.append({"content": content, **kwargs})
             return LabelPrintResult(str(kwargs["printer_name"]), int(kwargs["quantity"]), "job-7")
 
-    settings = Settings(jwt_secret="test-secret", label_printer_name="Xprinter_XP_365B")
+    settings = Settings(
+        jwt_secret="test-secret", PRINTING_ENABLED=True,
+        CUPS_SERVER="print-server.local:631", CUPS_USER="operator",
+        CUPS_PRINTER="Xprinter_XP_365B", _env_file=None,
+    )
     result = VariantLabelPrintService(
         VariantLabelService(session), settings, CapturingPrinter()
     ).print(variant.id, quantity=11)
@@ -329,7 +336,7 @@ def test_direct_print_requires_configured_printer(
     session: Session,
     variant: CatalogVariant,
 ) -> None:
-    settings = Settings(jwt_secret="test-secret", label_printer_name=None, _env_file=None)
+    settings = Settings(jwt_secret="test-secret", PRINTING_ENABLED=False, _env_file=None)
     with pytest.raises(LabelPrinterUnavailableError):
         VariantLabelPrintService(VariantLabelService(session), settings).print(
             variant.id, quantity=1
@@ -381,9 +388,12 @@ def test_print_capability_reports_runtime_boundary(
     assert response.status_code == 200
     assert set(response.json()) == {
         "available",
+        "enabled",
         "command_available",
         "printer_configured",
         "printer_name",
+        "server_configured",
+        "user_configured",
         "fallback",
     }
     assert response.json()["fallback"] == "pdf"
@@ -408,7 +418,91 @@ def test_direct_print_api_returns_adapter_acknowledgement(
 
     assert response.status_code == 200
     assert response.json() == {
+        "status": "submitted",
         "printer_name": "Xprinter_XP_365B",
         "quantity": 7,
+        "external_job_id": "Xprinter_XP_365B-42",
         "job_id": "Xprinter_XP_365B-42",
     }
+
+
+def test_cups_adapter_uses_safe_remote_ipp_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("core.labels.printing.shutil.which", lambda _: "/usr/bin/lp")
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(argv=argv, kwargs=kwargs)
+        assert open(argv[-1], "rb").read() == b"%PDF-controlled"
+        return subprocess.CompletedProcess(
+            argv, 0, "request id is Xprinter_XP_365B-1184 (3 file(s))\n", ""
+        )
+
+    monkeypatch.setattr("core.labels.printing.subprocess.run", run)
+    result = CupsPrintingAdapter(
+        enabled=True, server="print-server.local:631", user="operator",
+        ipp_version="1.1",
+    ).print_pdf(
+        b"%PDF-controlled", printer_name="Xprinter_XP_365B",
+        profile=LabelProfile.COMPACT_40X30, quantity=3, job_name="Core label",
+    )
+    argv = captured["argv"]
+    assert argv[:-1] == [
+        "/usr/bin/lp", "-h", "print-server.local:631/version=1.1",
+        "-U", "operator", "-d", "Xprinter_XP_365B", "-n", "3",
+        "-t", "Core label",
+    ]
+    assert captured["kwargs"] == {
+        "check": False, "capture_output": True, "text": True, "timeout": 30,
+    }
+    assert result.status == "submitted"
+    assert result.job_id == "Xprinter_XP_365B-1184"
+
+
+@pytest.mark.parametrize(
+    ("adapter", "quantity", "exception"),
+    [
+        (CupsPrintingAdapter(enabled=False, server="s", user="u"), 1, LabelPrinterUnavailableError),
+        (CupsPrintingAdapter(enabled=True, server=None, user="u"), 1, LabelPrinterUnavailableError),
+        (CupsPrintingAdapter(enabled=True, server="s", user=None), 1, LabelPrinterUnavailableError),
+        (CupsPrintingAdapter(enabled=True, server="s", user="u"), 0, ValueError),
+        (CupsPrintingAdapter(enabled=True, server="s", user="u"), 501, ValueError),
+    ],
+)
+def test_cups_adapter_rejects_unavailable_or_invalid_input(
+    adapter: CupsPrintingAdapter, quantity: int, exception: type[Exception],
+) -> None:
+    with pytest.raises(exception):
+        adapter.print_pdf(
+            b"%PDF", printer_name="queue", profile=LabelProfile.COMPACT_40X30,
+            quantity=quantity, job_name="Core",
+        )
+
+
+def test_cups_adapter_handles_missing_client_timeout_and_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = CupsPrintingAdapter(enabled=True, server="server:631", user="operator")
+    def call() -> LabelPrintResult:
+        return adapter.print_pdf(
+            b"%PDF", printer_name="queue", profile=LabelProfile.COMPACT_40X30,
+            quantity=1, job_name="Core",
+        )
+    monkeypatch.setattr("core.labels.printing.shutil.which", lambda _: None)
+    with pytest.raises(LabelPrinterUnavailableError):
+        call()
+    monkeypatch.setattr("core.labels.printing.shutil.which", lambda _: "/usr/bin/lp")
+    monkeypatch.setattr(
+        "core.labels.printing.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("lp", 30)),
+    )
+    with pytest.raises(LabelPrintFailedError, match="did not respond"):
+        call()
+    monkeypatch.setattr(
+        "core.labels.printing.subprocess.run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, 1, "", "bad credentials: secret"),
+    )
+    with pytest.raises(LabelPrintFailedError, match="rejected") as error:
+        call()
+    assert "secret" not in str(error.value)

@@ -191,6 +191,34 @@ def test_product_autosave_partial_patches_survive_reload(
     assert resumed["quantity"] == created["quantity"]
 
 
+def test_heic_intake_product_and_variant_share_ingestion(
+    client: tuple[TestClient, User, User, Path], heic_bytes: bytes, session: Session,
+) -> None:
+    test_client, _, _, storage_root = client
+    intake = _create_session(test_client)
+    base = f"/api/intake/sessions/{intake['id']}/items"
+    root = test_client.post(
+        f"{base}/new", files={"file": ("photo.heic", heic_bytes, "image/heic")}
+    )
+    assert root.status_code == 201
+    child = test_client.post(
+        f"{base}/new", data={"draft_product_item_id": root.json()["id"]},
+        files={"file": ("photo.heif", heic_bytes, "image/heif")},
+    )
+    assert child.status_code == 201
+    for item in [root.json(), child.json()]:
+        image = session.get(Image, UUID(item["image_id"]))
+        assert image.mime_type == "image/webp"
+        with PillowImage.open(storage_root / image.source_key) as decoded:
+            assert decoded.size == (48, 32)
+        replaced = test_client.put(
+            f"{base}/{item['id']}/image",
+            files={"file": ("replacement.heic", heic_bytes, "application/octet-stream")},
+        )
+        assert replaced.status_code == 200
+        assert replaced.json()["image_id"] != item["image_id"]
+
+
 def test_session_starts_before_supplier_and_is_resumable(
     client: tuple[TestClient, User, User, Path],
     session: Session,

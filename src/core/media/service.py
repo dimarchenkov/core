@@ -104,6 +104,10 @@ class ImageService:
             raise RuntimeError("Local image storage is not configured.")
 
         inspected = self._inspector.inspect(content)
+        if inspected.normalized_content is not None:
+            content = inspected.normalized_content
+            if len(content) > self.max_source_size_bytes:
+                raise ImageFileTooLargeError
         image_id = generate_uuid_v7()
         source_key = self._storage.build_source_key(image_id, inspected.extension)
         self._storage.save_source(source_key, content)

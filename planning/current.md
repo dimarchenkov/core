@@ -12,6 +12,17 @@
 
 **Stage: User Acceptance / Real-world readiness**
 
+### UAT pass: iPhone HEIC/HEIF
+
+Общий Media ingestion декодирует HEIC/HEIF и сохраняет browser-compatible WebP;
+JPEG/PNG/WebP остаются без перекодирования. Сохранены лимиты 15 МБ / 20 млн пикселей,
+добавлены проверки ориентации, ICC, повреждённых файлов и Catalog/Intake associations.
+Присланный IMG_9978.heic успешно декодируется. Повторная загрузка из iPhone Gallery
+выявила другой фактический формат — MPO (JPEG с дополнительными изображениями).
+Добавлена нормализация его основного кадра в WebP с применением EXIF orientation.
+Declared MIME не записывался. Реальный iPhone smoke-test после исправления MPO
+остаётся обязательным. Dependency, лицензии и границы нормализации: [HEIC ingestion](../docs/heic-ingestion.md).
+
 ### UAT pass: Intake Product Autosave / Catalog Media
 
 - Product-поля черновика (category, name, description) сохраняются существующим PATCH:
@@ -54,8 +65,10 @@ Catalog. Sprint 9.11 остаётся открытым; Sprint 9.12 не нач�
 - barcode однозначно идентифицирует Variant; общий manufacturer barcode нескольких Variant не
   поддерживается;
 - camera scanning требует HTTPS deployment; ручной ввод и аппаратный scanner остаются fallback.
-- товарная этикетка 40 × 30 мм отделена от Ready-for-Sale; direct print использует настраиваемый
-  CUPS adapter при host-mode запуске, а Docker сохраняет PDF/system-print fallback.
+- товарная этикетка 40 × 30 мм отделена от Ready-for-Sale; Docker использует remote CUPS adapter
+  с explicit queue и IPP 1.1, а PDF/system-print остаётся fallback.
+- физическая remote-CUPS приёмка подтверждена: Xprinter напечатал 1 и затем 3 этикетки;
+  размер 40 × 30, ориентация и подача корректны, direct print доступен в Core UI.
 
 ## Definition of Done
 

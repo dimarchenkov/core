@@ -472,19 +472,21 @@ side effect и никогда не входит в транзакцию пров
 ```text
 Intake / Catalog UI
     -> VariantLabelPrintService
-    -> LabelPrinterAdapter
-    -> macOS CUPS queue
+    -> CupsPrintingAdapter (`lp` from cups-client)
+    -> remote CUPS over IPP
+    -> configured printer queue / OS driver
     -> Xprinter
 ```
 
-`CupsCommandLabelPrinter` использует стандартную команду `lp`, имя очереди задаётся через
-`CORE_LABEL_PRINTER_NAME` и не зашивается в бизнес-код. PDF fallback остаётся доступным всегда.
-В Docker Desktop контейнер не имеет host CUPS socket и команды `lp`, а локальный macOS CUPS не
-публикует принтеры в сеть. Поэтому direct print работает при host-mode запуске Core; для
-контейнерного deployment нужен отдельный непривилегированный host print agent. Проброс USB и
-privileged container не используются.
-Точная форма команды, хранения batch-состояния и границы существующего AQSI adapter этим
-документом не предписываются.
+`CupsPrintingAdapter` получает готовый одностраничный PDF и copies. API image содержит только
+CUPS client, не cupsd и не printer driver. `PRINTING_ENABLED`, `CUPS_SERVER`, `CUPS_USER`,
+`CUPS_PRINTER` и optional `CUPS_IPP_VERSION` задаются через environment; defaults не содержат
+инфраструктурных адресов или пользователей. Для совместимости с macOS CUPS используется
+`-h <server>/version=1.1 -U <user>`. Queue задаётся явно: printer discovery не является
+capability check. Adapter запускает фиксированный `lp` безопасным argv без shell, ограничивает
+copies 1..500, удаляет временный PDF и возвращает только `submitted`/external job id.
+Текущий Docker → remote CUPS → macOS driver → USB Xprinter путь подтверждён; host Print Agent,
+USB passthrough и privileged container не нужны. PDF/system print остаётся fallback.
 
 Архитектурный acceptance criterion:
 

@@ -63,13 +63,19 @@ def get_print_capability(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, object]:
     """Explain whether this backend runtime can submit a direct CUPS print job."""
-    command_available = shutil.which(settings.label_printer_command) is not None
-    printer_configured = settings.label_printer_name is not None
+    command_available = shutil.which("lp") is not None
+    printer_configured = all(
+        (settings.cups_server, settings.cups_user, settings.cups_printer)
+    )
+    available = settings.printing_enabled and command_available and printer_configured
     return {
-        "available": command_available and printer_configured,
+        "available": available,
+        "enabled": settings.printing_enabled,
         "command_available": command_available,
         "printer_configured": printer_configured,
-        "printer_name": settings.label_printer_name,
+        "printer_name": settings.cups_printer,
+        "server_configured": settings.cups_server is not None,
+        "user_configured": settings.cups_user is not None,
         "fallback": "pdf",
     }
 
@@ -120,8 +126,10 @@ def print_label(
     except (LabelPrintFailedError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
+        "status": result.status,
         "printer_name": result.printer_name,
         "quantity": result.quantity,
+        "external_job_id": result.job_id,
         "job_id": result.job_id,
     }
 

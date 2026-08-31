@@ -448,8 +448,6 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [x] RentalAsset / RENT labels с Code 128 и точным scan routing.
 - [ ] Custom label designer и произвольные профили размеров.
 - [ ] Mass label printing.
-- [ ] Непривилегированный macOS host print agent для direct CUPS printing из Docker Desktop;
-  очередь текущей рабочей станции — `Xprinter_XP_365B`, USB не пробрасывать в container.
 - [ ] QR for RentalAsset.
 - [ ] Scan-to-add RentalAsset into RentalOrder.
 - [ ] Scan-assisted return.
@@ -457,6 +455,13 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [ ] Batch RENT label printing.
 
 ### UX debt
+
+- [ ] HEIC UAT: проверить ранее отклонённый оригинал и реальный iPhone Gallery upload
+  в Product, Variant и Intake; ориентацию, preview и reload. Нормализация реализована,
+  но тестовый HEVC fixture не заменяет приёмку на телефоне. Текущий предел 20 млн пикселей
+  оставлен без изменений; 48 MP фото требуют отдельного решения по ресурсным лимитам.
+- [ ] Перед внешним распространением Docker image проверить лицензионные условия
+  pillow-heif binary wheels (GPLv2 / bundled LGPL codecs); см. docs/heic-ingestion.md.
 
 - [ ] Принять Product autosave и contextual Catalog Media на телефоне: дождаться
   «Сохранено», reload черновика; Camera/Gallery для Product и трёх Variant, primary/unlink
