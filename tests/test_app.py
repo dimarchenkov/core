@@ -70,11 +70,28 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Нужно указать цену" in script.text
     assert "/api/labels/variants/" in script.text
     assert "/api/labels/variants/print-capability" in script.text
+    assert 'data-print-label="${variant.id}">Системная печать' in script.text
+    assert "printVariantLabels(button.dataset.printLabel, 1)" in script.text
+    assert "openVariantLabel(button.dataset.printLabel, true)" not in script.text
+    assert "data-direct-print-label" not in script.text
+    assert "data-print-draft-system" not in script.text
     assert "groupIntakeItems" in script.text
     assert "renderProductGroup" in script.text
     assert 'pluralizeRu(productCount, "товар", "товара", "товаров")' in script.text
     assert "Варианты ·" in script.text
     assert "Удалить товар из приёмки" in script.text
+    assert "Удалить черновик приёмки" in script.text
+    assert 'state.user?.is_admin' in script.text
+    assert 'method: "DELETE"' in script.text
+    assert "Отменить действие будет нельзя" in script.text
+    assert 'data-image-preview="${image.image_id}"' in script.text
+    assert 'data-image-preview="${link.image_id}"' in script.text
+    assert "Используется общее фото товара" in script.text
+    assert "openImagePreview" in script.text
+    assert "/api/media/images/${id}/source" in script.text
+    assert 'event.key !== "Enter" && event.key !== " "' in script.text
+    assert ".image-preview-dialog" in styles.text
+    assert "object-fit: contain" in styles.text
     assert styles.status_code == 200
     assert "viewport-fit=cover" in page.text
 

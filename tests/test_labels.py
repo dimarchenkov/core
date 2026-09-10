@@ -7,6 +7,8 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from reportlab.graphics.barcode import createBarcodeDrawing
+from reportlab.lib.units import mm
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -197,7 +199,7 @@ def test_label_profiles_have_exact_single_page_media_box(
     assert b"QR" not in content
 
 
-def test_compact_label_quantity_creates_exact_page_count() -> None:
+def test_compact_product_label_is_one_canonical_document() -> None:
     content = VariantLabelRenderer().render(
         VariantLabelData(
             product_title="Нидл Nice Can",
@@ -207,10 +209,27 @@ def test_compact_label_quantity_creates_exact_page_count() -> None:
             sku="SKU-000011",
         ),
         profile=LabelProfile.COMPACT_40X30,
-        quantity=10,
     )
 
-    assert content.count(b"/Type /Page\n") == 10
+    assert content.count(b"/Type /Page\n") == 1
+
+
+def test_compact_ean13_uses_calibrated_module_and_quiet_zones() -> None:
+    renderer = VariantLabelRenderer()
+    drawing = createBarcodeDrawing(
+        "EAN13",
+        value="200000000001",
+        barWidth=renderer.ean13_x_dimension_mm * mm,
+        barHeight=12 * mm,
+        humanReadable=True,
+    )
+
+    assert renderer.ean13_x_dimension_mm == pytest.approx(0.300)
+    assert renderer.ean13_data_modules * renderer.ean13_x_dimension_mm == pytest.approx(28.5)
+    assert drawing.contents[0].barWidth / mm == pytest.approx(0.300)
+    assert drawing.contents[0]._lquiet == renderer.ean13_quiet_zone_modules
+    assert drawing.width / mm == pytest.approx(33.9)
+    assert (40 - drawing.width / mm) / 2 == pytest.approx(3.05)
 
 
 def test_default_variant_name_is_not_rendered_as_artificial_label_text() -> None:
@@ -235,6 +254,40 @@ def test_meaningful_variant_name_is_preserved_on_compact_label() -> None:
     )
 
     assert VariantLabelRenderer._combined_title(data) == "Нидл Nice Can - Dr Pepper"
+
+
+def test_compact_label_draws_product_variant_price_but_not_sku(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drawn: list[str] = []
+
+    class RecordingCanvas:
+        def setFont(self, *_: object) -> None:
+            pass
+
+        def drawString(self, _x: float, _y: float, text: str) -> None:
+            drawn.append(text)
+
+        def drawCentredString(self, x: float, _y: float, text: str) -> None:
+            assert x == pytest.approx(20 * mm)
+            drawn.append(text)
+
+    renderer = VariantLabelRenderer()
+    renderer._register_fonts()
+    monkeypatch.setattr(renderer, "_draw_barcode", lambda *_args, **_kwargs: None)
+    renderer._draw_40x30(
+        RecordingCanvas(),  # type: ignore[arg-type]
+        VariantLabelData(
+            product_title="Сыр с пенкой",
+            variant_details="Жёлтый, маленький",
+            price=Decimal("1290"),
+            barcode="2000000000015",
+            sku="SKU-SECRET",
+        ),
+    )
+
+    assert drawn == ["Сыр с пенкой", "Жёлтый, маленький", "1 290 ₽"]
+    assert all("SKU" not in value for value in drawn)
 
 
 def test_label_rejects_invalid_ean_check_digit() -> None:
@@ -262,11 +315,11 @@ def test_label_service_uses_authoritative_variant_and_price(
     assert content.startswith(b"%PDF-")
 
 
-def test_label_keeps_internal_ean_when_manufacturer_barcode_exists(
+def test_label_uses_current_external_barcode(
     session: Session,
     variant: CatalogVariant,
 ) -> None:
-    """The barcode blocker does not silently change existing product-label semantics."""
+    """Labels use the same sole operational barcode as every other consumer."""
     captured: list[VariantLabelData] = []
 
     class CapturingRenderer:
@@ -274,18 +327,16 @@ def test_label_keeps_internal_ean_when_manufacturer_barcode_exists(
             captured.append(data)
             return b"%PDF-label"
 
-    variant.barcodes.append(
-        CatalogVariantBarcode(
-            variant_id=variant.id,
-            value="4601234567893",
-            source=BarcodeSource.MANUFACTURER,
-        )
-    )
+    variant.barcode = "4601234567893"
+    variant.barcode_source = BarcodeSource.MANUFACTURER
     session.commit()
 
-    VariantLabelService(session, renderer=CapturingRenderer()).generate_58x40(variant.id)  # type: ignore[arg-type]
+    VariantLabelService(session, renderer=CapturingRenderer()).generate(  # type: ignore[arg-type]
+        variant.id,
+        LabelProfile.COMPACT_40X30,
+    )
 
-    assert captured[0].barcode == "2000000000015"
+    assert captured[0].barcode == "4601234567893"
 
 
 def test_label_service_does_not_require_ready_for_sale(
@@ -322,13 +373,16 @@ def test_direct_print_uses_configured_queue_and_quantity(
         CUPS_SERVER="print-server.local:631", CUPS_USER="operator",
         CUPS_PRINTER="Xprinter_XP_365B", _env_file=None,
     )
-    result = VariantLabelPrintService(
-        VariantLabelService(session), settings, CapturingPrinter()
-    ).print(variant.id, quantity=11)
+    labels = VariantLabelService(session)
+    canonical = labels.generate(variant.id, LabelProfile.COMPACT_40X30)
+    result = VariantLabelPrintService(labels, settings, CapturingPrinter()).print(
+        variant.id, quantity=11
+    )
 
     assert result.quantity == 11
     assert calls[0]["printer_name"] == "Xprinter_XP_365B"
     assert calls[0]["profile"] is LabelProfile.COMPACT_40X30
+    assert calls[0]["content"] == canonical
     assert bytes(calls[0]["content"]).count(b"/Type /Page\n") == 1
 
 
@@ -361,7 +415,7 @@ def test_label_api_is_authenticated_and_returns_inline_pdf(
     assert response.content.startswith(b"%PDF-")
 
 
-def test_label_api_returns_requested_number_of_exact_size_pages(
+def test_label_api_quantity_cannot_change_canonical_document(
     client: TestClient,
     variant: CatalogVariant,
     user: User,
@@ -372,7 +426,7 @@ def test_label_api_returns_requested_number_of_exact_size_pages(
     )
 
     assert response.status_code == 200
-    assert response.content.count(b"/Type /Page\n") == 3
+    assert response.content.count(b"/Type /Page\n") == 1
 
 
 def test_print_capability_reports_runtime_boundary(

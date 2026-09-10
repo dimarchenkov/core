@@ -86,11 +86,10 @@ def generate_label(
     profile: LabelProfile,
     service: Annotated[VariantLabelService, Depends(get_variant_label_service)],
     dpi: int = 203,
-    quantity: Annotated[int, Query(ge=1, le=500)] = 1,
 ) -> Response:
     """Return one exact-size vector PDF for a supported product-label profile."""
     try:
-        content = service.generate(variant_id, profile, dpi=dpi, quantity=quantity)
+        content = service.generate(variant_id, profile, dpi=dpi)
     except LabelVariantNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

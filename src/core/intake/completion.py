@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
@@ -25,7 +26,7 @@ from core.media.schemas import ImageLinkCreate
 from core.media.service import ImageLinkService
 from core.pricing.enums import PriceType
 from core.pricing.schemas import PriceCreate
-from core.pricing.service import PriceService
+from core.pricing.service import CurrentPriceNotFoundError, PriceService
 from core.readiness.service import ReadyForSaleService
 from core.receipt.posting import ReceiptPostingService
 from core.receipt.repository import ReceiptRepository
@@ -126,7 +127,9 @@ class CompleteIntakeWorkflow:
                     acquisition_cost=item.purchase_price,
                     actor_id=actor_id,
                 )
-                if item.retail_price is not None:
+                if item.retail_price is not None and self._retail_price_changed(
+                    variant_id, item.retail_price
+                ):
                     self._price_service.set_price(
                         variant_id,
                         PriceCreate(
@@ -178,6 +181,14 @@ class CompleteIntakeWorkflow:
         except Exception:
             self._session.rollback()
             raise
+
+    def _retail_price_changed(self, variant_id: UUIDv7, proposed_amount: Decimal) -> bool:
+        """Return whether completion must append a new canonical retail-price fact."""
+        try:
+            current = self._price_service.get_current_price(variant_id, PriceType.RETAIL)
+        except CurrentPriceNotFoundError:
+            return True
+        return current.amount != proposed_amount
 
     def _validate_completion(
         self,

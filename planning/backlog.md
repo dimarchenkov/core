@@ -456,6 +456,10 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 
 ### UX debt
 
+- [ ] **Activity Feed Summaries** — вместо generic «Действие» показывать человеку понятное
+  summary: тип бизнес-операции, Product/Variant и количество из фактических event data.
+  Append-only Activity events и технические event names не менять.
+
 - [ ] HEIC UAT: проверить ранее отклонённый оригинал и реальный iPhone Gallery upload
   в Product, Variant и Intake; ориентацию, preview и reload. Нормализация реализована,
   но тестовый HEVC fixture не заменяет приёмку на телефоне. Текущий предел 20 млн пикселей

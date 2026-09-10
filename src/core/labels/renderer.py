@@ -14,6 +14,16 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 
+TECHNICAL_VARIANT_NAMES = frozenset(
+    {"default", "default variant", "основной", "основной вариант"}
+)
+
+
+def meaningful_variant_name(value: str) -> str:
+    """Hide technical single-Variant titles from customer-facing product labels."""
+    normalized = value.strip()
+    return "" if normalized.casefold() in TECHNICAL_VARIANT_NAMES else normalized
+
 
 class LabelProfile(StrEnum):
     """Supported fixed physical product-label layouts."""
@@ -54,6 +64,9 @@ class VariantLabelRenderer:
         LabelProfile.STANDARD_58X40: (58 * mm, 40 * mm),
     }
     supported_dpi = frozenset({203, 300})
+    ean13_x_dimension_mm = 0.300
+    ean13_data_modules = 95
+    ean13_quiet_zone_modules = 9
 
     def render(
         self,
@@ -61,13 +74,10 @@ class VariantLabelRenderer:
         *,
         profile: LabelProfile = LabelProfile.STANDARD_58X40,
         dpi: int = 203,
-        quantity: int = 1,
     ) -> bytes:
-        """Return one single-page vector PDF with an exact physical MediaBox."""
+        """Return the canonical one-page vector PDF with an exact physical MediaBox."""
         if dpi not in self.supported_dpi:
             raise ValueError("Label printer DPI must be 203 or 300.")
-        if not 1 <= quantity <= 500:
-            raise ValueError("Label quantity must be between 1 and 500.")
         self._validate_barcode(data.barcode)
         self._register_fonts()
         width, height = self.sizes[profile]
@@ -78,33 +88,28 @@ class VariantLabelRenderer:
             pageCompression=1,
             invariant=1,
         )
-        canvas.setTitle(f"{data.sku} {profile.value} label")
-        for _ in range(quantity):
-            if profile is LabelProfile.COMPACT_40X30:
-                self._draw_40x30(canvas, data)
-            else:
-                self._draw_58x40(canvas, data)
-            canvas.showPage()
+        canvas.setTitle(f"Core product label {profile.value}")
+        if profile is LabelProfile.COMPACT_40X30:
+            self._draw_40x30(canvas, data)
+        else:
+            self._draw_58x40(canvas, data)
+        canvas.showPage()
         canvas.save()
         return output.getvalue()
 
     def _draw_40x30(self, canvas: Canvas, data: VariantLabelData) -> None:
-        """Fit sale identity, price, and a scannable barcode on 40 x 30 mm media."""
-        self._draw_wrapped(canvas, self._combined_title(data), 1.5, 26.5, 37, 7.2, 2, 3.2)
+        """Render the calibrated sale identity without compromising barcode geometry."""
+        self._draw_label_titles(canvas, data)
         if data.price is not None:
-            canvas.setFont(self.bold_font, 8.5)
-            canvas.drawCentredString(20 * mm, 18.2 * mm, self._price_text(data.price))
+            canvas.setFont(self.bold_font, 10.5)
+            canvas.drawCentredString(20 * mm, 16.8 * mm, self._price_text(data.price))
         self._draw_barcode(
             canvas,
             data.barcode,
             page_width=40 * mm,
-            width_mm=37,
-            height_mm=10.5,
-            y_mm=5.2,
+            height_mm=12,
+            y_mm=2.2,
         )
-        sku = self._truncate_text(data.sku, self.regular_font, 4.8, 37 * mm)
-        canvas.setFont(self.regular_font, 4.8)
-        canvas.drawCentredString(20 * mm, 1.3 * mm, sku)
 
     def _draw_58x40(self, canvas: Canvas, data: VariantLabelData) -> None:
         """Use the full standard label while preserving barcode quiet zones."""
@@ -119,13 +124,9 @@ class VariantLabelRenderer:
             canvas,
             data.barcode,
             page_width=58 * mm,
-            width_mm=54,
             height_mm=12,
             y_mm=4,
         )
-        sku = self._truncate_text(data.sku, self.regular_font, 5.2, 54 * mm)
-        canvas.setFont(self.regular_font, 5.2)
-        canvas.drawCentredString(29 * mm, 1.1 * mm, sku)
 
     def _draw_barcode(
         self,
@@ -133,24 +134,43 @@ class VariantLabelRenderer:
         barcode: str,
         *,
         page_width: float,
-        width_mm: float,
         height_mm: float,
         y_mm: float,
     ) -> None:
-        """Generate the stored EAN-13 directly at the layout's final vector size."""
+        """Generate vector EAN-13 at the physically calibrated module width."""
         drawing = createBarcodeDrawing(
             "EAN13",
             value=barcode[:12],
+            barWidth=self.ean13_x_dimension_mm * mm,
             barHeight=height_mm * mm,
             humanReadable=True,
         )
-        scale = min(1.0, width_mm * mm / drawing.width)
-        left = (page_width - drawing.width * scale) / 2
+        left = (page_width - drawing.width) / 2
+        if left < 0:
+            raise ValueError("Calibrated EAN-13 does not fit the selected label profile.")
         canvas.saveState()
         canvas.translate(left, y_mm * mm)
-        canvas.scale(scale, 1)
         renderPDF.draw(drawing, canvas, 0, 0)
         canvas.restoreState()
+
+    def _draw_label_titles(self, canvas: Canvas, data: VariantLabelData) -> None:
+        """Use at most two readable lines: Product, then meaningful Variant details."""
+        width = 37 * mm
+        details = self._meaningful_variant_details(data.variant_details)
+        if details:
+            lines = [
+                self._truncate_text(data.product_title.strip(), self.bold_font, 7.2, width),
+                self._truncate_text(details, self.regular_font, 6.2, width),
+            ]
+        else:
+            lines = self._wrap_text(
+                data.product_title.strip(), self.bold_font, 7.2, width, max_lines=2
+            )
+        for index, line in enumerate(lines):
+            font = self.bold_font if index == 0 else self.regular_font
+            font_size = 7.2 if index == 0 else 6.2
+            canvas.setFont(font, font_size)
+            canvas.drawString(1.5 * mm, (27 - index * 3.2) * mm, line)
 
     def _draw_wrapped(
         self,
@@ -172,12 +192,14 @@ class VariantLabelRenderer:
 
     @staticmethod
     def _combined_title(data: VariantLabelData) -> str:
-        details = data.variant_details.strip()
-        if details.casefold() in {"default", "default variant", "основной"}:
-            details = ""
+        details = VariantLabelRenderer._meaningful_variant_details(data.variant_details)
         return (
             f"{data.product_title.strip()} - {details}" if details else data.product_title.strip()
         )
+
+    @staticmethod
+    def _meaningful_variant_details(value: str) -> str:
+        return meaningful_variant_name(value)
 
     @staticmethod
     def _validate_barcode(barcode: str) -> None:
@@ -241,7 +263,7 @@ class VariantLabelRenderer:
 
     @classmethod
     def _price_text(cls, amount: Decimal) -> str:
-        return f"{cls._format_price(amount)} руб."
+        return f"{cls._format_price(amount)} ₽"
 
     @classmethod
     def _register_fonts(cls) -> None:

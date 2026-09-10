@@ -82,8 +82,13 @@ class CatalogVariant(BaseModel):
     # TODO: Revisit whether this should become variant_name or display_name.
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     sku: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
-    # Backward-compatible primary INTERNAL EAN used by existing labels/readiness projections.
-    barcode: Mapped[str] = mapped_column(String(22), nullable=False, unique=True, index=True)
+    barcode: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    barcode_source: Mapped[BarcodeSource] = mapped_column(
+        Enum(BarcodeSource, name="barcode_source", values_callable=_enum_values),
+        nullable=False,
+        default=BarcodeSource.INTERNAL,
+        server_default=BarcodeSource.INTERNAL.value,
+    )
     attributes: Mapped[dict[str, str | int | bool]] = mapped_column(
         JSON,
         nullable=False,

@@ -61,6 +61,10 @@ class CatalogVariantBarcodeConflictError(Exception):
     """Raised when one barcode is already assigned to another Variant."""
 
 
+class CatalogVariantBarcodeDeleteError(Exception):
+    """Raised when deletion is requested for a current INTERNAL barcode."""
+
+
 class CategoryService:
     """Business operations for catalog categories."""
 
@@ -289,17 +293,26 @@ class CatalogVariantService:
         if reserved_sku is None:
             identifier_number = self._repository.next_sku_number()
             sku = SkuGenerator.generate(identifier_number)
-            barcode = InternalBarcodeGenerator.generate(identifier_number)
+            internal_barcode = InternalBarcodeGenerator.generate(identifier_number)
         else:
             sku = reserved_sku
-            barcode = reserved_barcode
+            internal_barcode = reserved_barcode
+        manufacturer_barcode = data.manufacturer_barcode
+        barcode = manufacturer_barcode or internal_barcode
+        source = (
+            BarcodeSource.MANUFACTURER
+            if manufacturer_barcode is not None
+            else BarcodeSource.INTERNAL
+        )
         if self._repository.get_by_barcode(barcode) is not None:
             raise CatalogVariantBarcodeConflictError
-        manufacturer_barcode = data.manufacturer_barcode
+        if self._barcode_repository.get_by_value(barcode) is not None:
+            raise CatalogVariantBarcodeConflictError
         variant_data = data.model_dump(exclude={"manufacturer_barcode"})
         variant = CatalogVariant(
             sku=sku,
             barcode=barcode,
+            barcode_source=source,
             **variant_data,
             created_by_id=actor_id,
         )
@@ -308,16 +321,9 @@ class CatalogVariantService:
         self._register_barcode(
             variant,
             barcode,
-            BarcodeSource.INTERNAL,
+            source,
             actor_id=actor_id,
         )
-        if manufacturer_barcode is not None:
-            self._register_barcode(
-                variant,
-                manufacturer_barcode,
-                BarcodeSource.MANUFACTURER,
-                actor_id=actor_id,
-            )
         self._session.flush()
         return variant
 
@@ -328,16 +334,77 @@ class CatalogVariantService:
         *,
         actor_id: UUIDv7 | None = None,
     ) -> CatalogVariantBarcode:
-        """Idempotently register one validated manufacturer barcode."""
-        variant = self.get_variant(variant_id)
-        barcode = self._register_barcode(
-            variant,
-            value,
-            BarcodeSource.MANUFACTURER,
-            actor_id=actor_id,
+        """Compatibility facade: replace, rather than append, the operational barcode."""
+        variant = self.replace_barcode(variant_id, value, actor_id=actor_id)
+        current = self._barcode_repository.get_active_for_variant(variant.id)
+        if current is None:
+            raise RuntimeError("Current barcode history row is missing.")
+        return current
+
+    def replace_barcode(
+        self,
+        variant_id: UUIDv7,
+        value: str,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> CatalogVariant:
+        """Atomically replace the current barcode with one external operational code."""
+        variant = self._repository.get_for_update(variant_id)
+        if variant is None:
+            raise CatalogVariantNotFoundError
+        normalized = normalize_barcode(value)
+        current = self._barcode_repository.get_active_for_variant(variant.id)
+        if normalized == variant.barcode:
+            variant.barcode_source = BarcodeSource.MANUFACTURER
+            if current is not None:
+                current.source = BarcodeSource.MANUFACTURER
+                current.updated_by_id = actor_id
+            variant.updated_by_id = actor_id
+            self._session.flush()
+            return variant
+        if self._repository.get_by_barcode(normalized) is not None:
+            raise CatalogVariantBarcodeConflictError
+        if self._barcode_repository.get_by_value(normalized) is not None:
+            raise CatalogVariantBarcodeConflictError
+        if current is not None:
+            current.soft_delete(actor_id)
+        variant.barcode = normalized
+        variant.barcode_source = BarcodeSource.MANUFACTURER
+        variant.updated_by_id = actor_id
+        self._register_barcode(
+            variant, normalized, BarcodeSource.MANUFACTURER, actor_id=actor_id
         )
         self._session.flush()
-        return barcode
+        return variant
+
+    def delete_external_barcode(
+        self,
+        variant_id: UUIDv7,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> CatalogVariant:
+        """Retire one EXTERNAL barcode and atomically install a fresh INTERNAL EAN-13."""
+        variant = self._repository.get_for_update(variant_id)
+        if variant is None:
+            raise CatalogVariantNotFoundError
+        if variant.barcode_source is BarcodeSource.INTERNAL:
+            raise CatalogVariantBarcodeDeleteError
+        current = self._barcode_repository.get_active_for_variant(variant.id)
+        if current is not None:
+            current.soft_delete(actor_id)
+        while True:
+            identifier_number = self._repository.next_sku_number()
+            barcode = InternalBarcodeGenerator.generate(identifier_number)
+            if self._barcode_repository.get_by_value(barcode) is None:
+                break
+        variant.barcode = barcode
+        variant.barcode_source = BarcodeSource.INTERNAL
+        variant.updated_by_id = actor_id
+        self._register_barcode(
+            variant, barcode, BarcodeSource.INTERNAL, actor_id=actor_id
+        )
+        self._session.flush()
+        return variant
 
     def update_variant(
         self,

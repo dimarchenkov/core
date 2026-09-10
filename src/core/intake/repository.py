@@ -53,6 +53,16 @@ class IntakeSessionRepository:
         )
         return self._session.scalar(statement)
 
+    def get_for_update(self, session_id: UUIDv7) -> IntakeSession | None:
+        """Lock one active session for an administrator lifecycle command."""
+        statement = (
+            select(IntakeSession)
+            .options(selectinload(IntakeSession.items))
+            .where(IntakeSession.id == session_id, IntakeSession.deleted_at.is_(None))
+            .with_for_update()
+        )
+        return self._session.scalar(statement)
+
     def list_owned(
         self,
         owner_id: UUIDv7,

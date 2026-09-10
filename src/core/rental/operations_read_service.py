@@ -6,8 +6,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode
-from core.catalog.schemas import CatalogVariantBarcodeRead
+from core.catalog.models import CatalogProduct, CatalogVariant
 from core.inventory.service import InventoryService
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import ImageLink
@@ -63,9 +62,6 @@ class RentalOperationsReadService:
                             CatalogVariant.title.ilike(pattern),
                             CatalogVariant.sku.ilike(pattern),
                             CatalogVariant.barcode.ilike(pattern),
-                            CatalogVariant.barcodes.any(
-                                CatalogVariantBarcode.value.ilike(pattern)
-                            ),
                         )
                     ),
                 )
@@ -233,11 +229,7 @@ class RentalOperationsReadService:
                     title=variant.title,
                     sku=variant.sku,
                     barcode=variant.barcode,
-                    barcodes=[
-                        CatalogVariantBarcodeRead.model_validate(barcode)
-                        for barcode in variant.barcodes
-                        if barcode.deleted_at is None
-                    ],
+                    barcode_source=variant.barcode_source,
                     attributes=variant.attributes,
                     is_active=variant.is_active,
                     physical_quantity=balances[variant.id],
@@ -321,7 +313,7 @@ class RentalOperationsReadService:
                     CatalogProduct.title.ilike(pattern),
                     CatalogVariant.title.ilike(pattern),
                     CatalogVariant.sku.ilike(pattern),
-                    CatalogVariant.barcodes.any(CatalogVariantBarcode.value.ilike(pattern)),
+                    CatalogVariant.barcode.ilike(pattern),
                 )
             )
         records = self._session.execute(statement).all()

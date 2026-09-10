@@ -15,6 +15,7 @@ from core.catalog.schemas import (
     CatalogProductUpdate,
     CatalogVariantBarcodeCreate,
     CatalogVariantBarcodeRead,
+    CatalogVariantBarcodeReplace,
     CatalogVariantCreate,
     CatalogVariantRead,
     CatalogVariantUpdate,
@@ -28,6 +29,7 @@ from core.catalog.service import (
     CatalogProductService,
     CatalogProductSlugAlreadyExistsError,
     CatalogVariantBarcodeConflictError,
+    CatalogVariantBarcodeDeleteError,
     CatalogVariantNotFoundError,
     CatalogVariantProductError,
     CatalogVariantService,
@@ -394,7 +396,7 @@ def register_variant_barcode(
     session: Annotated[Session, Depends(get_session)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CatalogVariantBarcode:
-    """Register an additional manufacturer barcode without changing stable IDs."""
+    """Compatibility endpoint replacing the operational code with a manufacturer code."""
     if data.source is not BarcodeSource.MANUFACTURER:
         raise HTTPException(status_code=422, detail="Only manufacturer barcodes can be added.")
     try:
@@ -420,6 +422,62 @@ def register_variant_barcode(
         raise HTTPException(
             status_code=409,
             detail="Barcode is already assigned to another Variant.",
+        ) from exc
+
+
+@variant_router.put("/{variant_id}/barcode", response_model=CatalogVariantRead)
+def replace_variant_barcode(
+    variant_id: UUIDv7,
+    data: CatalogVariantBarcodeReplace,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogVariant:
+    """Replace the single operational barcode with an external code."""
+    try:
+        variant = service.replace_barcode(
+            variant_id, data.value, actor_id=_actor_id(current_user)
+        )
+        session.commit()
+        session.refresh(variant)
+        return variant
+    except CatalogVariantNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Variant not found.") from exc
+    except CatalogVariantBarcodeConflictError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail="Barcode is already assigned to another Variant."
+        ) from exc
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail="Barcode is already assigned to another Variant."
+        ) from exc
+
+
+@variant_router.delete("/{variant_id}/barcode", response_model=CatalogVariantRead)
+def delete_variant_external_barcode(
+    variant_id: UUIDv7,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogVariant:
+    """Replace an external operational barcode with a fresh Core INTERNAL EAN-13."""
+    try:
+        variant = service.delete_external_barcode(
+            variant_id, actor_id=_actor_id(current_user)
+        )
+        session.commit()
+        session.refresh(variant)
+        return variant
+    except CatalogVariantNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Variant not found.") from exc
+    except CatalogVariantBarcodeDeleteError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail="A system barcode cannot be deleted."
         ) from exc
 
 

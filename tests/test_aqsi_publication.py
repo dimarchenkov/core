@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 from core.catalog.barcodes import BarcodeSource
 from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
+from core.catalog.service import CatalogVariantService
 from core.config import Settings, get_settings
 from core.database import get_session
 from core.identity.models import User
@@ -322,32 +323,20 @@ def test_payload_builder_emits_only_minimal_confirmed_aqsi_fields(
     assert "markingType" not in payload
 
 
-def test_aqsi_prefers_suitable_manufacturer_barcode(
+def test_aqsi_uses_current_external_barcode(
     session: Session,
     variant: CatalogVariant,
     aqsi_settings: Settings,
 ) -> None:
-    """AQSI receives the manufacturer's numeric code while Core retains its internal EAN."""
-    variant.barcodes.extend(
-        [
-            CatalogVariantBarcode(
-                variant_id=variant.id,
-                value=variant.barcode,
-                source=BarcodeSource.INTERNAL,
-            ),
-            CatalogVariantBarcode(
-                variant_id=variant.id,
-                value="4601234567893",
-                source=BarcodeSource.MANUFACTURER,
-            ),
-        ]
-    )
+    """AQSI receives the same sole operational barcode stored on the Variant."""
+    variant.barcode = "4601234567893"
+    variant.barcode_source = BarcodeSource.MANUFACTURER
     session.commit()
 
     payload = AqsiPayloadBuilder(session, aqsi_settings).build_goods(variant.id).as_aqsi_json()
 
     assert payload["barcodes"] == ["4601234567893"]
-    assert variant.barcode == "2000000000015"
+    assert variant.barcode == "4601234567893"
 
 
 def test_publication_request_is_attributed_and_idempotent_while_pending(
@@ -464,6 +453,33 @@ def test_changed_price_creates_update_attempt(
     assert update.operation is PublicationOperation.UPDATE
     assert gateway.updated_goods[-1]["price"] == 299.0
     assert service.is_outdated(publication) is False
+
+
+def test_changed_operational_barcode_marks_published_goods_outdated(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+    aqsi_settings: Settings,
+) -> None:
+    """Replacing the current barcode changes the AQSI payload hash."""
+    service = AqsiPublicationService(session, aqsi_settings)
+    publication, initial, _ = service.request_publication(variant.id, actor_id=user.id)
+    processor = AqsiPublicationProcessor(
+        session,
+        aqsi_settings,
+        FakeAqsiGateway(),
+        sleeper=lambda _: None,
+    )
+    processor.process(initial.id)
+
+    CatalogVariantService(session).replace_barcode(
+        variant.id,
+        "4601234567893",
+        actor_id=user.id,
+    )
+    session.commit()
+
+    assert service.is_outdated(publication) is True
 
 
 def test_processor_accepts_aqsi_canonical_read_values(

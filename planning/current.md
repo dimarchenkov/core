@@ -12,6 +12,14 @@
 
 **Stage: User Acceptance / Real-world readiness**
 
+### UAT pass: Delete Intake Draft
+
+Administrator может удалить только незавершённый Intake Draft из его собственной страницы.
+Application workflow блокирует строку, запрещает Completed/posted Intake, удаляет зависимые
+Variant drafts до Product draft, soft-deletes draft Media по существующей политике и затем
+физически удаляет workspace. Reserved SKU/barcode не переиспользуются: общая sequence остаётся
+монотонной. Product/Variant, Inventory и проведённая история не изменяются.
+
 ### UAT pass: iPhone HEIC/HEIF
 
 Общий Media ingestion декодирует HEIC/HEIF и сохраняет browser-compatible WebP;
@@ -39,6 +47,18 @@ Declared MIME не записывался. Реальный iPhone smoke-test п
   `git diff --check` успешны; Alembic head — `0029_intake_label_identity`;
   Docker Compose работает, `/health` возвращает `{"status":"ok"}`.
 - Browser smoke: `/app` открывается, но проверка карточек остановлена на авторизации.
+
+### UAT pass: Canonical Product Label 40×30
+
+- Open PDF, Intake и Catalog direct print используют один `VariantLabelRenderer`; CUPS получает
+  готовый одностраничный PDF и отвечает только за количество копий.
+- EAN-13 рендерится vector без fit/scale: X-dimension 0,300 мм, 95 bar modules = 28,5 мм,
+  quiet zones по 9 modules; итоговая ширина символа 33,9 мм внутри MediaBox 40×30 мм.
+- На этикетке остаются Product, meaningful Variant, актуальная retail price и EAN; технический
+  default Variant и SKU не печатаются. Отсутствующая цена не заменяется нулём.
+- Автоматические и визуальные PDF-проверки пройдены. Финальная физическая приёмка открытого PDF
+  против direct CUPS и AQSI 20/20 остаётся обязательной: текущая попытка direct print завершилась
+  timeout подключения к настроенному macOS CUPS `192.168.1.209:631`.
 
 Начиная с этого Sprint номер записывается как `Epic.Sprint`, при этом номер Sprint глобальный и
 не сбрасывается между Epic. Исторические названия Sprint 1–10G сохраняются.

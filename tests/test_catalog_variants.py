@@ -110,6 +110,7 @@ def test_variant_service_generates_stable_sequential_skus(
         "title",
         "sku",
         "barcode",
+        "barcode_source",
         "attributes",
         "is_active",
         "id",
@@ -305,11 +306,11 @@ def test_gtin_with_invalid_check_digit_is_rejected() -> None:
         normalize_barcode("4601234567894")
 
 
-def test_variant_supports_multiple_globally_unique_barcodes(
+def test_variant_has_one_globally_unique_operational_barcode(
     client: TestClient,
     active_product: CatalogProduct,
 ) -> None:
-    """Internal and manufacturer codes resolve the same Variant and cannot be reassigned."""
+    """An external code is the sole operational identity and cannot be reassigned."""
     first = client.post(
         "/api/catalog/variants",
         json={
@@ -324,10 +325,8 @@ def test_variant_supports_multiple_globally_unique_barcodes(
     )
 
     assert first.status_code == 201
-    assert {(row["value"], row["source"]) for row in first.json()["barcodes"]} == {
-        ("2000000000015", BarcodeSource.INTERNAL),
-        ("4601234567893", BarcodeSource.MANUFACTURER),
-    }
+    assert first.json()["barcode"] == "4601234567893"
+    assert first.json()["barcode_source"] == BarcodeSource.MANUFACTURER
     lookup = client.get(
         "/api/catalog/variants/lookup/by-barcode",
         params={"barcode": "4601234567893"},
@@ -339,13 +338,105 @@ def test_variant_supports_multiple_globally_unique_barcodes(
         json={"value": "4601234567893", "source": "manufacturer"},
     )
     assert conflict.status_code == 409
-    repeated = client.post(
-        f"/api/catalog/variants/{first.json()['id']}/barcodes",
-        json={"value": "4601234567893", "source": "manufacturer"},
+    assert client.get(
+        "/api/catalog/variants/lookup/by-barcode",
+        params={"barcode": "2000000000015"},
+    ).status_code == 404
+
+
+def test_replacing_barcode_retires_old_scanner_identity(
+    client: TestClient,
+    session: Session,
+    active_product: CatalogProduct,
+) -> None:
+    """Replacement installs one external code and keeps the old row only as history."""
+    created = client.post(
+        "/api/catalog/variants",
+        json={"product_id": str(active_product.id), "title": "Camera body"},
+    ).json()
+    old_barcode = created["barcode"]
+
+    replaced = client.put(
+        f"/api/catalog/variants/{created['id']}/barcode",
+        json={"value": "4601234567893"},
     )
-    assert repeated.status_code == 200
-    assert repeated.json()["id"] == next(
-        row["id"]
-        for row in first.json()["barcodes"]
-        if row["source"] == BarcodeSource.MANUFACTURER
+
+    assert replaced.status_code == 200
+    assert replaced.json()["barcode"] == "4601234567893"
+    assert replaced.json()["barcode_source"] == BarcodeSource.MANUFACTURER
+    assert client.get(
+        "/api/catalog/variants/lookup/by-barcode", params={"barcode": old_barcode}
+    ).status_code == 404
+    assert client.get(
+        "/api/catalog/variants/lookup/by-barcode",
+        params={"barcode": "4601234567893"},
+    ).status_code == 200
+
+    replaced_again = client.put(
+        f"/api/catalog/variants/{created['id']}/barcode",
+        json={"value": "036000291452"},
     )
+    assert replaced_again.status_code == 200
+    assert replaced_again.json()["barcode"] == "036000291452"
+    assert replaced_again.json()["barcode_source"] == BarcodeSource.MANUFACTURER
+    assert client.get(
+        "/api/catalog/variants/lookup/by-barcode",
+        params={"barcode": "4601234567893"},
+    ).status_code == 404
+    history = session.query(CatalogVariantBarcode).order_by(
+        CatalogVariantBarcode.created_at
+    ).all()
+    assert [(row.value, row.deleted_at is None) for row in history] == [
+        (old_barcode, False),
+        ("4601234567893", False),
+        ("036000291452", True),
+    ]
+
+
+def test_deleting_external_barcode_generates_fresh_internal_identity(
+    client: TestClient,
+    session: Session,
+    active_product: CatalogProduct,
+) -> None:
+    """External deletion preserves history and never revives the reserved internal code."""
+    created = client.post(
+        "/api/catalog/variants",
+        json={
+            "product_id": str(active_product.id),
+            "title": "Camera body",
+            "manufacturer_barcode": "4601234567893",
+        },
+    ).json()
+
+    deleted = client.delete(f"/api/catalog/variants/{created['id']}/barcode")
+
+    assert deleted.status_code == 200
+    assert deleted.json()["barcode_source"] == BarcodeSource.INTERNAL
+    assert deleted.json()["barcode"].startswith("20")
+    assert deleted.json()["barcode"] != "2000000000015"
+    assert client.get(
+        "/api/catalog/variants/lookup/by-barcode",
+        params={"barcode": "4601234567893"},
+    ).status_code == 404
+    history = session.query(CatalogVariantBarcode).all()
+    assert sum(row.deleted_at is None for row in history) == 1
+    assert any(row.value == "4601234567893" and row.deleted_at is not None for row in history)
+
+
+def test_system_barcode_cannot_be_deleted(
+    client: TestClient,
+    active_product: CatalogProduct,
+) -> None:
+    """The backend protects the only system-generated operational identity."""
+    created = client.post(
+        "/api/catalog/variants",
+        json={"product_id": str(active_product.id), "title": "Camera body"},
+    ).json()
+
+    response = client.delete(f"/api/catalog/variants/{created['id']}/barcode")
+
+    assert response.status_code == 409
+    assert client.get(
+        "/api/catalog/variants/lookup/by-barcode",
+        params={"barcode": created["barcode"]},
+    ).status_code == 200

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from core.catalog.repository import CatalogProductRepository
+from core.catalog.repository import CatalogProductRepository, CatalogVariantRepository
 from core.intake.enums import IntakeItemKind
 from core.intake.repository import IntakeItemDraftRepository, IntakeSessionRepository
 from core.labels.renderer import LabelProfile, VariantLabelData, VariantLabelRenderer
@@ -21,6 +21,7 @@ class IntakeDraftLabelService:
         self._sessions = IntakeSessionRepository(session)
         self._items = IntakeItemDraftRepository(session)
         self._products = CatalogProductRepository(session)
+        self._variants = CatalogVariantRepository(session)
         self._renderer = renderer or VariantLabelRenderer()
 
     def generate(
@@ -30,7 +31,6 @@ class IntakeDraftLabelService:
         *,
         actor_id: UUIDv7,
         profile: LabelProfile,
-        quantity: int = 1,
         dpi: int = 203,
     ) -> bytes:
         """Generate labels for one owned, non-abandoned, saved draft Variant."""
@@ -40,10 +40,27 @@ class IntakeDraftLabelService:
             intake_session is None
             or item is None
             or item.abandoned_at is not None
-            or item.kind is IntakeItemKind.EXISTING_VARIANT
-            or item.reserved_sku is None
-            or item.reserved_internal_barcode is None
         ):
+            raise IntakeDraftLabelNotFoundError
+        if item.kind is IntakeItemKind.EXISTING_VARIANT:
+            variant = self._variants.get(item.variant_id) if item.variant_id is not None else None
+            if variant is None:
+                raise IntakeDraftLabelNotFoundError
+            product = self._products.get(variant.product_id)
+            if product is None:
+                raise IntakeDraftLabelNotFoundError
+            return self._renderer.render(
+                VariantLabelData(
+                    product_title=product.title,
+                    variant_details=variant.title,
+                    price=item.retail_price,
+                    barcode=variant.barcode,
+                    sku=variant.sku,
+                ),
+                profile=profile,
+                dpi=dpi,
+            )
+        if item.reserved_sku is None or item.reserved_internal_barcode is None:
             raise IntakeDraftLabelNotFoundError
         product_title = item.product_title
         if item.kind is IntakeItemKind.NEW_VARIANT:
@@ -60,10 +77,9 @@ class IntakeDraftLabelService:
                 product_title=product_title or "",
                 variant_details=item.variant_title or "Default",
                 price=item.retail_price,
-                barcode=item.reserved_internal_barcode,
+                barcode=item.manufacturer_barcode or item.reserved_internal_barcode,
                 sku=item.reserved_sku,
             ),
             profile=profile,
             dpi=dpi,
-            quantity=quantity,
         )

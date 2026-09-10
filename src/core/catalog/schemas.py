@@ -141,7 +141,7 @@ class CatalogVariantRead(CatalogVariantBase):
     id: UUIDv7
     sku: str
     barcode: str
-    barcodes: list[CatalogVariantBarcodeRead] = Field(default_factory=list)
+    barcode_source: BarcodeSource
     created_at: datetime
     updated_at: datetime
     version: int
@@ -159,4 +159,18 @@ class CatalogVariantBarcodeCreate(PydanticBaseModel):
     @classmethod
     def validate_value(cls, value: str) -> str:
         """Normalize and validate the registered code."""
+        return normalize_barcode(value)
+
+
+class CatalogVariantBarcodeReplace(PydanticBaseModel):
+    """Replace the one operational barcode with an operator-supplied external code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1, max_length=128)
+
+    @field_validator("value")
+    @classmethod
+    def validate_value(cls, value: str) -> str:
+        """Normalize and validate the replacement operational barcode."""
         return normalize_barcode(value)

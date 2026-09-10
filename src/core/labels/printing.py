@@ -180,7 +180,7 @@ class VariantLabelPrintService:
         printer_name = self._settings.cups_printer
         if printer_name is None:
             raise LabelPrinterUnavailableError("Default label printer is not configured.")
-        content = self._labels.generate(variant_id, profile, quantity=1)
+        content = self._labels.generate(variant_id, profile)
         return self._printer.print_pdf(
             content,
             printer_name=printer_name,

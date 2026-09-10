@@ -27,6 +27,12 @@ from core.intake.completion import (
     IntakeCompletionIncompleteError,
     IntakeCompletionNotFoundError,
 )
+from core.intake.deletion import (
+    DeleteIntakeDraftWorkflow,
+    IntakeDraftDeleteForbiddenError,
+    IntakeDraftDeleteNotFoundError,
+    IntakeDraftDeleteStatusError,
+)
 from core.intake.draft_service import (
     IntakeCategoryError,
     IntakeDraftWorkflow,
@@ -110,6 +116,37 @@ def get_complete_intake_workflow(
 ) -> CompleteIntakeWorkflow:
     """Provide the workflow that atomically completes an Intake session."""
     return CompleteIntakeWorkflow(session)
+
+
+def get_delete_intake_draft_workflow(
+    session: Annotated[Session, Depends(get_session)],
+) -> DeleteIntakeDraftWorkflow:
+    """Provide the administrator-only Draft deletion command."""
+    return DeleteIntakeDraftWorkflow(session)
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_intake_draft(
+    session_id: UUIDv7,
+    workflow: Annotated[DeleteIntakeDraftWorkflow, Depends(get_delete_intake_draft_workflow)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """Permanently remove a Draft workspace without touching posted business history."""
+    try:
+        workflow.delete(
+            session_id,
+            actor_id=current_user.id,
+            is_admin=current_user.is_admin,
+        )
+    except IntakeDraftDeleteForbiddenError as exc:
+        raise HTTPException(
+            status_code=403, detail="Administrator permission is required."
+        ) from exc
+    except IntakeDraftDeleteNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Intake draft not found.") from exc
+    except IntakeDraftDeleteStatusError as exc:
+        raise HTTPException(status_code=409, detail="Completed Intake cannot be deleted.") from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def get_intake_draft_label_service(
@@ -429,7 +466,6 @@ def generate_intake_draft_label(
     service: Annotated[IntakeDraftLabelService, Depends(get_intake_draft_label_service)],
     current_user: Annotated[User, Depends(get_current_user)],
     dpi: int = 203,
-    quantity: Annotated[int, Query(ge=1, le=500)] = 1,
 ) -> Response:
     """Return exact-size labels for a saved Variant before Intake completion."""
     try:
@@ -439,7 +475,6 @@ def generate_intake_draft_label(
             actor_id=current_user.id,
             profile=profile,
             dpi=dpi,
-            quantity=quantity,
         )
     except IntakeDraftLabelNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Intake Variant label is unavailable.") from exc
@@ -467,7 +502,6 @@ def print_intake_draft_label(
             item_id,
             actor_id=current_user.id,
             profile=profile,
-            quantity=1,
         )
         result = CupsPrintingAdapter(
             enabled=settings.printing_enabled,

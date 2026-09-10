@@ -140,6 +140,28 @@ test('Variant retains explicit save, Intake Product has no save button', () => {
   assert.doesNotMatch(productTemplate, /Сохранить товар/);
 });
 
+test('Selecting an existing Variant prefills its current retail price', async () => {
+  const s = setup();
+  const query = { value: 'SKU-000001' };
+  const retail = { value: '' };
+  s.context.document.querySelector = selector => ({
+    '#barcode': query,
+    '#known-retail-price': retail,
+  })[selector] || null;
+  vm.runInContext(`
+    state.products = [{id:'product', title:'Cola'}];
+    state.variants = [{id:'variant', product_id:'product', title:'Red', sku:'SKU-000001', barcode:'2000000000015'}];
+  `, s.context);
+  s.context.api = async url => {
+    assert.equal(url, '/api/pricing/variants/variant/prices/current?price_type=retail');
+    return { amount: '100.00' };
+  };
+
+  await s.context.prefillKnownRetailPrice();
+
+  assert.equal(retail.value, '100.00');
+});
+
 test('Uploads associate with their contextual Product or Variant, cancellation is a no-op', async () => {
   const s = setup();
   const calls = [];

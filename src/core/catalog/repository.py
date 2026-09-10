@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from core.catalog.models import (
@@ -132,35 +132,15 @@ class CatalogVariantRepository:
         return self._session.scalars(statement).all()
 
     def get_by_barcode(self, barcode: str) -> CatalogVariant | None:
-        """Return a variant by any globally unique registered barcode."""
-        statement = (
-            select(CatalogVariant)
-            .outerjoin(CatalogVariantBarcode)
-            .where(
-                or_(
-                    CatalogVariantBarcode.value == barcode,
-                    CatalogVariant.barcode == barcode,
-                )
-            )
-        )
+        """Return a Variant by its one current operational barcode."""
+        statement = select(CatalogVariant).where(CatalogVariant.barcode == barcode)
         return self._session.scalar(statement)
 
     def get_active_by_barcode(self, barcode: str) -> CatalogVariant | None:
-        """Return a non-archived variant by its exact barcode."""
-        statement = (
-            select(CatalogVariant)
-            .outerjoin(CatalogVariantBarcode)
-            .where(
-                or_(
-                    CatalogVariantBarcode.value == barcode,
-                    CatalogVariant.barcode == barcode,
-                ),
-                or_(
-                    CatalogVariantBarcode.id.is_(None),
-                    CatalogVariantBarcode.deleted_at.is_(None),
-                ),
-                CatalogVariant.deleted_at.is_(None),
-            )
+        """Resolve only the Variant's current operational barcode."""
+        statement = select(CatalogVariant).where(
+            CatalogVariant.barcode == barcode,
+            CatalogVariant.deleted_at.is_(None),
         )
         return self._session.scalar(statement)
 
@@ -204,3 +184,12 @@ class CatalogVariantBarcodeRepository:
             .order_by(CatalogVariantBarcode.source, CatalogVariantBarcode.value)
         )
         return self._session.scalars(statement).all()
+
+    def get_active_for_variant(self, variant_id: UUIDv7) -> CatalogVariantBarcode | None:
+        """Return the single current history row for a Variant."""
+        return self._session.scalar(
+            select(CatalogVariantBarcode).where(
+                CatalogVariantBarcode.variant_id == variant_id,
+                CatalogVariantBarcode.deleted_at.is_(None),
+            )
+        )

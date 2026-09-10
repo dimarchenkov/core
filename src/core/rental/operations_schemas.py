@@ -7,7 +7,7 @@ from enum import StrEnum
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict
 
-from core.catalog.schemas import CatalogVariantBarcodeRead
+from core.catalog.barcodes import BarcodeSource
 from core.rental.economics_schemas import (
     EfficiencyFlag,
     RentalAssetEconomicsRead,
@@ -94,7 +94,7 @@ class CatalogVariantOperationsRead(PydanticBaseModel):
     title: str
     sku: str
     barcode: str
-    barcodes: list[CatalogVariantBarcodeRead]
+    barcode_source: BarcodeSource
     attributes: dict[str, str | int | bool]
     is_active: bool
     physical_quantity: Decimal

@@ -13,6 +13,7 @@ from core.labels.renderer import (
     RentalAssetLabelRenderer,
     VariantLabelData,
     VariantLabelRenderer,
+    meaningful_variant_name,
 )
 from core.pricing.enums import PriceType
 from core.pricing.repository import PriceRepository
@@ -49,12 +50,11 @@ class VariantLabelService:
         profile: LabelProfile,
         *,
         dpi: int = 203,
-        quantity: int = 1,
         at: datetime | None = None,
     ) -> bytes:
         """Generate one fixed-profile sale label from authoritative current data."""
         return self._generate(
-            variant_id, profile=profile, dpi=dpi, quantity=quantity, at=at
+            variant_id, profile=profile, dpi=dpi, at=at
         )
 
     def generate_58x40(self, variant_id: UUIDv7, *, at: datetime | None = None) -> bytes:
@@ -63,7 +63,6 @@ class VariantLabelService:
             variant_id,
             profile=LabelProfile.STANDARD_58X40,
             dpi=203,
-            quantity=1,
             at=at,
         )
 
@@ -73,7 +72,6 @@ class VariantLabelService:
         *,
         profile: LabelProfile,
         dpi: int,
-        quantity: int,
         at: datetime | None,
     ) -> bytes:
         effective_at = at or datetime.now(UTC)
@@ -87,7 +85,9 @@ class VariantLabelService:
             raise LabelVariantNotFoundError
 
         attribute_values = [str(value) for _, value in sorted(variant.attributes.items())]
-        details = " - ".join([variant.title, *attribute_values])
+        details = " - ".join(
+            value for value in [meaningful_variant_name(variant.title), *attribute_values] if value
+        )
         return self._renderer.render(
             VariantLabelData(
                 product_title=variant.product.title,
@@ -98,7 +98,6 @@ class VariantLabelService:
             ),
             profile=profile,
             dpi=dpi,
-            quantity=quantity,
         )
 
 

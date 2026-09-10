@@ -29,6 +29,8 @@ from core.intake.schemas import (
 )
 from core.media.models import Image
 from core.media.service import ImageService
+from core.pricing.enums import PriceType
+from core.pricing.service import CurrentPriceNotFoundError, PriceService
 from core.shared.db import UUIDv7
 from core.shared.money import quantize_money
 from core.supplier.repository import SupplierRepository
@@ -87,6 +89,7 @@ class IntakeDraftWorkflow:
         self._products = CatalogProductRepository(session)
         self._categories = CategoryRepository(session)
         self._suppliers = SupplierRepository(session)
+        self._price_service = PriceService(session)
         self._reads = IntakeDraftReadService(session)
         self._activity = ActivityEventService(session)
 
@@ -139,6 +142,14 @@ class IntakeDraftWorkflow:
         )
         if variant is None or not variant.is_active:
             raise IntakeVariantError
+        retail_price = data.retail_price
+        if retail_price is None:
+            try:
+                retail_price = self._price_service.get_current_price(
+                    variant.id, PriceType.RETAIL
+                ).amount
+            except CurrentPriceNotFoundError:
+                retail_price = None
         item = IntakeItemDraft(
             session_id=session_id,
             kind=IntakeItemKind.EXISTING_VARIANT,
@@ -148,9 +159,7 @@ class IntakeDraftWorkflow:
             purchase_price=(
                 quantize_money(data.purchase_price) if data.purchase_price is not None else None
             ),
-            retail_price=(
-                quantize_money(data.retail_price) if data.retail_price is not None else None
-            ),
+            retail_price=(quantize_money(retail_price) if retail_price is not None else None),
             created_by_id=actor_id,
         )
         self._items.add(item)

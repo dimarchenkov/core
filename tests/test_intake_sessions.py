@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import UTC, datetime
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -21,9 +22,12 @@ from core.identity.dependencies import get_current_user
 from core.identity.models import User
 from core.intake.completion import CompleteIntakeWorkflow
 from core.intake.draft_service import IntakeDraftWorkflow
+from core.intake.enums import IntakeSessionStatus
+from core.intake.labels import IntakeDraftLabelService
 from core.intake.models import IntakeItemDraft, IntakeSession
 from core.intake.routes import get_intake_draft_workflow
 from core.inventory.models import StockMovement
+from core.labels.renderer import LabelProfile
 from core.main import create_app
 from core.media.enums import ImageLinkRole
 from core.media.models import Image, ImageLink
@@ -31,6 +35,7 @@ from core.media.service import ImageService
 from core.media.storage import LocalImageStorage
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
+from core.pricing.service import PriceService
 from core.receipt.models import Receipt, ReceiptItem
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
 from core.rental.models import RentalAssetRecord
@@ -191,6 +196,73 @@ def test_product_autosave_partial_patches_survive_reload(
     assert resumed["quantity"] == created["quantity"]
 
 
+def test_admin_deletes_draft_items_and_hides_it_without_business_facts(
+    client: tuple[TestClient, User, User, Path],
+    session: Session,
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+) -> None:
+    test_client, admin, _, _ = client
+    admin.is_admin = True
+    session.commit()
+    original_product_ids = set(session.scalars(select(CatalogProduct.id)))
+    original_variant_ids = set(session.scalars(select(CatalogVariant.id)))
+    intake = _create_session(test_client)
+    root = test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/new",
+        files={"file": ("root.png", _png_bytes(), "image/png")},
+    ).json()
+    child = test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/new",
+        data={"draft_product_item_id": root["id"]},
+        files={"file": ("variant.png", _png_bytes(), "image/png")},
+    ).json()
+    reserved = {(root["reserved_sku"], root["reserved_internal_barcode"]),
+                (child["reserved_sku"], child["reserved_internal_barcode"])}
+
+    response = test_client.delete(f"/api/intake/sessions/{intake['id']}")
+
+    assert response.status_code == 204
+    assert session.get(IntakeSession, UUID(intake["id"])) is None
+    assert session.scalars(
+        select(IntakeItemDraft).where(IntakeItemDraft.session_id == UUID(intake["id"]))
+    ).all() == []
+    assert all(session.get(Image, UUID(item["image_id"])).deleted_at for item in [root, child])
+    assert test_client.get(f"/api/intake/sessions/{intake['id']}").status_code == 404
+    assert all(item["id"] != intake["id"] for item in test_client.get(
+        "/api/intake/sessions?status=draft"
+    ).json())
+    assert session.scalars(select(StockMovement)).all() == []
+    assert set(session.scalars(select(CatalogProduct.id))) == original_product_ids
+    assert set(session.scalars(select(CatalogVariant.id))) == original_variant_ids
+    assert reserved  # PostgreSQL's shared sequence is not decremented by row deletion.
+    assert test_client.delete(f"/api/intake/sessions/{intake['id']}").status_code == 404
+
+
+def test_non_admin_cannot_delete_draft(
+    client: tuple[TestClient, User, User, Path], session: Session,
+) -> None:
+    test_client, employee, _, _ = client
+    assert employee.is_admin is False
+    intake = _create_session(test_client)
+    assert test_client.delete(f"/api/intake/sessions/{intake['id']}").status_code == 403
+    assert session.get(IntakeSession, UUID(intake["id"])) is not None
+
+
+def test_completed_intake_cannot_be_deleted(
+    client: tuple[TestClient, User, User, Path], session: Session,
+) -> None:
+    test_client, admin, _, _ = client
+    admin.is_admin = True
+    completed = IntakeSession(owner_id=admin.id, status=IntakeSessionStatus.COMPLETED)
+    session.add(completed)
+    session.commit()
+
+    response = test_client.delete(f"/api/intake/sessions/{completed.id}")
+
+    assert response.status_code == 409
+    assert session.get(IntakeSession, completed.id) is not None
+
+
 def test_heic_intake_product_and_variant_share_ingestion(
     client: tuple[TestClient, User, User, Path], heic_bytes: bytes, session: Session,
 ) -> None:
@@ -298,6 +370,53 @@ def test_repeat_delivery_starts_from_barcode_without_new_photo(
         "session_id": intake_session["id"],
         "kind": "existing_variant",
     }
+
+
+def test_draft_items_are_newest_first_across_add_flows_and_editing_keeps_order(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+) -> None:
+    """Every add path shares creation ordering while later edits do not reorder items."""
+    test_client, _, _, _ = client
+    _, product, variant = catalog
+    intake_session = _create_session(test_client)
+    base = f"/api/intake/sessions/{intake_session['id']}"
+
+    item_a = test_client.post(
+        f"{base}/items/existing",
+        json={"variant_id": str(variant.id)},
+    ).json()
+    item_b = test_client.post(
+        f"{base}/items/new",
+        files={"file": ("new-product.png", _png_bytes(), "image/png")},
+    ).json()
+    item_c = test_client.post(
+        f"{base}/items/new",
+        data={"product_id": str(product.id)},
+    ).json()
+
+    first_read = test_client.get(base).json()
+    assert [item["id"] for item in first_read["items"]] == [
+        item_c["id"],
+        item_b["id"],
+        item_a["id"],
+    ]
+
+    item_d = test_client.post(
+        f"{base}/items/existing",
+        json={"barcode": variant.barcode},
+    ).json()
+    second_read = test_client.get(base).json()
+    expected = [item_d["id"], item_c["id"], item_b["id"], item_a["id"]]
+    assert [item["id"] for item in second_read["items"]] == expected
+
+    edited = test_client.patch(
+        f"{base}/items/{item_b['id']}",
+        json={"product_title": "Edited later"},
+    )
+    assert edited.status_code == 200
+    final_read = test_client.get(base).json()
+    assert [item["id"] for item in final_read["items"]] == expected
 
 
 def test_new_product_must_start_with_photo_and_can_be_completed_later(
@@ -657,6 +776,248 @@ def test_optional_retail_price_is_created_atomically_during_intake(
     assert prices[0].created_by_id == first.id
 
 
+def test_repeat_intake_prefills_current_price_and_avoids_redundant_history(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """An unchanged decimal-equivalent current price remains one immutable fact."""
+    test_client, first, _, _ = client
+    _, _, variant = catalog
+    session.add(
+        Price(
+            variant_id=variant.id,
+            price_type=PriceType.RETAIL,
+            amount=Decimal("100.00"),
+            currency="RUB",
+            effective_from=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    intake_session = _create_session(test_client)
+
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={
+            "barcode": variant.barcode,
+            "quantity": 1,
+            "purchase_price": "50.00",
+        },
+    )
+    test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+    completed = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/complete"
+    )
+
+    assert item.status_code == 201
+    assert item.json()["retail_price"] == "100.00"
+    assert completed.status_code == 200
+    prices = session.scalars(
+        select(Price).where(
+            Price.variant_id == variant.id,
+            Price.price_type == PriceType.RETAIL,
+        )
+    ).all()
+    assert len(prices) == 1
+    assert prices[0].amount == Decimal("100.00")
+    assert prices[0].created_by_id is None
+    assert first.id is not None
+
+
+def test_repeat_intake_applies_changed_price_only_on_complete_and_draft_label_uses_it(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """The proposed price stays isolated in Draft and becomes append-only history at Complete."""
+    test_client, first, _, _ = client
+    _, _, variant = catalog
+    session.add(
+        Price(
+            variant_id=variant.id,
+            price_type=PriceType.RETAIL,
+            amount=Decimal("100.00"),
+            currency="RUB",
+            effective_from=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    intake_session = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={
+            "variant_id": str(variant.id),
+            "quantity": 2,
+            "purchase_price": "50.00",
+        },
+    ).json()
+    changed = test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}/items/{item['id']}",
+        json={"retail_price": "90"},
+    )
+
+    assert changed.status_code == 200
+    assert changed.json()["retail_price"] == "90.00"
+    current = PriceService(session).get_current_price(variant.id, PriceType.RETAIL)
+    assert current.amount == Decimal("100.00")
+
+    captured = []
+
+    class CapturingRenderer:
+        def render(self, data: object, **_: object) -> bytes:
+            captured.append(data)
+            return b"%PDF-draft"
+
+    content = IntakeDraftLabelService(
+        session, renderer=CapturingRenderer()  # type: ignore[arg-type]
+    ).generate(
+        UUID(intake_session["id"]),
+        UUID(item["id"]),
+        actor_id=first.id,
+        profile=LabelProfile.COMPACT_40X30,
+    )
+    assert content == b"%PDF-draft"
+    assert captured[0].price == Decimal("90.00")
+
+    test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+    completed = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/complete"
+    )
+
+    assert completed.status_code == 200
+    history = PriceService(session).get_price_history(
+        variant.id, price_type=PriceType.RETAIL
+    )
+    assert [price.amount for price in history] == [Decimal("90.00"), Decimal("100.00")]
+    assert history[0].created_by_id == first.id
+    assert PriceService(session).get_current_price(
+        variant.id, PriceType.RETAIL
+    ).amount == Decimal("90.00")
+
+
+def test_repeat_intake_updates_only_variants_with_changed_prices(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """Price comparison is per Variant rather than per Product or Intake."""
+    test_client, _, _, _ = client
+    _, product, first_variant = catalog
+    second_variant = CatalogVariant(
+        product_id=product.id,
+        title="Wide",
+        sku="SKU-000002",
+        barcode="2000000000022",
+    )
+    session.add(second_variant)
+    session.flush()
+    now = datetime.now(UTC)
+    session.add_all(
+        [
+            Price(
+                variant_id=first_variant.id,
+                price_type=PriceType.RETAIL,
+                amount=Decimal("100.00"),
+                currency="RUB",
+                effective_from=now,
+            ),
+            Price(
+                variant_id=second_variant.id,
+                price_type=PriceType.RETAIL,
+                amount=Decimal("150.00"),
+                currency="RUB",
+                effective_from=now,
+            ),
+        ]
+    )
+    session.commit()
+    intake_session = _create_session(test_client)
+    for variant, proposed in (
+        (first_variant, "100.0"),
+        (second_variant, "140.00"),
+    ):
+        response = test_client.post(
+            f"/api/intake/sessions/{intake_session['id']}/items/existing",
+            json={
+                "variant_id": str(variant.id),
+                "quantity": 1,
+                "purchase_price": "50",
+                "retail_price": proposed,
+            },
+        )
+        assert response.status_code == 201
+    test_client.patch(
+        f"/api/intake/sessions/{intake_session['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+
+    completed = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/complete"
+    )
+
+    assert completed.status_code == 200
+    first_history = PriceService(session).get_price_history(
+        first_variant.id, price_type=PriceType.RETAIL
+    )
+    second_history = PriceService(session).get_price_history(
+        second_variant.id, price_type=PriceType.RETAIL
+    )
+    assert [price.amount for price in first_history] == [Decimal("100.00")]
+    assert [price.amount for price in second_history] == [
+        Decimal("140.00"),
+        Decimal("150.00"),
+    ]
+
+
+def test_deleting_repeat_intake_draft_does_not_apply_proposed_price(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    session: Session,
+) -> None:
+    """Discarding a proposed price leaves canonical Pricing untouched."""
+    test_client, admin, _, _ = client
+    admin.is_admin = True
+    _, _, variant = catalog
+    session.add(
+        Price(
+            variant_id=variant.id,
+            price_type=PriceType.RETAIL,
+            amount=Decimal("100.00"),
+            currency="RUB",
+            effective_from=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    intake_session = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake_session['id']}/items/existing",
+        json={
+            "variant_id": str(variant.id),
+            "quantity": 1,
+            "purchase_price": "50",
+            "retail_price": "90",
+        },
+    )
+    assert item.status_code == 201
+
+    deleted = test_client.delete(f"/api/intake/sessions/{intake_session['id']}")
+
+    assert deleted.status_code == 204
+    history = PriceService(session).get_price_history(
+        variant.id, price_type=PriceType.RETAIL
+    )
+    assert [price.amount for price in history] == [Decimal("100.00")]
+
+
 def test_intake_rejects_rental_quantity_above_received_quantity(
     client: tuple[TestClient, User, User, Path],
     catalog: tuple[Category, CatalogProduct, CatalogVariant],
@@ -747,10 +1108,11 @@ def test_complete_new_product_creates_primary_image_catalog_and_stock(
     assert created_product.title == "Brand new rack"
     assert created_variant.title == "White"
     assert created_variant.created_by_id == first.id
-    assert {(row.value, row.source.value) for row in created_variant.barcodes} == {
-        (created_variant.barcode, "internal"),
-        ("4601234567893", "manufacturer"),
-    }
+    assert created_variant.barcode == "4601234567893"
+    assert created_variant.barcode_source.value == "manufacturer"
+    assert [(row.value, row.source.value) for row in created_variant.barcodes] == [
+        ("4601234567893", "manufacturer")
+    ]
     found = test_client.get(
         "/api/catalog/variants/lookup/by-barcode",
         params={"barcode": "4601234567893"},

@@ -6,7 +6,7 @@ from decimal import Decimal
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode
+from core.catalog.models import CatalogProduct, CatalogVariant
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import Image, ImageLink
 from core.pricing.enums import PriceType
@@ -100,9 +100,6 @@ class ReadyForSaleReadService:
             statement = statement.where(
                 or_(
                     CatalogVariant.barcode == normalized_search,
-                    CatalogVariant.barcodes.any(
-                        CatalogVariantBarcode.value == normalized_search
-                    ),
                     CatalogVariant.sku.ilike(contains_search, escape="\\"),
                     CatalogVariant.title.ilike(contains_search, escape="\\"),
                     CatalogProduct.title.ilike(contains_search, escape="\\"),

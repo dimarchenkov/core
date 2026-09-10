@@ -63,7 +63,10 @@ class IntakeSession(BaseModel):
     items: Mapped[list[IntakeItemDraft]] = relationship(
         "IntakeItemDraft",
         back_populates="session",
-        order_by="IntakeItemDraft.created_at",
+        order_by=lambda: (
+            IntakeItemDraft.created_at.desc(),
+            IntakeItemDraft.id.desc(),
+        ),
     )
 
 
