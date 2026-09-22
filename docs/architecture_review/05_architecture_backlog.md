@@ -625,6 +625,75 @@ currencies or recurring invalid-state bugs make primitives costly.
 Large compatibility surface and serialization friction. No work should be scheduled from this
 item without a trigger.
 
+---
+
+## AB-014 — Intake Workspace bootstrap optimization
+
+- **Priority:** P2
+- **Engineering name:** `intake-workspace-targeted-references`
+- **Status:** Open
+- **Estimate:** M
+- **Dependencies:** Server-side Catalog Variant/Product search projections
+
+### Why this is a problem
+
+Intake Workspace bootstrap still calls the unbounded Catalog Product and Variant list endpoints
+and keeps the complete result sets in browser state. The new Intake pickers no longer filter those
+collections client-side, but remaining display, draft and lookup consumers preserve the old
+full-catalog dependency. Startup payload, database work and browser memory therefore grow with the
+entire Catalog rather than with the opened Intake.
+
+### Why not now
+
+The server-side Variant and Product search removes the immediate operator blocker. Removing the
+bootstrap dependency safely requires inventorying every remaining `state.products` and
+`state.variants` consumer so existing draft rendering, barcode validation, images, labels and
+completion feedback do not regress. It is a bounded optimization, not part of the current UAT fix.
+
+### Proposed solution
+
+Remove full Product/Variant loading from `loadReferences()` for Intake. Replace remaining
+consumers with targeted server-side projections or lookups scoped to the current Intake items,
+selected search result or exact identifier. Keep Catalog search as the single discovery mechanism;
+do not introduce a second client-side cache/search implementation.
+
+### Implementation plan
+
+1. Inventory all Intake-only reads of `state.products` and `state.variants` and classify them as
+   current-draft display, exact lookup, validation or picker discovery.
+2. Extend existing Intake item/display projections where data is intrinsic to the open workspace.
+3. Use targeted Product/Variant endpoints for exact IDs and the shared Catalog search endpoints
+   for discovery.
+4. Remove `/api/catalog/products` and `/api/catalog/variants` from Intake bootstrap once no Intake
+   consumer depends on their complete collections.
+5. Preserve Catalog and Rental screens that may still load their own bounded projections; do not
+   turn this task into a global frontend-state rewrite.
+6. Add request-contract and UI tests proving an Intake with a small draft performs no unbounded
+   Catalog list request.
+7. Measure bootstrap request count and transferred payload against a large generated Catalog.
+
+### Acceptance criteria
+
+- opening or refreshing Intake does not request complete Product or Variant collections;
+- existing and newly created Intake positions still render Product/Variant names, SKU, current
+  barcode, price and image data required by the workspace;
+- repeat delivery and new-Variant selection continue through the shared bounded server-side search;
+- camera, hardware-scanner and manual barcode paths retain current behavior;
+- request count and response size are bounded by the open Intake and configured search limits, not
+  total Catalog size;
+- full automated suite and a mobile Intake smoke-test pass.
+
+### Trigger
+
+Schedule when Intake bootstrap latency or payload becomes operationally visible, before importing
+a materially larger Catalog, or when the next Intake workspace refactor touches reference loading.
+
+### Risks
+
+Removing the shared collections piecemeal can leave hidden UI paths without display metadata or
+create N+1 requests per Intake item. Prefer one workspace-scoped projection or batched targeted
+lookup over many independent browser requests.
+
 ## Recommended next sequence
 
 1. AB-004 and AB-010 — protect Inventory writes and context direction before Rental Foundation.
