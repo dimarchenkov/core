@@ -54,7 +54,7 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "📷 Сканировать камерой" in script.text
     assert "startBarcodeCamera" in script.text
     assert "acceptScannedBarcode" in script.text
-    assert "await lookupIntakeBarcode(input.value)" in script.text
+    assert 'await runCatalogSearch("variant", input.value, true)' in script.text
     assert "await identifyDraftManufacturerBarcode(input)" in script.text
     assert "@zxing/browser@0.2.1" in script.text
     assert 'facingMode: { ideal: "environment" }' in script.text

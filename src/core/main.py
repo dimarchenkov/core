@@ -7,6 +7,7 @@ from core.activity.routes import router as activity_router
 from core.admin import setup_admin
 from core.catalog.routes import product_router, variant_router
 from core.catalog.routes import router as catalog_router
+from core.catalog.search_routes import router as catalog_search_router
 from core.config import get_settings
 from core.customers.routes import router as customer_router
 from core.identity.routes import router as identity_router
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     )
     setup_admin(app)
     app.include_router(catalog_router)
+    app.include_router(catalog_search_router)
     app.include_router(product_router)
     app.include_router(variant_router)
     app.include_router(image_router)

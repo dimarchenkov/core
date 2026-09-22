@@ -3,6 +3,7 @@ const toast = document.querySelector("#toast");
 let logicalParent = () => loadHome();
 let restoringHistory = false;
 let zxingLoader = null;
+let intakeSearchTimer = null;
 
 function recordRoute(name, data = {}) {
   const route = { name, ...data };
@@ -71,6 +72,8 @@ const state = {
     result: null,
     unknown: false,
   },
+  intakeVariantSearch: { query: "", items: [], hasMore: false, loading: false, selected: null },
+  intakeProductSearch: { query: "", items: [], hasMore: false, loading: false, selected: null },
   intakeAqsi: new Map(),
   rental: {
     customers: [],
@@ -440,7 +443,8 @@ function renderWorkspace() {
     } catch (error) { showToast(error.message, true); }
   });
   document.querySelector("#photo-input")?.addEventListener("change", uploadNewPhoto);
-  document.querySelector("#barcode-lookup-form")?.addEventListener("submit", lookupIntakeBarcode);
+  bindCatalogSearch("variant");
+  bindCatalogSearch("product");
   document.querySelectorAll("[data-barcode-camera]").forEach((button) => {
     button.addEventListener("click", () => startBarcodeCamera(button.dataset.barcodeTarget));
   });
@@ -471,9 +475,6 @@ function renderWorkspace() {
       identifyDraftManufacturerBarcode(input);
     });
   });
-  document.querySelector("#barcode-create-new")?.addEventListener("click", () => document.querySelector("#photo-input").click());
-  document.querySelector("#barcode-use-existing")?.addEventListener("click", useLocatedBarcode);
-  document.querySelector("#barcode")?.addEventListener("change", prefillKnownRetailPrice);
   document.querySelector("#known-form")?.addEventListener("submit", addKnownItem);
   document.querySelector("#existing-product-variant-form")?.addEventListener("submit", addVariantToExistingProduct);
   document.querySelectorAll("[data-product-form]").forEach(bindProductAutosave);
@@ -485,6 +486,90 @@ function renderWorkspace() {
   document.querySelector("#complete-session")?.addEventListener("click", completeSession);
   document.querySelector("#delete-intake-draft")?.addEventListener("click", deleteIntakeDraft);
   hydrateImages();
+}
+
+function bindCatalogSearch(kind) {
+  const form = document.querySelector(`#${kind}-search-form`);
+  const input = document.querySelector(`#intake-${kind}-query`);
+  if (!form || !input) return;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runCatalogSearch(kind, input.value, true);
+  });
+  input.addEventListener("input", () => {
+    clearTimeout(intakeSearchTimer);
+    const value = input.value;
+    if (kind === "variant" && state.intakeBarcode.value !== value.trim()) {
+      state.intakeBarcode = { value: "", result: null, unknown: false };
+    }
+    intakeSearchTimer = setTimeout(() => runCatalogSearch(kind, value), 400);
+  });
+  bindCatalogSearchResultActions(kind);
+}
+
+function bindCatalogSearchResultActions(kind) {
+  document.querySelectorAll(`[data-select-${kind}]`).forEach((button) => {
+    button.addEventListener("click", () => selectCatalogSearchResult(kind, button.dataset[`select${kind[0].toUpperCase()}${kind.slice(1)}`]));
+  });
+  if (kind === "variant") {
+    document.querySelector("#search-create-new")?.addEventListener("click", () => document.querySelector("#photo-input").click());
+  }
+}
+
+async function runCatalogSearch(kind, rawQuery, explicit = false) {
+  const query = String(rawQuery || "").trim().replace(/\s+/g, " ");
+  const search = kind === "variant" ? state.intakeVariantSearch : state.intakeProductSearch;
+  search.query = query;
+  search.selected = null;
+  document.querySelector(kind === "variant" ? "#known-form" : "#existing-product-variant-form")?.remove();
+  const looksLikeIdentifier = /^[\p{L}\p{N}_.\/-]+$/u.test(query) && /[\d_.\/-]/.test(query);
+  if (!query || (!explicit && query.length < 2 && !looksLikeIdentifier)) {
+    search.items = [];
+    search.hasMore = false;
+    updateCatalogSearchResults(kind);
+    return;
+  }
+  search.loading = true;
+  updateCatalogSearchResults(kind);
+  try {
+    const page = await api(`/api/catalog/search/${kind === "variant" ? "variants" : "products"}?query=${encodeURIComponent(query)}&limit=12`);
+    if (search.query !== query) return;
+    search.items = page.items;
+    search.hasMore = page.has_more;
+    if (kind === "variant" && !page.items.length && (
+      /^\d{8,14}$/.test(query) || state.intakeBarcode.value === query
+    )) {
+      state.intakeBarcode = { value: query, result: null, unknown: true };
+    }
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    if (search.query === query) {
+      search.loading = false;
+      updateCatalogSearchResults(kind);
+    }
+  }
+}
+
+function updateCatalogSearchResults(kind) {
+  const target = document.querySelector(`#${kind}-search-results`);
+  if (!target) return;
+  target.innerHTML = kind === "variant" ? renderVariantSearchResults() : renderProductSearchResults();
+  bindCatalogSearchResultActions(kind);
+}
+
+function selectCatalogSearchResult(kind, id) {
+  const search = kind === "variant" ? state.intakeVariantSearch : state.intakeProductSearch;
+  search.selected = search.items.find((item) => item.id === id) || null;
+  if (!search.selected) return;
+  renderWorkspace();
+  if (kind === "variant") {
+    const input = document.querySelector("#known-retail-price");
+    if (input) input.value = search.selected.retail_price ?? "";
+    document.querySelector("#known-quantity")?.focus();
+  } else {
+    document.querySelector("#existing-product-variant-form input[type=file]")?.focus();
+  }
 }
 
 function pluralizeRu(value, one, few, many) {
@@ -557,27 +642,20 @@ async function deleteIntakeDraft() {
 }
 
 function renderActionPanel() {
-  const options = state.variants.flatMap((variant) => {
-    const product = state.products.find((item) => item.id === variant.product_id);
-    return [`<option value="${escapeHtml(variant.barcode)}">${escapeHtml(product?.title || "Товар")} · ${escapeHtml(variant.title)} · ${escapeHtml(variant.sku)}</option>`];
-  }).join("");
-  const lookup = renderIntakeBarcodeResult();
-  const productOptions = state.products.map((product) => `<option value="${product.id}">${escapeHtml(product.title)}</option>`).join("");
   return `
     <input class="hidden" id="photo-input" type="file" accept="image/*" capture="environment">
     <section class="card ${state.mode === "known" ? "" : "hidden"}">
-      <h2>Найти товар</h2>
-      <p class="muted small">Введите код вручную, отсканируйте аппаратным сканером с Enter или используйте камеру.</p>
-      <form id="barcode-lookup-form" class="search-row barcode-lookup-row">
-        <input id="intake-barcode" name="barcode" value="${escapeHtml(state.intakeBarcode.value)}" autocomplete="off" placeholder="EAN, UPC или Code 128" required autofocus>
+      <h2>Найти товар или вариант</h2>
+      <p class="muted small">Введите часть названия, SKU или штрихкод. Аппаратный сканер можно использовать прямо в этом поле.</p>
+      <form id="variant-search-form" class="search-row barcode-lookup-row">
+        <input id="intake-variant-query" name="query" value="${escapeHtml(state.intakeVariantSearch.query)}" autocomplete="off" placeholder="Название, SKU или штрихкод" required autofocus>
         <button class="button" type="submit">Найти</button>
-        <button class="button secondary" data-barcode-camera data-barcode-target="intake-barcode" type="button">📷 Сканировать камерой</button>
+        <button class="button secondary" data-barcode-camera data-barcode-target="intake-variant-query" type="button">📷 Сканировать камерой</button>
       </form>
-      <div id="barcode-lookup-result">${lookup}</div>
-      <hr>
-      <p class="muted small">Можно также найти существующую позицию по SKU или названию.</p>
-      <form id="known-form">
-        <div class="field"><label for="barcode">Штрихкод, SKU или название</label><input id="barcode" name="query" list="variant-options" autocomplete="off" required autofocus><datalist id="variant-options">${options}</datalist></div>
+      <div id="variant-search-results">${renderVariantSearchResults()}</div>
+      ${state.intakeVariantSearch.selected ? `<form id="known-form">
+        <input name="variant_id" type="hidden" value="${state.intakeVariantSearch.selected.id}">
+        <div class="selected-catalog-entity"><span class="muted small">Выбран вариант</span><strong>${escapeHtml(state.intakeVariantSearch.selected.product_title)}${meaningfulVariantSuffix(state.intakeVariantSearch.selected.title)}</strong><span class="muted small">${escapeHtml(state.intakeVariantSearch.selected.sku)} · ${escapeHtml(state.intakeVariantSearch.selected.barcode)}</span></div>
         <div class="field-row">
           <div class="field"><label for="known-quantity">Количество</label><input id="known-quantity" name="quantity" type="number" inputmode="numeric" min="1" required></div>
           <div class="field"><label for="known-price">Закупочная цена, ₽</label><input id="known-price" name="purchase_price" type="number" inputmode="decimal" min="0" step="0.01" required></div>
@@ -588,50 +666,44 @@ function renderActionPanel() {
           <p class="muted small">Оставьте 0, если вся партия предназначена для продажи.</p>
         </div>
         <button class="button full" type="submit">Добавить позицию</button>
-      </form>
+      </form>` : ""}
     </section>
     <section class="card ${state.mode === "new_variant" ? "" : "hidden"}">
       <h2>Новый вариант существующего товара</h2>
-      <form id="existing-product-variant-form">
-        <div class="field"><label>Товар</label><select name="product_id" required><option value="">Выберите товар</option>${productOptions}</select></div>
+      <p class="muted small">Найдите родительский товар по названию или по данным любого его варианта.</p>
+      <form id="product-search-form" class="search-row">
+        <input id="intake-product-query" name="query" value="${escapeHtml(state.intakeProductSearch.query)}" autocomplete="off" placeholder="Название, SKU или штрихкод" required autofocus>
+        <button class="button" type="submit">Найти</button>
+      </form>
+      <div id="product-search-results">${renderProductSearchResults()}</div>
+      ${state.intakeProductSearch.selected ? `<form id="existing-product-variant-form">
+        <input name="product_id" type="hidden" value="${state.intakeProductSearch.selected.id}">
+        <div class="selected-catalog-entity"><span class="muted small">Выбран товар</span><strong>${escapeHtml(state.intakeProductSearch.selected.title)}</strong><span class="muted small">${state.intakeProductSearch.selected.variant_count} ${pluralizeRu(state.intakeProductSearch.selected.variant_count, "вариант", "варианта", "вариантов")}</span></div>
         <div class="field"><label>Фото варианта <span class="muted">(необязательно)</span></label><input name="file" type="file" accept="image/*" capture="environment"></div>
         <button class="button full" type="submit">Добавить вариант в приёмку</button>
-      </form>
+      </form>` : ""}
     </section>`;
 }
 
-function renderIntakeBarcodeResult() {
-  const lookup = state.intakeBarcode;
-  if (lookup.result) {
-    const variant = lookup.result;
-    const product = state.products.find((item) => item.id === variant.product_id);
-    return `<div class="card"><strong>${escapeHtml(product?.title || "Товар")} · ${escapeHtml(variant.title)}</strong><div class="muted small">${escapeHtml(variant.sku)} · ${escapeHtml(lookup.value)}</div><button class="button secondary full" id="barcode-use-existing" type="button">Использовать найденный товар</button></div>`;
-  }
-  if (lookup.unknown) {
-    return `<div class="card"><strong>Код ещё не зарегистрирован</strong><div class="muted small">${escapeHtml(lookup.value)} будет сохранён как штрихкод производителя.</div><button class="button secondary full" id="barcode-create-new" type="button">Создать новый товар</button></div>`;
-  }
-  return "";
+function meaningfulVariantSuffix(title) {
+  const visible = visibleVariantTitle(title);
+  return visible ? ` · ${escapeHtml(visible)}` : "";
 }
 
-async function lookupIntakeBarcode(eventOrValue) {
-  eventOrValue?.preventDefault?.();
-  const value = typeof eventOrValue === "string"
-    ? eventOrValue
-    : String(new FormData(eventOrValue.currentTarget).get("barcode") || "").trim();
-  if (!value) return;
-  try {
-    await flushProductAutosaves();
-    const result = await lookupVariantBarcode(value);
-    state.intakeBarcode = {
-      value,
-      result: result.variant,
-      unknown: !result.variant,
-    };
-  } catch (error) {
-    showToast(error.message, true);
-    return;
-  }
-  renderWorkspace();
+function renderVariantSearchResults() {
+  const search = state.intakeVariantSearch;
+  if (search.loading) return '<p class="muted small">Ищем…</p>';
+  if (!search.query.trim()) return '<p class="muted small">Начните вводить название, SKU или штрихкод</p>';
+  if (!search.items.length) return '<div class="empty compact-empty">Ничего не найдено<br><button class="button ghost" id="search-create-new" type="button">Создать новый товар</button></div>';
+  return `${search.items.map((item) => `<article class="catalog-search-result"><div><strong>${escapeHtml(item.product_title)}</strong><div>${escapeHtml(visibleVariantTitle(item.title, "Единственный вариант"))}</div><div class="muted small">${escapeHtml(item.sku)} · ${escapeHtml(item.barcode)}${item.retail_price === null ? "" : ` · ${formatMoney(item.retail_price)}`}</div></div><button class="button secondary" data-select-variant="${item.id}" type="button">Выбрать</button></article>`).join("")}${search.hasMore ? '<p class="muted small">Найдено много вариантов. Уточните запрос.</p>' : ""}`;
+}
+
+function renderProductSearchResults() {
+  const search = state.intakeProductSearch;
+  if (search.loading) return '<p class="muted small">Ищем…</p>';
+  if (!search.query.trim()) return '<p class="muted small">Начните вводить название, SKU или штрихкод</p>';
+  if (!search.items.length) return '<div class="empty compact-empty">Ничего не найдено</div>';
+  return `${search.items.map((item) => `<article class="catalog-search-result"><div><strong>${escapeHtml(item.title)}</strong><div class="muted small">${item.variant_count} ${pluralizeRu(item.variant_count, "вариант", "варианта", "вариантов")}</div>${item.matched_variant_title ? `<div class="muted small">Совпадение: ${escapeHtml(visibleVariantTitle(item.matched_variant_title, "вариант"))} · ${escapeHtml(item.matched_sku)} · ${escapeHtml(item.matched_barcode)}</div>` : ""}</div><button class="button secondary" data-select-product="${item.id}" type="button">Выбрать</button></article>`).join("")}${search.hasMore ? '<p class="muted small">Найдено много товаров. Уточните запрос.</p>' : ""}`;
 }
 
 async function lookupVariantBarcode(value) {
@@ -642,35 +714,6 @@ async function lookupVariantBarcode(value) {
   } catch (error) {
     if (error.message === "Variant not found.") return { variant: null };
     throw error;
-  }
-}
-
-async function useLocatedBarcode() {
-  const input = document.querySelector("#barcode");
-  input.value = state.intakeBarcode.value;
-  await prefillKnownRetailPrice();
-  document.querySelector("#known-quantity").focus();
-}
-
-async function prefillKnownRetailPrice() {
-  const query = String(document.querySelector("#barcode")?.value || "").trim();
-  const normalized = query.toLocaleLowerCase("ru");
-  const variant = state.variants.find((item) => {
-    const product = state.products.find((value) => value.id === item.product_id);
-    return item.barcode === query
-      || item.sku.toLocaleLowerCase("ru") === normalized
-      || `${product?.title || ""} ${item.title}`.toLocaleLowerCase("ru") === normalized;
-  });
-  const input = document.querySelector("#known-retail-price");
-  if (!variant || !input) return;
-  try {
-    const price = await api(
-      `/api/pricing/variants/${variant.id}/prices/current?price_type=retail`,
-    );
-    input.value = price.amount;
-  } catch (error) {
-    if (error.status === 404) input.value = "";
-    else showToast(error.message, true);
   }
 }
 
@@ -708,8 +751,10 @@ async function acceptScannedBarcode(inputId, value) {
   if (!input) return;
   input.value = String(value).trim();
   input.dispatchEvent(new Event("input", { bubbles: true }));
-  if (inputId === "intake-barcode") await lookupIntakeBarcode(input.value);
-  else await identifyDraftManufacturerBarcode(input);
+  if (inputId === "intake-variant-query") {
+    state.intakeBarcode = { value: input.value, result: null, unknown: false };
+    await runCatalogSearch("variant", input.value, true);
+  } else await identifyDraftManufacturerBarcode(input);
 }
 
 async function loadZxingBrowser() {
@@ -1005,15 +1050,8 @@ async function printDraftLabels(itemId, defaultQuantity) {
 async function addKnownItem(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
-  const query = String(data.get("query")).trim();
-  const normalized = query.toLocaleLowerCase("ru");
-  const variant = state.variants.find((item) => {
-    const product = state.products.find((value) => value.id === item.product_id);
-    const matchesBarcode = item.barcode === query;
-    return matchesBarcode || item.sku.toLocaleLowerCase("ru") === normalized || `${product?.title || ""} ${item.title}`.toLocaleLowerCase("ru") === normalized;
-  });
   const payload = {
-    ...(variant ? { variant_id: variant.id } : { barcode: query }),
+    variant_id: String(data.get("variant_id")),
     quantity: Number(data.get("quantity")),
     rental_quantity: Number(data.get("rental_quantity") || 0),
     purchase_price: String(data.get("purchase_price")),

@@ -140,26 +140,35 @@ test('Variant retains explicit save, Intake Product has no save button', () => {
   assert.doesNotMatch(productTemplate, /Сохранить товар/);
 });
 
-test('Selecting an existing Variant prefills its current retail price', async () => {
+test('Intake uses bounded server-side Catalog search for both picker projections', async () => {
   const s = setup();
-  const query = { value: 'SKU-000001' };
-  const retail = { value: '' };
+  const variantResults = { innerHTML: '' };
+  const productResults = { innerHTML: '' };
   s.context.document.querySelector = selector => ({
-    '#barcode': query,
-    '#known-retail-price': retail,
+    '#variant-search-results': variantResults,
+    '#product-search-results': productResults,
   })[selector] || null;
-  vm.runInContext(`
-    state.products = [{id:'product', title:'Cola'}];
-    state.variants = [{id:'variant', product_id:'product', title:'Red', sku:'SKU-000001', barcode:'2000000000015'}];
-  `, s.context);
+  s.context.document.querySelectorAll = () => [];
+  const calls = [];
   s.context.api = async url => {
-    assert.equal(url, '/api/pricing/variants/variant/prices/current?price_type=retail');
-    return { amount: '100.00' };
+    calls.push(url);
+    if (url.includes('/variants')) return {items:[{id:'v', product_id:'p', product_title:'Ручка', title:'Синяя', sku:'SKU-1', barcode:'4601', retail_price:'100.00'}], has_more:false};
+    return {items:[{id:'p', title:'Ручка', variant_count:1, matched_variant_title:null, matched_sku:null, matched_barcode:null}], has_more:false};
   };
 
-  await s.context.prefillKnownRetailPrice();
+  await s.context.runCatalogSearch('variant', ' ручка син ', true);
+  await s.context.runCatalogSearch('product', 'SKU-1', true);
 
-  assert.equal(retail.value, '100.00');
+  assert.equal(calls[0], '/api/catalog/search/variants?query=%D1%80%D1%83%D1%87%D0%BA%D0%B0%20%D1%81%D0%B8%D0%BD&limit=12');
+  assert.equal(calls[1], '/api/catalog/search/products?query=SKU-1&limit=12');
+  assert.match(variantResults.innerHTML, /Ручка/);
+  assert.match(productResults.innerHTML, /1 вариант/);
+  const actionPanel = source.slice(
+    source.indexOf('function renderActionPanel'),
+    source.indexOf('function meaningfulVariantSuffix'),
+  );
+  assert.doesNotMatch(actionPanel, /<select name="product_id"|<datalist/);
+  assert.match(actionPanel, /Название, SKU или штрихкод/);
 });
 
 test('Uploads associate with their contextual Product or Variant, cancellation is a no-op', async () => {

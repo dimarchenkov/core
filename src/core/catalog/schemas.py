@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, computed_field, field_validator
@@ -145,6 +146,43 @@ class CatalogVariantRead(CatalogVariantBase):
     created_at: datetime
     updated_at: datetime
     version: int
+
+
+class CatalogVariantSearchResult(PydanticBaseModel):
+    """Compact existing-Variant projection for operational pickers."""
+
+    id: UUIDv7
+    product_id: UUIDv7
+    product_title: str
+    title: str
+    sku: str
+    barcode: str
+    retail_price: Decimal | None = None
+
+
+class CatalogProductSearchResult(PydanticBaseModel):
+    """Compact parent-Product projection for the new-Variant workflow."""
+
+    id: UUIDv7
+    title: str
+    variant_count: int
+    matched_variant_title: str | None = None
+    matched_sku: str | None = None
+    matched_barcode: str | None = None
+
+
+class CatalogVariantSearchPage(PydanticBaseModel):
+    """Bounded Variant search response."""
+
+    items: list[CatalogVariantSearchResult]
+    has_more: bool
+
+
+class CatalogProductSearchPage(PydanticBaseModel):
+    """Bounded, deduplicated Product search response."""
+
+    items: list[CatalogProductSearchResult]
+    has_more: bool
 
 
 class CatalogVariantBarcodeCreate(PydanticBaseModel):

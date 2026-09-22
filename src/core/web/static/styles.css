@@ -157,6 +157,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .rental-line { width: 100%; text-align: left; }
 .asset-result { display: grid; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
 .asset-result:first-child { margin-top: 14px; }
+.catalog-search-result { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 14px 0; border-top: 1px solid var(--line); }
+.catalog-search-result:first-child { margin-top: 8px; }
+.selected-catalog-entity { display: grid; gap: 4px; margin: 14px 0; padding: 14px; background: #eef4ee; border: 1px solid #cad8ca; border-radius: 14px; }
+.compact-empty { padding: 16px; }
 .asset-price { display: grid; grid-template-columns: minmax(110px, 1fr) auto; gap: 8px; }
 .asset-price input { min-height: 42px; }
 .checkout-summary {
