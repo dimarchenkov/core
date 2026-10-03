@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.catalog.models import Category
-from core.catalog.schemas import CategoryCreate, CategoryUpdate
+from core.catalog.schemas import CategoryCreate, CategoryQuickCreate, CategoryUpdate
 from core.catalog.service import CategoryService
 from core.database import get_session
 from core.identity.dependencies import get_current_user
@@ -86,6 +86,22 @@ def test_category_service_creates_child_category(session: Session) -> None:
     assert child.parent_id == parent.id
 
 
+def test_category_service_creates_operator_named_category_with_internal_slug(
+    session: Session,
+) -> None:
+    """Routine Catalog creation does not require a technical slug from the operator."""
+    service = CategoryService(session)
+    parent = service.create_category(CategoryCreate(title="Photo", slug="photo"))
+
+    child = service.create_named_category(
+        CategoryQuickCreate(title="Lenses", parent_id=parent.id)
+    )
+
+    assert child.title == "Lenses"
+    assert child.parent_id == parent.id
+    assert child.slug.startswith("category-")
+
+
 def test_category_routes_create_and_list_categories(
     client: TestClient,
     session: Session,
@@ -116,6 +132,32 @@ def test_category_routes_create_and_list_categories(
     assert list_response.status_code == 200
     assert [category["slug"] for category in list_response.json()] == ["cameras"]
     assert commit_calls == 1
+
+
+def test_category_quick_route_creates_child_without_client_slug(client: TestClient) -> None:
+    parent = client.post(
+        "/api/catalog/categories",
+        json={"title": "Photo", "slug": "photo"},
+    ).json()
+
+    response = client.post(
+        "/api/catalog/categories/quick",
+        json={"title": "Lenses", "parent_id": parent["id"]},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["title"] == "Lenses"
+    assert response.json()["parent_id"] == parent["id"]
+    assert response.json()["slug"].startswith("category-")
+
+
+def test_category_quick_route_rejects_blank_title(client: TestClient) -> None:
+    response = client.post(
+        "/api/catalog/categories/quick",
+        json={"title": "   ", "parent_id": None},
+    )
+
+    assert response.status_code == 422
 
 
 def test_category_routes_update_category(client: TestClient) -> None:

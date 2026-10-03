@@ -19,16 +19,35 @@ function routeUrl(route) {
   if (route.name === "customer") return `${window.location.pathname}#customer/${route.customerId}`;
   if (route.name === "order") return `${window.location.pathname}#order/${route.orderId}`;
   if (route.name === "intake") return `${window.location.pathname}#intake/${route.sessionId}`;
+  if (route.name === "catalog") {
+    const params = catalogUrlParams(normalizeCatalogState(route), false);
+    const query = params.toString();
+    return `${window.location.pathname}#catalog${query ? `?${query}` : ""}`;
+  }
   return `${window.location.pathname}#${route.name}`;
 }
 
 function routeFromLocation() {
-  const [name, id] = window.location.hash.slice(1).split("/");
+  const [routePath, queryString = ""] = window.location.hash.slice(1).split("?");
+  const [name, id] = routePath.split("/");
   if (name === "product" && id) return { name, productId: id };
   if (name === "customer" && id) return { name, customerId: id };
   if (name === "order" && id) return { name, orderId: id };
   if (name === "intake" && id) return { name, sessionId: id };
-  if (["workspace", "catalog", "rental"].includes(name)) return { name };
+  if (name === "catalog") {
+    const params = new URLSearchParams(queryString);
+    return {
+      name,
+      mode: params.get("mode") || undefined,
+      query: params.get("query") || undefined,
+      categoryId: params.get("category_id") || undefined,
+      supplierId: params.get("supplier_id") || undefined,
+      attention: params.getAll("attention"),
+      productFilter: params.get("product_filter") || undefined,
+      sort: params.get("sort") || undefined,
+    };
+  }
+  if (["workspace", "rental"].includes(name)) return { name };
   return null;
 }
 
@@ -37,7 +56,7 @@ async function restoreRoute(route) {
   try {
     await flushProductAutosaves();
     if (!route || route.name === "workspace") await loadHome();
-    else if (route.name === "catalog") await openOperationsCatalog();
+    else if (route.name === "catalog") await openOperationsCatalog(route);
     else if (route.name === "product") await openOperationsProduct(route.productId);
     else if (route.name === "rental") await openRentalHub();
     else if (route.name === "customer") await selectRentalCustomer(route.customerId);
@@ -60,6 +79,7 @@ const state = {
   session: null,
   categories: [],
   suppliers: [],
+  referencesLoaded: false,
   products: [],
   variants: [],
   itemDisplay: new Map(),
@@ -85,6 +105,7 @@ const state = {
     returnAssets: new Map(),
   },
   operations: {
+    catalog: null,
     products: [],
     product: null,
     imageLinks: [],
@@ -348,7 +369,7 @@ async function startSession() {
 }
 
 async function loadReferences() {
-  if (state.categories.length) return;
+  if (state.referencesLoaded) return;
   [state.categories, state.suppliers, state.products, state.variants, state.printCapability] = await Promise.all([
     api("/api/catalog/categories"),
     api("/api/purchasing/suppliers"),
@@ -356,6 +377,7 @@ async function loadReferences() {
     api("/api/catalog/variants"),
     api("/api/labels/variants/print-capability"),
   ]);
+  state.referencesLoaded = true;
 }
 
 async function openSession(id) {
@@ -1305,18 +1327,54 @@ async function refreshIntakeAqsi() {
   } catch (error) { showToast(error.message, true); }
 }
 
-async function openOperationsCatalog(query = "", productFilter = "all", sort = "title") {
+function normalizeCatalogState(value = {}) {
+  const modes = ["sale", "rental", "all"];
+  const filters = ["missing_price", "missing_photo", "aqsi_problem", "out_of_stock"];
+  const rentalFilters = ["all", "available", "needs_price", "never_rented", "paid_back", "high_expenses", "long_idle"];
+  const sorts = ["title", "revenue", "rental_count", "profit", "last_rental"];
+  const mode = modes.includes(value.mode) ? value.mode : "sale";
+  return {
+    mode,
+    query: String(value.query || "").trim(),
+    categoryId: value.categoryId || "",
+    supplierId: value.supplierId || "",
+    attention: [...new Set(Array.isArray(value.attention) ? value.attention.filter((item) => filters.includes(item)) : [])],
+    productFilter: mode === "rental" && rentalFilters.includes(value.productFilter) ? value.productFilter : "all",
+    sort: sorts.includes(value.sort) ? value.sort : "title",
+  };
+}
+
+function catalogUrlParams(value, includeDefaults = true) {
+  const catalog = normalizeCatalogState(value);
+  const params = new URLSearchParams();
+  if (includeDefaults || catalog.mode !== "sale") params.set("mode", catalog.mode);
+  if (catalog.query) params.set("query", catalog.query);
+  if (catalog.categoryId) params.set("category_id", catalog.categoryId);
+  if (catalog.supplierId) params.set("supplier_id", catalog.supplierId);
+  catalog.attention.forEach((filter) => params.append("attention", filter));
+  if (includeDefaults || catalog.productFilter !== "all") params.set("product_filter", catalog.productFilter);
+  if (includeDefaults || catalog.sort !== "title") params.set("sort", catalog.sort);
+  return params;
+}
+
+async function openOperationsCatalog(options = {}) {
   try {
-    recordRoute("catalog");
+    const catalog = normalizeCatalogState(options);
+    state.operations.catalog = catalog;
+    recordRoute("catalog", catalog);
     logicalParent = () => loadHome();
-    const params = new URLSearchParams({ product_filter: productFilter, sort });
-    if (query) params.set("query", query);
-    state.operations.products = await api(`/api/operations/catalog/products?${params}`);
-    renderOperationsCatalog(query, productFilter, sort);
+    const params = catalogUrlParams(catalog);
+    [state.operations.products, state.categories, state.suppliers] = await Promise.all([
+      api(`/api/operations/catalog/products?${params}`),
+      api("/api/catalog/categories"),
+      api("/api/purchasing/suppliers"),
+    ]);
+    renderOperationsCatalog(catalog);
   } catch (error) { showToast(error.message, true); }
 }
 
-function renderOperationsCatalog(query, productFilter, sort) {
+function renderOperationsCatalog(catalog) {
+  document.body.classList.remove("catalog-drawer-open");
   const rows = state.operations.products.length
     ? state.operations.products.map((product) => `
       <button class="catalog-row catalog-product-row" data-product-id="${product.id}">
@@ -1325,57 +1383,230 @@ function renderOperationsCatalog(query, productFilter, sort) {
         <span class="catalog-counts"><strong>${formatMoney(product.economics.profit)}</strong><span>Операционный результат</span><span>Доход ${formatMoney(product.economics.revenue)}</span><span>${product.economics.rental_count} аренд</span><span class="${product.available_asset_count ? "available-text" : "muted"}">${product.available_asset_count} доступно</span>${product.needs_initial_price ? '<span class="chip warn">Нужно указать цену</span>' : ""}</span>
       </button>`).join("")
     : '<div class="empty">Товары не найдены</div>';
-  root.innerHTML = `<div class="shell">
+  const selectedCategory = state.categories.find((category) => category.id === catalog.categoryId);
+  const categoryLabel = selectedCategory?.title || "Все";
+  root.innerHTML = `<div class="shell catalog-shell">
     ${topbar(true)}
-    <p class="eyebrow">Каталог</p>
-    <h1>Товары</h1>
-    <form class="search-row" id="operations-product-search">
-      <input name="query" value="${escapeHtml(query)}" placeholder="Название, SKU или штрихкод" autocomplete="off">
-      <button class="button" type="submit">Найти</button>
-    </form>
-    <div class="filter-bar" data-product-filters>
-      ${operationsFilterButton("all", "Все", productFilter)}
-      ${operationsFilterButton("rental", "Для аренды", productFilter)}
-      ${operationsFilterButton("available", "Есть доступные", productFilter)}
-      ${operationsFilterButton("needs_price", "Нужно указать цену", productFilter)}
-      ${operationsFilterButton("never_rented", "Не сдавался", productFilter)}
-      ${operationsFilterButton("paid_back", "Окупился", productFilter)}
-      ${operationsFilterButton("high_expenses", "Высокие расходы", productFilter)}
-      ${operationsFilterButton("long_idle", "Давно не сдавался", productFilter)}
+    <div class="catalog-heading"><div><p class="eyebrow">Каталог</p><h1>Товары</h1></div><button class="button" id="catalog-new-product" type="button">＋ Новый товар</button></div>
+    <div class="catalog-workspace">
+      <aside class="catalog-sidebar" aria-label="Навигация и фильтры каталога">
+        ${renderCatalogCategoryNavigation(catalog)}
+        <button class="button secondary full catalog-category-entry" data-open-category-create type="button">＋ Категория</button>
+        <div class="divider"></div>
+        ${renderCatalogFilters(catalog, false)}
+      </aside>
+      <div class="catalog-main">
+        <nav class="catalog-modes" aria-label="Режим каталога">
+          ${catalogModeButton("sale", "Продажа", catalog.mode)}
+          ${catalogModeButton("rental", "Аренда", catalog.mode)}
+          ${catalogModeButton("all", "Все", catalog.mode)}
+        </nav>
+        <form class="search-row catalog-search" id="operations-product-search" role="search">
+          <label class="visually-hidden" for="catalog-query">Название, SKU или штрихкод</label>
+          <input id="catalog-query" name="query" value="${escapeHtml(catalog.query)}" placeholder="Название, SKU или штрихкод" autocomplete="off">
+          <button class="button" type="submit">Найти</button>
+        </form>
+        <div class="catalog-mobile-controls">
+          <button class="button secondary" id="open-category-drawer" type="button">Категория: ${escapeHtml(categoryLabel)} <span aria-hidden="true">⌄</span></button>
+          <button class="button secondary" id="open-filter-drawer" type="button">Фильтры${catalogFilterCount(catalog) ? ` · ${catalogFilterCount(catalog)}` : ""}</button>
+        </div>
+        <section class="catalog-results" aria-label="Список товаров">
+          <div class="catalog-results-head"><span class="muted small">Найдено: ${state.operations.products.length}</span>${renderCatalogSort(catalog)}</div>
+          <div class="session-list">${rows}</div>
+        </section>
+      </div>
     </div>
-    <div class="field sort-field"><label>Сортировка</label><select id="operations-product-sort">
-      <option value="title" ${sort === "title" ? "selected" : ""}>По названию</option>
-      <option value="revenue" ${sort === "revenue" ? "selected" : ""}>По доходу</option>
-      <option value="rental_count" ${sort === "rental_count" ? "selected" : ""}>По количеству аренд</option>
-      <option value="profit" ${sort === "profit" ? "selected" : ""}>По операционному результату</option>
-      <option value="last_rental" ${sort === "last_rental" ? "selected" : ""}>По последней аренде</option>
-    </select></div>
-    <div class="session-list">${rows}</div>
+    <dialog class="catalog-drawer" id="catalog-category-dialog" aria-labelledby="category-dialog-title">
+      <div class="catalog-drawer-head"><h2 id="category-dialog-title">Категории</h2><button class="drawer-close" type="button" aria-label="Закрыть">×</button></div>
+      ${renderCatalogCategoryNavigation(catalog)}
+      <button class="button secondary full catalog-category-entry" data-open-category-create type="button">＋ Категория</button>
+    </dialog>
+    <dialog class="catalog-drawer" id="catalog-filter-dialog" aria-labelledby="filter-dialog-title">
+      <form id="catalog-mobile-filter-form">
+        <div class="catalog-drawer-head"><h2 id="filter-dialog-title">Фильтры</h2><button class="drawer-close" type="button" aria-label="Закрыть">×</button></div>
+        ${renderCatalogFilters(catalog, true)}
+        <div class="catalog-drawer-actions"><button class="button secondary" id="catalog-filters-reset" type="button">Сбросить</button><button class="button" type="submit">Показать товары</button></div>
+      </form>
+    </dialog>
+    ${renderCategoryCreateDialog()}
   </div>`;
   bindTopbar();
   hydrateImages();
   bindImagePreviews();
+  bindCatalogShell(catalog);
+}
+
+function catalogModeButton(value, label, active) {
+  return `<button class="catalog-mode ${value === active ? "active" : ""}" data-catalog-mode="${value}" type="button" aria-pressed="${value === active}">${label}</button>`;
+}
+
+function catalogFilterCount(catalog) {
+  return catalog.attention.length + (catalog.supplierId ? 1 : 0) + (catalog.productFilter !== "all" ? 1 : 0);
+}
+
+function renderCatalogCategoryNavigation(catalog) {
+  const categories = state.categories.filter((category) => category.is_active);
+  const children = new Map();
+  categories.forEach((category) => {
+    const parent = categories.some((item) => item.id === category.parent_id) ? category.parent_id : null;
+    children.set(parent, [...(children.get(parent) || []), category]);
+  });
+  const branch = (parentId, depth = 0, visited = new Set()) => (children.get(parentId) || []).map((category) => {
+    if (visited.has(category.id)) return "";
+    const nextVisited = new Set(visited).add(category.id);
+    return `<li><button class="category-link ${catalog.categoryId === category.id ? "active" : ""}" data-category-id="${category.id}" type="button" style="--category-depth:${Math.min(depth, 3)}" aria-pressed="${catalog.categoryId === category.id}">${escapeHtml(category.title)}</button>${children.has(category.id) ? `<ul>${branch(category.id, depth + 1, nextVisited)}</ul>` : ""}</li>`;
+  }).join("");
+  return `<div class="catalog-category-nav"><h2>Категории</h2><ul><li><button class="category-link ${catalog.categoryId ? "" : "active"}" data-category-id="" type="button" aria-pressed="${!catalog.categoryId}">Все товары</button></li>${branch(null)}</ul></div>`;
+}
+
+function renderCategoryCreateDialog() {
+  const categories = state.categories.filter((category) => category.is_active);
+  const byParent = new Map();
+  categories.forEach((category) => {
+    const parent = categories.some((item) => item.id === category.parent_id) ? category.parent_id : null;
+    byParent.set(parent, [...(byParent.get(parent) || []), category]);
+  });
+  const options = (parentId, depth = 0, visited = new Set()) => (byParent.get(parentId) || []).map((category) => {
+    if (visited.has(category.id)) return "";
+    const nextVisited = new Set(visited).add(category.id);
+    return `<option value="${category.id}">${escapeHtml(`${"— ".repeat(Math.min(depth, 3))}${category.title}`)}</option>${options(category.id, depth + 1, nextVisited)}`;
+  }).join("");
+  return `<dialog class="catalog-drawer catalog-category-create" id="catalog-category-create-dialog" aria-labelledby="category-create-title">
+    <form id="catalog-category-create-form">
+      <div class="catalog-drawer-head"><h2 id="category-create-title">Новая категория</h2><button class="drawer-close" type="button" aria-label="Закрыть">×</button></div>
+      <div class="field"><label for="catalog-category-title">Название</label><input id="catalog-category-title" name="title" maxlength="255" autocomplete="off" required autofocus></div>
+      <div class="field"><label for="catalog-category-parent">Родительская категория <span class="muted">(необязательно)</span></label><select id="catalog-category-parent" name="parent_id"><option value="">Без родительской категории</option>${options(null)}</select></div>
+      <div class="catalog-drawer-actions"><button class="button secondary" data-category-create-cancel type="button">Отмена</button><button class="button" type="submit">Создать</button></div>
+    </form>
+  </dialog>`;
+}
+
+function renderCatalogFilters(catalog, mobile) {
+  const prefix = mobile ? "mobile" : "desktop";
+  const attention = [
+    ["missing_price", "Нет цены"],
+    ["missing_photo", "Нет фото"],
+    ["aqsi_problem", "AQSI: проблема / не опубликовано"],
+    ["out_of_stock", "Остаток ≤ 0"],
+  ].map(([value, label]) => `<label class="catalog-check"><input type="checkbox" name="attention" value="${value}" ${catalog.attention.includes(value) ? "checked" : ""} ${mobile ? "" : "data-desktop-attention"}><span>${label}</span></label>`).join("");
+  const suppliers = state.suppliers.filter((supplier) => supplier.is_active).map((supplier) => `<option value="${supplier.id}" ${supplier.id === catalog.supplierId ? "selected" : ""}>${escapeHtml(supplier.display_name || supplier.name)}</option>`).join("");
+  const rental = catalog.mode === "rental" ? `<fieldset class="catalog-filter-group"><legend>Аренда</legend>
+    ${catalogRentalFilter("all", "Все арендные товары", catalog.productFilter, prefix)}
+    ${catalogRentalFilter("available", "Есть доступные", catalog.productFilter, prefix)}
+    ${catalogRentalFilter("never_rented", "Не сдавался", catalog.productFilter, prefix)}
+    ${catalogRentalFilter("paid_back", "Окупился", catalog.productFilter, prefix)}
+    ${catalogRentalFilter("high_expenses", "Высокие расходы", catalog.productFilter, prefix)}
+    ${catalogRentalFilter("long_idle", "Давно не сдавался", catalog.productFilter, prefix)}
+  </fieldset>` : "";
+  return `<fieldset class="catalog-filter-group"><legend>Требуют внимания</legend>${attention}</fieldset>
+    <div class="field"><label for="${prefix}-catalog-supplier">Поставщик</label><select id="${prefix}-catalog-supplier" name="supplier_id" ${mobile ? "" : "data-desktop-supplier"}><option value="">Все</option>${suppliers}</select></div>${rental}`;
+}
+
+function catalogRentalFilter(value, label, active, prefix) {
+  return `<label class="catalog-check"><input type="radio" name="product_filter" value="${value}" ${value === active ? "checked" : ""} ${prefix === "desktop" ? "data-desktop-rental-filter" : ""}><span>${label}</span></label>`;
+}
+
+function renderCatalogSort(catalog) {
+  return `<div class="field sort-field"><label for="operations-product-sort">Сортировка</label><select id="operations-product-sort">
+    <option value="title" ${catalog.sort === "title" ? "selected" : ""}>По названию</option>
+    <option value="revenue" ${catalog.sort === "revenue" ? "selected" : ""}>По доходу от аренды</option>
+    <option value="rental_count" ${catalog.sort === "rental_count" ? "selected" : ""}>По количеству аренд</option>
+    <option value="profit" ${catalog.sort === "profit" ? "selected" : ""}>По результату аренды</option>
+    <option value="last_rental" ${catalog.sort === "last_rental" ? "selected" : ""}>По последней аренде</option>
+  </select></div>`;
+}
+
+function openCatalogDrawer(id) {
+  const dialog = document.querySelector(id);
+  document.body.classList.add("catalog-drawer-open");
+  dialog.showModal();
+  dialog.querySelector?.("[autofocus]")?.focus();
+}
+
+function bindCatalogShell(catalog) {
+  document.querySelector("#catalog-new-product").addEventListener("click", () => startSession());
+  document.querySelectorAll("[data-catalog-mode]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsCatalog({ ...catalog, mode: button.dataset.catalogMode, productFilter: "all" }));
+  });
   document.querySelector("#operations-product-search").addEventListener("submit", (event) => {
     event.preventDefault();
-    openOperationsCatalog(String(new FormData(event.currentTarget).get("query") || "").trim(), productFilter, sort);
+    openOperationsCatalog({ ...catalog, query: String(new FormData(event.currentTarget).get("query") || "").trim() });
   });
-  document.querySelectorAll("[data-product-filter]").forEach((button) => {
-    button.addEventListener("click", () => openOperationsCatalog(query, button.dataset.productFilter, sort));
+  document.querySelectorAll("[data-category-id]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsCatalog({ ...catalog, categoryId: button.dataset.categoryId }));
   });
-  document.querySelector("#operations-product-sort").addEventListener("change", (event) => openOperationsCatalog(query, productFilter, event.target.value));
+  document.querySelectorAll("[data-desktop-attention]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const attention = [...document.querySelectorAll("[data-desktop-attention]:checked")].map((item) => item.value);
+      openOperationsCatalog({ ...catalog, attention });
+    });
+  });
+  document.querySelector("[data-desktop-supplier]").addEventListener("change", (event) => openOperationsCatalog({ ...catalog, supplierId: event.target.value }));
+  document.querySelectorAll("[data-desktop-rental-filter]").forEach((input) => {
+    input.addEventListener("change", () => openOperationsCatalog({ ...catalog, productFilter: input.value }));
+  });
+  document.querySelector("#operations-product-sort").addEventListener("change", (event) => openOperationsCatalog({ ...catalog, sort: event.target.value }));
   document.querySelectorAll("[data-product-id]").forEach((button) => {
     button.addEventListener("click", () => openOperationsProduct(button.dataset.productId));
   });
+  document.querySelector("#open-category-drawer").addEventListener("click", () => openCatalogDrawer("#catalog-category-dialog"));
+  document.querySelector("#open-filter-drawer").addEventListener("click", () => openCatalogDrawer("#catalog-filter-dialog"));
+  document.querySelectorAll(".catalog-drawer").forEach((dialog) => {
+    dialog.querySelector(".drawer-close").addEventListener("click", () => dialog.close());
+    dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+    dialog.addEventListener("close", () => document.body.classList.remove("catalog-drawer-open"));
+  });
+  document.querySelectorAll("[data-open-category-create]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const categoryDrawer = document.querySelector("#catalog-category-dialog");
+      if (categoryDrawer.open) {
+        categoryDrawer.addEventListener("close", () => openCatalogDrawer("#catalog-category-create-dialog"), { once: true });
+        categoryDrawer.close();
+      } else {
+        openCatalogDrawer("#catalog-category-create-dialog");
+      }
+    });
+  });
+  document.querySelector("[data-category-create-cancel]").addEventListener("click", () => document.querySelector("#catalog-category-create-dialog").close());
+  document.querySelector("#catalog-category-create-form").addEventListener("submit", (event) => createCatalogCategory(event, catalog));
+  document.querySelector("#catalog-mobile-filter-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    openOperationsCatalog({ ...catalog, attention: data.getAll("attention"), supplierId: data.get("supplier_id") || "", productFilter: data.get("product_filter") || "all" });
+  });
+  document.querySelector("#catalog-filters-reset").addEventListener("click", () => openOperationsCatalog({ ...catalog, attention: [], supplierId: "", productFilter: "all" }));
 }
 
-function operationsFilterButton(value, label, active) {
-  return `<button class="filter-chip ${value === active ? "active" : ""}" data-product-filter="${value}">${label}</button>`;
+async function createCatalogCategory(event, catalog) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  const title = String(data.get("title") || "").trim();
+  if (!title) {
+    form.querySelector("[name=title]").focus();
+    return;
+  }
+  button.disabled = true;
+  try {
+    await api("/api/catalog/categories/quick", {
+      method: "POST",
+      body: JSON.stringify({ title, parent_id: data.get("parent_id") || null }),
+    });
+    state.categories = await api("/api/catalog/categories");
+    document.querySelector("#catalog-category-create-dialog").close();
+    renderOperationsCatalog(catalog);
+    showToast("Категория создана");
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
 }
 
 async function openOperationsProduct(productId) {
   try {
     recordRoute("product", { productId });
-    logicalParent = () => openOperationsCatalog();
+    logicalParent = () => openOperationsCatalog(state.operations.catalog || {});
     [state.operations.product, state.categories, state.operations.imageLinks] = await Promise.all([
       api(`/api/operations/catalog/products/${productId}`),
       api("/api/catalog/categories"),

@@ -29,6 +29,24 @@ class CategoryCreate(CategoryBase):
     """Payload for creating a catalog category."""
 
 
+class CategoryQuickCreate(PydanticBaseModel):
+    """Operator-facing payload that omits technical Category fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=255)
+    parent_id: UUIDv7 | None = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        """Reject blank operator-facing names after trimming surrounding whitespace."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Category title must not be blank.")
+        return normalized
+
+
 class CategoryUpdate(PydanticBaseModel):
     """Payload for updating a catalog category."""
 

@@ -22,6 +22,7 @@ function setup() {
   const context = vm.createContext({
     document: { querySelector() {}, querySelectorAll: () => [form] },
     window: { addEventListener() {} }, sessionStorage: { getItem() {} },
+    URLSearchParams,
     setTimeout(fn, ms) { const id = ++sequence; timers.set(id, { fn, ms }); return id; },
     clearTimeout(id) { timers.delete(id); },
     FormData: class { constructor() {} get(key) { return inputs[key].value; } },
@@ -191,4 +192,87 @@ test('Uploads associate with their contextual Product or Variant, cancellation i
   const count = calls.length;
   await s.context.uploadCatalogImage({ files:[] });
   assert.equal(calls.length, count);
+});
+
+test('Catalog shell defaults to Sale and serializes reproducible server query state', () => {
+  const s = setup();
+  const defaults = s.context.normalizeCatalogState({});
+  assert.equal(defaults.mode, 'sale');
+  assert.equal(defaults.sort, 'title');
+  assert.equal(defaults.attention.length, 0);
+
+  const params = s.context.catalogUrlParams({
+    mode: 'rental', query: 'SKU-1', categoryId: 'category', supplierId: 'supplier',
+    attention: ['missing_photo', 'out_of_stock'], productFilter: 'available', sort: 'last_rental',
+  });
+  assert.equal(params.get('mode'), 'rental');
+  assert.equal(params.get('query'), 'SKU-1');
+  assert.equal(params.get('category_id'), 'category');
+  assert.equal(params.get('supplier_id'), 'supplier');
+  assert.deepEqual(params.getAll('attention'), ['missing_photo', 'out_of_stock']);
+  assert.equal(params.get('product_filter'), 'available');
+  assert.equal(params.get('sort'), 'last_rental');
+});
+
+test('Catalog category selector renders hierarchy and selected state', () => {
+  const s = setup();
+  vm.runInContext(`state.categories = [
+    {id:'root', title:'Канцелярия', parent_id:null, is_active:true},
+    {id:'child', title:'Ручки', parent_id:'root', is_active:true},
+    {id:'hidden', title:'Скрытая', parent_id:null, is_active:false}
+  ];`, s.context);
+  const html = s.context.renderCatalogCategoryNavigation(
+    s.context.normalizeCatalogState({categoryId:'child'}),
+  );
+  assert.match(html, /Канцелярия/);
+  assert.match(html, /Ручки/);
+  assert.doesNotMatch(html, /Скрытая/);
+  assert.match(html, /category-link active[^>]+data-category-id="child"/);
+  assert.match(html, /--category-depth:1/);
+});
+
+test('Catalog mobile drawers use native modal open and explicit scroll lock', () => {
+  const s = setup();
+  let opened = false;
+  let locked = false;
+  s.context.document = {
+    body: {classList: {add(value) { locked = value === 'catalog-drawer-open'; }}},
+    querySelector: selector => selector === '#drawer' ? {showModal() { opened = true; }} : null,
+  };
+  s.context.openCatalogDrawer('#drawer');
+  assert.equal(opened, true);
+  assert.equal(locked, true);
+  assert.match(source, /dialog\.addEventListener\("close"/);
+  assert.match(source, /catalog-filters-reset/);
+  assert.match(source, /data\.getAll\("attention"\)/);
+});
+
+test('Catalog correction keeps search and results in one main column without SQLAdmin', () => {
+  const template = source.slice(
+    source.indexOf('function renderOperationsCatalog'),
+    source.indexOf('function catalogModeButton'),
+  );
+  const mainColumn = template.slice(template.indexOf('<div class="catalog-main">'));
+
+  assert.ok(mainColumn.indexOf('catalog-modes') < mainColumn.indexOf('catalog-search'));
+  assert.ok(mainColumn.indexOf('catalog-search') < mainColumn.indexOf('catalog-results-head'));
+  assert.ok(mainColumn.indexOf('catalog-results-head') < mainColumn.indexOf('session-list'));
+  assert.doesNotMatch(source, /\/admin\/category\/list/);
+});
+
+test('Native Category create form exposes only title and optional parent', () => {
+  const s = setup();
+  vm.runInContext(`state.categories = [
+    {id:'root', title:'Фото', parent_id:null, is_active:true},
+    {id:'child', title:'Объективы', parent_id:'root', is_active:true}
+  ];`, s.context);
+
+  const html = s.context.renderCategoryCreateDialog();
+
+  assert.match(html, /name="title"/);
+  assert.match(html, /name="parent_id"/);
+  assert.match(html, /Фото/);
+  assert.match(html, /— Объективы/);
+  assert.doesNotMatch(html, /name="slug"/);
+  assert.match(source, /\/api\/catalog\/categories\/quick/);
 });

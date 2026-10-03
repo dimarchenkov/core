@@ -20,6 +20,7 @@ from core.catalog.schemas import (
     CatalogVariantRead,
     CatalogVariantUpdate,
     CategoryCreate,
+    CategoryQuickCreate,
     CategoryRead,
     CategoryUpdate,
 )
@@ -111,6 +112,30 @@ def create_category(
             status_code=status.HTTP_409_CONFLICT,
             detail="Category slug already exists.",
         ) from exc
+    except CategoryParentError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Parent category is invalid.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+
+
+@router.post("/quick", response_model=CategoryRead, status_code=status.HTTP_201_CREATED)
+def create_named_category(
+    data: CategoryQuickCreate,
+    service: Annotated[CategoryService, Depends(get_category_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Category:
+    """Create a Category from operator-facing title and optional parent fields."""
+    try:
+        category = service.create_named_category(data, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(category)
+        return category
     except CategoryParentError as exc:
         session.rollback()
         raise HTTPException(

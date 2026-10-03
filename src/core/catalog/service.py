@@ -19,10 +19,11 @@ from core.catalog.schemas import (
     CatalogVariantCreate,
     CatalogVariantUpdate,
     CategoryCreate,
+    CategoryQuickCreate,
     CategoryUpdate,
 )
 from core.catalog.sku import SkuGenerator
-from core.shared.db import UUIDv7
+from core.shared.db import UUIDv7, generate_uuid_v7
 
 
 class CategoryNotFoundError(Exception):
@@ -100,6 +101,22 @@ class CategoryService:
         self._repository.add(category)
         self._session.flush()
         return category
+
+    def create_named_category(
+        self,
+        data: CategoryQuickCreate,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> Category:
+        """Create an operator-named Category with an internal unique slug."""
+        return self.create_category(
+            CategoryCreate(
+                title=data.title,
+                slug=f"category-{generate_uuid_v7()}",
+                parent_id=data.parent_id,
+            ),
+            actor_id=actor_id,
+        )
 
     def update_category(
         self,
