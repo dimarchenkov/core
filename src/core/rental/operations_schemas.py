@@ -32,6 +32,23 @@ class CatalogOperationsFilter(StrEnum):
     LONG_IDLE = "long_idle"
 
 
+class CatalogMode(StrEnum):
+    """Top-level presentation modes for the shared operational Catalog."""
+
+    SALE = "sale"
+    RENTAL = "rental"
+    ALL = "all"
+
+
+class CatalogAttentionFilter(StrEnum):
+    """Operational conditions that can require a Catalog operator's attention."""
+
+    MISSING_PRICE = "missing_price"
+    MISSING_PHOTO = "missing_photo"
+    AQSI_PROBLEM = "aqsi_problem"
+    OUT_OF_STOCK = "out_of_stock"
+
+
 class CatalogOperationsSort(StrEnum):
     """Computed economic sorting for the operational catalog."""
 

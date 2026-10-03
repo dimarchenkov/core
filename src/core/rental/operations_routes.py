@@ -12,6 +12,8 @@ from core.rental.operations_read_service import (
     RentalOperationsReadService,
 )
 from core.rental.operations_schemas import (
+    CatalogAttentionFilter,
+    CatalogMode,
     CatalogOperationsFilter,
     CatalogOperationsSort,
     CatalogProductOperationsDetail,
@@ -40,11 +42,23 @@ def get_operations_read_service(
 def list_operational_products(
     service: Annotated[RentalOperationsReadService, Depends(get_operations_read_service)],
     query: Annotated[str | None, Query(max_length=255)] = None,
+    mode: CatalogMode = CatalogMode.SALE,
+    category_id: Annotated[UUIDv7 | None, Query()] = None,
+    supplier_id: Annotated[UUIDv7 | None, Query()] = None,
+    attention: Annotated[list[CatalogAttentionFilter] | None, Query()] = None,
     product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
     sort: CatalogOperationsSort = CatalogOperationsSort.TITLE,
 ) -> list[CatalogProductOperationsRead]:
-    """List products with rental counts for the first-party client."""
-    return service.list_products(query, product_filter=product_filter, sort=sort)
+    """List products for the URL-backed operational Catalog workspace."""
+    return service.list_products(
+        query,
+        mode=mode,
+        category_id=category_id,
+        supplier_id=supplier_id,
+        attention_filters=frozenset(attention or []),
+        product_filter=product_filter,
+        sort=sort,
+    )
 
 
 @router.get("/catalog/products/{product_id}", response_model=CatalogProductOperationsDetail)

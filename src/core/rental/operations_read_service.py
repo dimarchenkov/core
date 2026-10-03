@@ -2,22 +2,29 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime
+from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import Session
 
-from core.catalog.models import CatalogProduct, CatalogVariant
+from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.integrations.aqsi.enums import PublicationChannel, PublicationStatus
+from core.integrations.aqsi.models import Publication
 from core.inventory.service import InventoryService
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import ImageLink
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.pricing.repository import PriceRepository
+from core.receipt.enums import ReceiptStatus
+from core.receipt.models import Receipt, ReceiptItem
 from core.rental.economics_schemas import EfficiencyFlag
 from core.rental.economics_service import RentalEconomicsService
 from core.rental.enums import AssetPurpose, RentalAvailability
 from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
 from core.rental.operations_schemas import (
+    CatalogAttentionFilter,
+    CatalogMode,
     CatalogOperationsFilter,
     CatalogOperationsSort,
     CatalogProductOperationsDetail,
@@ -29,6 +36,7 @@ from core.rental.operations_schemas import (
 )
 from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus
 from core.shared.db import UUIDv7
+from core.supplier.models import Supplier
 
 
 class OperationsProductNotFoundError(Exception):
@@ -46,11 +54,35 @@ class RentalOperationsReadService:
         self,
         query: str | None = None,
         *,
+        mode: CatalogMode = CatalogMode.SALE,
+        category_id: UUIDv7 | None = None,
+        supplier_id: UUIDv7 | None = None,
+        attention_filters: frozenset[CatalogAttentionFilter] = frozenset(),
         product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
         sort: CatalogOperationsSort = CatalogOperationsSort.TITLE,
     ) -> list[CatalogProductOperationsRead]:
-        """Return products with variant and physical rental counts."""
+        """Return shared Catalog products using server-side workspace filters."""
         statement = select(CatalogProduct).where(CatalogProduct.deleted_at.is_(None))
+        if mode is CatalogMode.SALE:
+            statement = statement.where(
+                CatalogProduct.is_active.is_(True),
+                CatalogProduct.variants.any(
+                    and_(
+                        CatalogVariant.deleted_at.is_(None),
+                        CatalogVariant.is_active.is_(True),
+                    )
+                ),
+            )
+        if category_id is not None:
+            category_ids = self._category_with_descendants(category_id)
+            statement = statement.where(
+                CatalogProduct.category_id.in_(category_ids) if category_ids else false()
+            )
+        if supplier_id is not None:
+            supplier_product_ids = self._posted_supplier_product_ids(supplier_id)
+            statement = statement.where(
+                CatalogProduct.id.in_(supplier_product_ids) if supplier_product_ids else false()
+            )
         normalized = (query or "").strip()
         if normalized:
             pattern = f"%{normalized}%"
@@ -73,6 +105,21 @@ class RentalOperationsReadService:
         variant_ids = [variant.id for variant in variants]
         image_ids = self._primary_images(products, variants)
         priced_variant_ids = self._ever_priced_variant_ids(variant_ids)
+        current_priced_variant_ids = (
+            self._current_priced_variant_ids(variant_ids)
+            if CatalogAttentionFilter.MISSING_PRICE in attention_filters
+            else set()
+        )
+        balances = (
+            InventoryService(self._session).get_balances(variant_ids)
+            if CatalogAttentionFilter.OUT_OF_STOCK in attention_filters
+            else {}
+        )
+        aqsi_problem_variant_ids = (
+            self._aqsi_problem_variant_ids(variant_ids)
+            if CatalogAttentionFilter.AQSI_PROBLEM in attention_filters
+            else set()
+        )
         economics_service = RentalEconomicsService(self._session)
         asset_economics = economics_service.get_assets([asset.id for asset in assets])
         variants_by_product: dict[UUIDv7, list[CatalogVariant]] = defaultdict(list)
@@ -129,6 +176,42 @@ class RentalOperationsReadService:
             )
             for product in products
         ]
+        if mode is CatalogMode.RENTAL:
+            rows = [row for row in rows if row.rental_asset_count > 0]
+        if CatalogAttentionFilter.MISSING_PRICE in attention_filters:
+            rows = [
+                row
+                for row in rows
+                if any(
+                    variant.id not in current_priced_variant_ids
+                    for variant in variants_by_product[row.id]
+                    if variant.is_active
+                )
+            ]
+        if CatalogAttentionFilter.MISSING_PHOTO in attention_filters:
+            rows = [row for row in rows if row.primary_image_id is None]
+        if CatalogAttentionFilter.AQSI_PROBLEM in attention_filters:
+            rows = [
+                row
+                for row in rows
+                if any(
+                    variant.id in aqsi_problem_variant_ids
+                    for variant in variants_by_product[row.id]
+                    if variant.is_active
+                )
+            ]
+        if CatalogAttentionFilter.OUT_OF_STOCK in attention_filters:
+            rows = [
+                row
+                for row in rows
+                if sum(
+                    balances.get(variant.id, Decimal("0"))
+                    for variant in variants_by_product[row.id]
+                    if variant.is_active
+                )
+                - Decimal(row.rental_asset_count)
+                <= 0
+            ]
         if product_filter is CatalogOperationsFilter.RENTAL:
             rows = [row for row in rows if row.rental_asset_count > 0]
         elif product_filter is CatalogOperationsFilter.AVAILABLE:
@@ -156,6 +239,84 @@ class RentalOperationsReadService:
                 reverse=True,
             )
         return sorted(rows, key=lambda row: row.title)
+
+    def _category_with_descendants(self, category_id: UUIDv7) -> set[UUIDv7]:
+        """Return one live Category and its live descendants without assuming tree depth."""
+        categories = list(
+            self._session.scalars(select(Category).where(Category.deleted_at.is_(None))).all()
+        )
+        if not any(category.id == category_id for category in categories):
+            return set()
+        descendants = {category_id}
+        changed = True
+        while changed:
+            changed = False
+            for category in categories:
+                if category.parent_id in descendants and category.id not in descendants:
+                    descendants.add(category.id)
+                    changed = True
+        return descendants
+
+    def _posted_supplier_product_ids(self, supplier_id: UUIDv7) -> set[UUIDv7]:
+        """Return Products sourced through posted Receipt history from one Supplier."""
+        supplier_exists = self._session.scalar(
+            select(Supplier.id).where(
+                Supplier.id == supplier_id,
+                Supplier.deleted_at.is_(None),
+            )
+        )
+        if supplier_exists is None:
+            return set()
+        return set(
+            self._session.scalars(
+                select(CatalogVariant.product_id)
+                .join(ReceiptItem, ReceiptItem.variant_id == CatalogVariant.id)
+                .join(Receipt, Receipt.id == ReceiptItem.receipt_id)
+                .where(
+                    Receipt.supplier_id == supplier_id,
+                    Receipt.status == ReceiptStatus.POSTED,
+                    Receipt.deleted_at.is_(None),
+                    ReceiptItem.deleted_at.is_(None),
+                )
+                .distinct()
+            ).all()
+        )
+
+    def _current_priced_variant_ids(self, variant_ids: list[UUIDv7]) -> set[UUIDv7]:
+        """Return Variants with a retail price effective at the current time."""
+        if not variant_ids:
+            return set()
+        return set(
+            self._session.scalars(
+                select(Price.variant_id)
+                .where(
+                    Price.variant_id.in_(variant_ids),
+                    Price.price_type == PriceType.RETAIL,
+                    Price.effective_from <= datetime.now(UTC),
+                )
+                .distinct()
+            ).all()
+        )
+
+    def _aqsi_problem_variant_ids(self, variant_ids: list[UUIDv7]) -> set[UUIDv7]:
+        """Return Variants not known to be published and current in AQSI."""
+        if not variant_ids:
+            return set()
+        publications = self._session.scalars(
+            select(Publication).where(
+                Publication.variant_id.in_(variant_ids),
+                Publication.channel == PublicationChannel.AQSI,
+                Publication.deleted_at.is_(None),
+            )
+        ).all()
+        healthy = {
+            publication.variant_id
+            for publication in publications
+            if publication.status is PublicationStatus.PUBLISHED
+            and publication.last_requested_payload_hash is not None
+            and publication.last_requested_payload_hash == publication.last_verified_payload_hash
+        }
+        return set(variant_ids) - healthy
 
     def get_product(self, product_id: UUIDv7) -> CatalogProductOperationsDetail:
         """Return one product with all variants and RentalAssets."""
