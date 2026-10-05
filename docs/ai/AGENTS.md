@@ -59,10 +59,12 @@ CatalogVariant is the sellable inventory unit.
 Variant owns:
 
 - SKU
-- barcode
-- stock
-- prices
-- publications
+- exactly one current operational barcode
+
+Price history and Publications reference Variant but remain separate entities/contexts.
+
+Variant does not own a mutable stock quantity. Inventory quantity belongs to Variant only through
+immutable `StockMovement` facts.
 
 ---
 

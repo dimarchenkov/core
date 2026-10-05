@@ -1,5 +1,9 @@
 # Architecture Backlog v1 — Core ERP
 
+> Historical architecture backlog from the Sprint 8 review cycle. Completion/progress notes are
+> preserved as evidence, but unchecked items and “current” wording are not the product roadmap.
+> Use `planning/backlog.md` and current ADRs for active work.
+
 ## Purpose and ordering
 
 This is an executable architecture backlog for the current modular monolith. It does not propose

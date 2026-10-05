@@ -159,3 +159,5 @@ Pricing is only one readiness requirement. Photo, SKU and barcode checks remain 
 - Current price is derived, not marked by a mutable `is_current` flag.
 - Price calculations never use float.
 - Rental and channel-specific pricing are separate future decisions.
+- A Customer/Loyalty discount is a future Cart/Sale calculation and SaleItem snapshot. It never
+  mutates the current Catalog Price or price history.

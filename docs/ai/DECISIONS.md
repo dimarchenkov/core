@@ -20,7 +20,7 @@ Where required, separate business identifiers are used:
 
 - SKU
 - Barcode
-- Asset Code (REN-000001)
+- Asset Code (RENT-000001)
 - Receipt Number
 - Rental Number
 
@@ -132,7 +132,7 @@ Thumbnails help visually identify deleted products without storing large media f
 
 ### Product status model
 
-Status: Accepted
+Status: Accepted, with validation and Rental details superseded below
 
 Date: 2026-07-04
 
@@ -147,18 +147,11 @@ Statuses are separated by responsibility:
 - deletion state
 - rental asset status
 
-### Validation status
+### Validation / readiness
 
-Used for CatalogProduct / CatalogVariant readiness.
-
-Possible values:
-
-- draft
-- ready
-
-`draft` means the entity is incomplete.
-
-`ready` means required business data exists.
+The original proposal listed stored `draft` / `ready` values. That part is superseded. Ready for
+Sale is derived from current Catalog, Media and Pricing facts and is never persisted as a mutable
+universal Product/Variant status.
 
 ### Publication status
 
@@ -166,8 +159,8 @@ Stored in Publication.
 
 Possible values:
 
-- draft
 - pending
+- accepted
 - published
 - failed
 - disabled
@@ -176,11 +169,8 @@ Publication status is channel-specific.
 
 Example:
 
-One Variant can be:
-
-- published in AQSI
-- draft in Tilda
-- failed in Telegram
+One Variant can have an AQSI projection status independently from future Tilda or messaging
+channels. Only AQSI is currently implemented.
 
 ### Deletion state
 
@@ -188,18 +178,16 @@ Soft delete is controlled by `deleted_at`.
 
 If `deleted_at` is not null, the entity is considered deleted.
 
-### Rental asset status
+### RentalAsset state
 
-RentalAsset has its own status.
+The original single-list proposal is superseded by separate responsibilities:
 
-Possible values:
+- `purpose`: `rental`, `sale`, `retired`;
+- `condition`: `new`, `good`, `fair`, `damaged`, `unusable`;
+- `availability`: `available`, `rented`, `maintenance`.
 
-- available
-- rented
-- maintenance
-- damaged
-- retired
-- lost
+`LOST` is a terminal RentalOrderItem outcome and does not collapse purpose, condition and
+availability into one generic status.
 
 ### Rationale
 

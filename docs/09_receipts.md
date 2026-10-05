@@ -28,17 +28,15 @@ ReceiptItem always references a CatalogVariant.
 
 If the Variant does not exist:
 
-1. Register Product and Variant through Intake.
-2. Return to the Receipt.
-3. Attach the newly created Variant.
+1. Use Intake to register Product/Variant and capture the delivery facts.
+2. Complete Intake; its workflow creates and posts the resulting Receipt atomically.
 
-Receipt may contain:
+Direct Receipt commands may contain:
 
-- existing Variants;
-- new Variants created through Intake;
-- a mixture of both.
+- existing Variants only.
 
-Receipt itself must not duplicate Product or Variant creation logic.
+Receipt itself must not duplicate Product or Variant creation logic. Intake may orchestrate both
+Catalog creation and Receipt posting without making Receipt own Catalog.
 
 ## Lifecycle
 

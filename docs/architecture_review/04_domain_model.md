@@ -1,5 +1,8 @@
 # Architecture Review v1 — Domain Model and Context Boundaries
 
+> Historical Sprint 8-era snapshot. In particular, its “Rental not implemented” and 58×40 Product
+> label statements are no longer current; they are preserved to explain the review baseline.
+
 ## Aggregate map
 
 The labels describe effective transactional boundaries, not ORM relationship shape.

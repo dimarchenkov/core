@@ -1,69 +1,84 @@
 # Product Labels
 
-## First template
+## Canonical Product label
 
-Core generates a single-page printer-independent PDF sized exactly 58 x 40 mm.
+The current Product label is a single-page, printer-independent vector PDF sized exactly
+**40 × 30 mm**.
 
-The PDF embeds Roboto with Cyrillic support, so Russian product names render consistently in Docker, browser preview and Xprinter output without relying on host fonts.
+Its EAN-13 geometry is physically calibrated:
 
-The first retail template contains:
+- X-dimension: 0.300 mm;
+- 95 bar modules: 28.5 mm;
+- quiet zones: 9 modules on each side;
+- total symbol width: 33.9 mm.
 
-1. Product name, up to two lines.
-2. Variant title and compact attribute values.
-3. Current retail price in RUB as the strongest visual element.
-4. Scanner-readable primary barcode with human-readable digits.
-5. SKU and `2010shop` footer.
+The PDF embeds Roboto with Cyrillic support. Open PDF, Intake direct print and Catalog direct
+print use the same `VariantLabelRenderer`; CUPS submits the finished PDF and never recalculates
+label content.
 
-Purchase price, supplier, stock balance and internal comments are deliberately excluded.
+The canonical label contains:
+
+1. Product name.
+2. A meaningful Variant name/attributes when they add information.
+3. Current retail price, or an explicit missing-price state.
+4. The current EAN-13 operational barcode with human-readable digits.
+5. The `2010shop` footer.
+
+It does not print the technical default Variant name or SKU. Purchase price, Supplier, stock
+balance and internal comments are also excluded.
 
 ## Business rules
 
-Label data is not accepted from the caller. Core resolves the Product, Variant, current retail price, SKU and barcode from its own source of truth.
+Label data is not accepted from the caller. Core resolves Product, meaningful Variant details,
+current retail price and the current barcode from authoritative data.
 
-A sale label can be generated only after Ready for Sale passes. This preserves Photo First and prevents incomplete or unpriced items from reaching the shelf.
+A saved Variant identity is sufficient to open a label before Complete Intake. Label generation
+does not change Inventory, Pricing or AQSI state. A missing retail price is not rendered as zero.
 
-Generated 13-digit internal codes use EAN-13. Compatible legacy numeric codes use Code 128 so preserved identifiers remain printable.
+The Product renderer requires a valid 13-digit EAN-13 current barcode. If an external current
+barcode has another supported scanner format, the operator must replace it with an EAN-13 value
+before printing this Product label; Core must not silently print a hidden internal fallback.
 
 ## API
 
 ```text
-GET /api/labels/variants/{variant_id}/58x40.pdf
+GET  /api/labels/variants/{variant_id}/40x30.pdf
+POST /api/labels/variants/{variant_id}/40x30/print?quantity=<1..500>
 ```
 
-The authenticated endpoint returns `application/pdf` for browser preview or printing.
+The authenticated GET returns `application/pdf` for browser preview or system printing. The POST
+submits the same rendered PDF to the configured direct-print adapter.
 
-If the Variant is incomplete, the endpoint returns HTTP 409 with the same machine-readable missing requirements as Ready for Sale.
+The older Product endpoint/profile `58x40` remains available for backward compatibility. It is
+not the canonical Product label and must not be used as the default in current workflows.
 
-## Printing boundary
+## Printing boundary and acceptance
 
-The supported Sprint 7 workflow uses standard PDF printing:
-
-1. An authenticated user opens the generated label PDF.
-2. The operating system or browser print dialog sends it to the configured printer.
-3. Printing uses actual size (`100%`) without page scaling.
-
-Core does not send raw printer commands and does not require a printer driver on the application server in this workflow. The generated PDF remains the stable, printer-independent boundary.
-
-## Target printer
-
-The planned printer is **XPrinter XP-365B**, connected by USB to a future local Core server.
-
-Automatic or silent USB printing is deliberately deferred until that server exists. It will be implemented as a separate local print adapter rather than coupled to label generation. The expected future path is:
+Supported paths:
 
 ```text
-Core print job -> local print adapter -> TSPL over USB -> XPrinter XP-365B
+Core renderer -> 40×30 PDF -> browser/system print
+Core renderer -> 40×30 PDF -> CupsPrintingAdapter -> remote CUPS -> Xprinter
 ```
 
-The adapter may rasterize the authoritative 58 x 40 mm label before sending it to the printer. This keeps the existing template, Cyrillic rendering and barcode layout independent of printer-resident fonts.
+The application container has `cups-client`, not a printer driver or USB passthrough. The remote
+CUPS queue owns the operating-system/Xprinter driver. Printing is a side effect outside Intake,
+Catalog, Pricing and Inventory transactions.
 
-Standard PDF printing remains the fallback even after a direct adapter is introduced.
+The remote-CUPS path is physically accepted on Xprinter XP-365B: one-copy and three-copy jobs
+produced the requested number of 40×30 labels with correct size, orientation and feed. PDF/system
+printing remains the fallback.
 
-Before production use, print calibration must confirm:
+See [Direct CUPS printing](direct-cups-printing.md) for configuration and acceptance evidence.
 
-- physical 58 x 40 mm page size;
-- printable margins;
-- barcode scanning from the actual thermal print;
-- darkness, speed and gap calibration;
-- no browser scaling (`100%` / actual size).
+## RentalAsset labels
 
-Physical calibration and direct USB printing do not block Ready for Sale or Sprint 7 completion.
+RentalAsset/RENT labels are independent inventory labels using the immutable `RENT-...` value and
+Code 128. Their supported 40×30 and 58×40 profiles are not changed by the canonical Product-label
+decision above.
+
+## Historical note
+
+The original Ready-for-Sale Product template was 58×40 mm and was documented in release `v0.4.0`.
+That fact remains valid release history. Sprint 9.11 replaced the current Product default with the
+physically calibrated 40×30 template.

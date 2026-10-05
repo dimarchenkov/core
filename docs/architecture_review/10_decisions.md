@@ -1,8 +1,12 @@
-| Sprint | Review      | ADR              | Статус      |
-|--------|-------------|------------------|-------------|
-| 08     | ✅ Approved  | ADR-002, ADR-003 | Completed   |
-| 09     | ⏳ In progress | —              | In progress |
-| 10     | ⏳ In progress | —              | In progress |
+# Accepted Architecture Decisions
+
+| Sprint | Review | ADR | Статус |
+| --- | --- | --- | --- |
+| 08 | ✅ Approved | ADR-002, ADR-003 | Completed |
+| 09 | ✅ Accepted | — | Completed |
+| 10A–10G | ✅ Accepted | — | Completed |
+| 9.11 | ✅ Accepted | — | Completed |
+| 9.12 | — | — | In progress; scope is in `planning/current.md` |
 
 ## Sprint 9 — Accepted decisions
 
@@ -162,6 +166,10 @@
 
 ## Sprint 9.11 — Catalog Management Foundation
 
+Most decisions below remain implemented history. The barcode bullets describing an immutable
+internal primary plus append-only manufacturer codes were superseded before Sprint 9.12 by the
+canonical one-current-operational-barcode decision in `docs/14_product_identifiers.md`.
+
 - Product and Variant edits reuse Catalog application services and authenticated API commands;
   the first-party UI does not mutate ORM records.
 - Retail, base rental price and recommended deposit are append-only `Price` facts owned by
@@ -172,17 +180,16 @@
   primary image is one Media service command that demotes the previous primary link.
 - Labels and AQSI remain independent modules and rebuild output from current authoritative Core
   data. AQSI stock synchronization is deferred because the current adapter has no stock contract.
-- `CatalogVariantBarcode` is the normalized globally unique collection of scanner identifiers.
-  Existing `CatalogVariant.barcode` remains the immutable primary INTERNAL EAN for migration and
-  backward compatibility; it is not a second independently editable identifier.
-- Migration `0027` copies every legacy EAN to the collection as `INTERNAL` without rewriting it.
-- Manufacturer barcodes are append-only assignments to a Variant. EAN-13, EAN-8 and UPC-A use
-  check-digit validation; other printable ASCII input is treated as Code 128 data.
+- Historical decision (superseded): `CatalogVariantBarcode` was introduced as a collection of
+  scanner identifiers while `CatalogVariant.barcode` remained an immutable INTERNAL EAN.
+- Historical migration fact: migration `0027` copied legacy values without rewriting them.
+- Current decision: Variant has exactly one replaceable operational barcode with domain origin
+  EXTERNAL or INTERNAL. History rows do not create active aliases, and values are not reused.
 - Intake owns no barcode registry. Its application workflow carries an unknown manufacturer code
   into Catalog Variant creation inside the existing completion transaction.
-- AQSI's one-barcode projection prefers a suitable numeric MANUFACTURER code and falls back to the
-  internal EAN. Product labels continue to encode the internal EAN; RentalAsset identity remains
-  the independent immutable `RENT-...` value.
+- AQSI receives the current operational barcode with no preferred/fallback alias selection.
+  Canonical Product labels encode that current EAN-13; RentalAsset identity remains the independent
+  immutable `RENT-...` value.
 - Camera and keyboard scanners are input adapters only. Native `BarcodeDetector` is preferred when
   it supports EAN-13, EAN-8, UPC-A and Code 128; otherwise the UI lazily loads the fixed
   `@zxing/browser` 0.2.1 MIT UMD bundle. Both write the same manufacturer-barcode field and invoke

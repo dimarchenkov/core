@@ -11,6 +11,18 @@
 - **Production-ready milestone** — версия, с которой Core можно использовать в реальном основном
   процессе магазина.
 
+## Current delivery order
+
+1. **Now:** Sprint 9.12 — Catalog Operations.
+2. **Next:** Sprint 7.13 — AQSI Automatic Synchronization.
+3. **Then:** Epic 5 — Sales Foundation / POS.
+4. **Then:** Epic 10 — Customers & Loyalty MVP.
+5. **Demand-driven:** дальнейший Rental Operations UAT, когда появится реальное использование.
+
+Intake после нескольких real-world UAT операционно достаточно пригоден; его возможный polish не
+должен превращаться в новый redesign. Rental остаётся реализованным первоклассным доменом, но его
+текущий delivery priority снижен из-за почти отсутствующего фактического спроса.
+
 ---
 
 ## Epic 1 — Core Foundation
@@ -58,7 +70,7 @@ Engine.
 
 ## Epic 2 — Ready for Sale
 
-**Status: 🚧 In Progress**
+**Status: ✅ Operational milestone completed; follow-up debt remains**
 
 Цель Epic — довести поступивший вариант товара до состояния, в котором его можно маркировать,
 найти сканером и отправить в кассу. Готовность определяется из фактических данных, а не хранится
@@ -71,7 +83,8 @@ Engine.
 - [x] Розничные цены с историей изменений.
 - [x] Внутренние EAN-13-совместимые штрихкоды и точный поиск сканером.
 - [x] Проверка обязательных условий готовности к продаже.
-- [x] Формирование этикетки 58 × 40 мм в PDF.
+- [x] Формирование канонической товарной этикетки 40 × 30 мм в PDF; исторический профиль
+  58 × 40 сохранён только для совместимости.
 - [x] Асинхронная и идемпотентная публикация товаров в AQSI.
 - [x] Проверка результата публикации и история попыток.
 - [x] Реальная публикация тестового товара и поиск по штрихкоду на кассе.
@@ -81,15 +94,18 @@ Engine.
 
 - [x] Получение причин, по которым товар ещё не готов к продаже.
 - [x] Универсальная печать этикетки через стандартный PDF.
-- [ ] Отдельная очередь товаров, требующих доведения до готовности.
+- [ ] Отдельный UI очереди товаров, требующих доведения до готовности (follow-up; API реализован).
 
 ### Infrastructure
 
 - [x] Фоновая обработка публикаций и повторных попыток AQSI.
-- [ ] Физическая калибровка XPrinter XP-365B для этикеток 58 × 40 мм.
+- [x] Физическая калибровка 40 × 30 и remote-CUPS печать на XPrinter XP-365B.
 - [ ] Проверка сканирования, полей, затемнения и определения зазора.
-- [ ] Локальный TSPL-over-USB адаптер печати при появлении локального сервера.
+- [ ] Локальный TSPL-over-USB adapter, только если remote CUPS перестанет покрывать эксплуатацию.
 - [ ] Восстановление AQSI-попыток, оставшихся в обработке после аварии worker.
+
+Невыполненные пункты UI/Infrastructure выше являются отдельным follow-up и не отменяют
+достигнутый milestone: товар маркируется канонической этикеткой и вручную публикуется в AQSI.
 
 ### Milestone
 
@@ -100,7 +116,7 @@ Engine.
 
 ## Epic 3 — Workflow UX
 
-**Status: 🚧 In Progress**
+**Status: ✅ Operational milestone completed; follow-up debt remains**
 
 Цель Epic — сделать ежедневные операции понятными сотруднику без работы с технической админкой.
 Основной результат — быстрая photo-first приёмка с телефона и прозрачная очередь дальнейших
@@ -144,18 +160,23 @@ Engine.
 После завершения Epic 3 сотрудник может выполнить основной цикл приёмки с телефона без
 технической админки.
 
-Предыдущий мобильный vertical slice поставлен под повторную проверку: реальная User Acceptance
-показала, что без обязательного перехода в Catalog он не доводит товар до ready-for-sale.
+После нескольких серьёзных real-world UAT Intake операционно достаточно пригоден. Оставшиеся
+пункты ниже являются точечным polish/optimization backlog и не открывают новый redesign Intake.
+Невыполненные метрики, отдельный Ready-for-Sale UI и infrastructure hardening не являются
+условиями повторного открытия завершённого операционного milestone.
 
-### Major gap — Intake Workspace / Ready-for-Sale Workflow
+### Validated scope — Intake Workspace / Ready-for-Sale Workflow
 
 Связанные наблюдения ведутся как один продуктовый gap, а не как россыпь независимых UI-багов:
 
 - [x] Одна Intake position поддерживает Product с одним или несколькими Variant.
 - [x] Product form содержит только название, категорию, описание и общее фото.
-- [ ] Каждый товар имеет Variant; единственный default Variant может быть визуально скрыт.
-- [ ] Для каждого Variant доступны SKU, barcode, variant photo, quantity этой Intake, purchase
-  price, retail price и rental commercial terms.
+- [x] Каждый Product, материализованный через Intake, имеет как минимум один Variant; технический
+  default Variant визуально скрывается там, где не несёт смысла.
+- [x] Для каждого Variant доступны SKU, current barcode, variant photo, quantity этой Intake,
+  purchase price, retail price и количество, выделяемое в Rental.
+- [ ] Полные duration-based rental tariffs/calculation rules в Intake не реализованы и не нужны
+  для завершённого Intake milestone.
 - [x] Draft Intake позволяет добавлять, удалять и редактировать Variant, включая замену фото
   через существующий Media context.
 - [x] Label сохранённого Variant со штрихкодом доступна до Complete Intake и независимо от экрана
@@ -166,11 +187,11 @@ Engine.
 - [x] Обычная Intake завершается без обязательного перехода в Catalog.
 - [ ] Camera scanning проверено на целевых телефонах по HTTPS; ручной и hardware fallback
   сохранены.
-- [x] Barcode остаётся однозначной identity Variant; одинаковый manufacturer barcode разных
-  Variant и ambiguous lookup не поддерживаются.
+- [x] Variant имеет ровно один current operational barcode; barcode не является identity Variant,
+  старые значения не работают как scanner aliases и ambiguous lookup не поддерживается.
 
-**Production-ready milestone: 🚧 повторно открыт до закрытия Intake Workspace /
-Ready-for-Sale Workflow в Sprint 9.11.**
+**Operational baseline: ✅ подтверждён несколькими real-world UAT.** Невыполненные пункты выше
+остаются polish backlog и не возвращают Intake redesign в текущий delivery priority.
 
 ---
 
@@ -186,6 +207,10 @@ Ready-for-Sale Workflow в Sprint 9.11.**
 Rental Orders; Sprint 10C — Rental Checkout Workflow ✅; Sprint 10D — Rental Return Workflow ✅;
 Sprint 10E — Catalog & Rental Operations UX ✅; Sprint 10F — Rental History & Maintenance ✅;
 Sprint 10G — Rental Economics & Business Insights ✅.
+
+**Current priority:** demand-driven. Реальное использование аренды сейчас очень низкое, поэтому
+дальнейшие Rental UX/UAT отложены до появления операционного спроса. Реализованная доменная модель
+и завершённая работа сохраняются и не считаются ошибочными.
 
 После первого полноценного пользовательского тестирования ежедневный UX каталога и аренды
 выделен в отдельный Sprint до расширения истории, обслуживания и экономики.
@@ -214,7 +239,6 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [x] Фото состояния до и после аренды.
 - [x] История повреждений и обслуживания.
 - [x] Журнал обслуживания экземпляра.
-- [ ] Арендные тарифы и правила расчёта.
 - [x] Неизменяемая стоимость приобретения экземпляра из завершённой приёмки.
 - [x] Вычисляемые количество, продолжительность и фактический доход аренд экземпляра.
 - [x] Стоимость обслуживания и вычисляемые расходы без признания повреждения расходом.
@@ -254,6 +278,11 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [x] Одна транзакция для изменения RentalOrder и RentalAsset при выдаче/возврате.
 - [x] Идемпотентное повторное завершение приёмки без дублирования экземпляров.
 - [x] PostgreSQL-миграции и Docker smoke test Rental Foundation и Rental Orders.
+
+### Deferred follow-up — не блокирует завершённый milestone
+
+- [ ] Арендные тарифы и duration-based правила расчёта сверх уже реализованных agreed/charged
+  amounts.
 - [ ] Метрики конфликтов доступности, просрочек и ошибок операций аренды.
 
 ### Milestone
@@ -270,19 +299,44 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 Цель Epic — проводить продажу через Core и связывать её со складским ledger и кассой. Продажи,
 возвраты и исправления должны сохранять проверяемую историю без прямого изменения остатка.
 
-**Sprints:** будут определены после основного операционного цикла Rental.
+**Sprints:** Sales Foundation / POS начинается после Sprint 7.13. Точные номера и границы
+последующих Sales sprint будут определены при design, без ожидания дополнительного Rental UAT.
+
+Временный AQSI spike физически подтвердил два itemized flow. Pending Order технически работает и
+остаётся вариантом для заранее созданных/remote/pickup orders, но требует навигации по меню AQSI.
+Direct AQSI checkout переводит кассу в card acquiring без такой навигации, после чего Core
+запускает itemized fiscalization; это предпочтительная основа обычного in-store checkout. Spike
+не является постоянной реализацией Sales.
 
 ### Backend
 
-- [ ] Создание и проведение продажи.
-- [ ] Списание проданных единиц через складские движения.
+- [ ] Жизненный цикл Cart и Sale с явными payment/fiscalization states.
+- [ ] SaleItem snapshots: Variant reference, base/current unit price на момент продажи,
+  applied discount, final unit price, quantity и line total.
+- [ ] Разрешение текущего Variant по одному current operational barcode; повторный scan того же
+  barcode увеличивает quantity на 1.
+- [ ] Изменение количества и fallback search по тексту, SKU или barcode.
+- [ ] Неизвестный checkout barcode показывает понятную ошибку и никогда автоматически не создаёт
+  Product/Variant.
+- [ ] Direct AQSI acquiring и itemized fiscal receipt; cash/card/SBP — только где поддержано и
+  отдельно спроектировано.
+- [ ] Защита от duplicate payment, unknown payment outcome и сценарий acquiring success +
+  fiscalization failure.
+- [ ] Cancellation/refund/reversal design; returns/refunds — последующим безопасным slice.
+- [ ] Открытое решение: поведение без Internet или при недоступности AQSI cloud API. Возможная
+  прямая продажа на AQSI пока не является утверждённым fallback.
+- [ ] Проведение Sale создаёт неизменяемые Inventory movements типа `SALE`; Sales является их
+  бизнес-источником, Inventory остаётся ledger и не знает деталей оплаты.
 - [ ] Возвраты и корректировки без переписывания истории.
 - [ ] Продажа RentalAsset, выведенного из аренды.
-- [ ] Синхронизация фактических продаж с AQSI.
 
 ### UI
 
-- [ ] Рабочий экран оформления продажи.
+- [ ] Отдельное рабочее место POS/Sales, не action и не скрытый workflow внутри Catalog.
+- [ ] 2D hardware barcode scanner как first-class HID/keyboard input: scan → Variant → Cart,
+  repeated scan → quantity +1.
+- [ ] Ясная ошибка неизвестного кода и fallback product search.
+- [ ] Выбор Customer и применение скидки без изменения Catalog/Pricing.
 - [ ] Возврат или корректировка продажи.
 - [ ] История продаж товара и клиента.
 
@@ -337,6 +391,32 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 дублирования ручного ввода. Каждая интеграция остаётся заменяемым внешним модулем.
 
 **Sprints:** отдельный Sprint на каждый канал после стабилизации внутренних данных.
+
+Ручная Core → AQSI publication уже работает и используется в production; следующий шаг меняет
+обычный способ эксплуатации, а не ставит под сомнение существующую интеграцию.
+
+### Sprint 7.13 — AQSI Automatic Synchronization
+
+Цель — заменить ручную публикацию как обычный workflow на управляемую автоматическую проекцию
+Core → AQSI. Core остаётся единственным источником истины; AQSI не становится равноправным
+владельцем каталога.
+
+- [ ] Global setting `AQSI synchronization: ON/OFF`.
+- [ ] Eligibility по необходимым данным: current retail price, required photo, active/not
+  archived state и остальные существующие AQSI requirements.
+- [ ] Автоматически create/publish новый eligible Variant и публиковать его, когда ранее
+  отсутствовавшие данные появились.
+- [ ] Автоматически update AQSI при изменении price, name, barcode и других synchronized fields.
+- [ ] При archive/delete удалить или деактивировать remote item согласно фактически
+  поддерживаемой семантике AQSI.
+- [ ] Event-driven/near-immediate synchronization плюс periodic reconciliation (ориентир — daily).
+- [ ] Reconciliation отвечает только на вопрос «соответствует ли AQSI ожидаемой проекции Core?»;
+  изменения AQSI не импортируются как authoritative catalog data.
+- [ ] `Synchronize now / Force sync` остаётся административным/диагностическим fallback, а не
+  обычным операторским workflow.
+- [ ] Видимые состояния ошибки, retry и reconciliation drift.
+
+Sprint 7.13 не входит в Sprint 9.12.
 
 ### Backend
 
@@ -407,11 +487,20 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 **Status: 🚧 In Progress**
 
 Цель Epic — добавить полноценное управление карточками каталога после завершения основных
-бизнес-процессов. Текущий Sprint: **9.11 — Catalog Management Foundation**, стадия
-**User Acceptance / Real-world readiness**. Sprint 9.12 не начат.
+бизнес-процессов. Текущий Sprint: **9.12 — Catalog Operations**. Real-world UAT оценивает Catalog
+примерно в 3/10 и показывает его как основную ежедневную операционную слабость.
 
 Начиная с 9.11 используется формат `Epic.Sprint` с глобальным номером Sprint. Исторические
 названия Sprint 1–10G не переименовываются.
+
+### Sprint 9.12 — Catalog Operations
+
+Цель — сделать Catalog ежедневным операционным workspace без обязательного открытия карточек и
+технических обходов. Sprint показывает current/meaningful Variant retail prices и missing-price
+state, добавляет безопасный Product/Variant archive/delete UX, операционное управление Category и
+Supplier, текущий известный AQSI publication status и полезные status filters. История сохраняется через
+soft-delete/archive там, где уже существуют бизнес-факты. Автоматическая AQSI synchronization
+явно остаётся за границей 9.12 и относится к Sprint 7.13.
 
 ### Backend
 
@@ -424,10 +513,10 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [ ] Перенос Variant между Product после определения допустимых правил.
 - [ ] Безопасное перераспределение остатков как явная Catalog Operation.
 - [ ] Массовые операции и архивирование.
+- [ ] Product/Variant archive/delete UX с сохранением бизнес-истории через soft-delete/archive.
 - [x] Изменение фотографий и описаний с сохранением правил Catalog и Media.
-- [ ] Синхронизация остатков Core → AQSI (текущий adapter публикует карточку и цену, но не stock).
-- [ ] AQSI bidirectional catalog sync: отдельно определить ownership полей и правила конфликтов.
-- [ ] AQSI inventory synchronization: спроектировать согласование AQSI stock с Inventory ledger.
+- [ ] Синхронизация остатков Core → AQSI (текущий adapter публикует карточку и цену, но не stock)
+  остаётся отдельным будущим решением и не входит в 9.12 или автоматически в 7.13.
 
 ### UI
 
@@ -436,8 +525,17 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [x] Изменение фотографий, описаний и характеристик.
 - [x] Просмотр штрихкода, открытие и печать PDF-этикетки.
 - [x] Запуск существующей публикации актуальной карточки в AQSI.
-- [x] Несколько штрихкодов Variant: INTERNAL/MANUFACTURER, lookup и операторское добавление.
-- [ ] Массовые операции, архивирование и массовое управление штрихкодами.
+- [ ] Текущая retail price и meaningful Variant prices прямо в списке; явный missing-price state.
+- [ ] Текущий известный AQSI publication status прямо в Catalog без обещания remote drift
+  detection.
+- [ ] Фильтры missing price, never published / locally out-of-date or failed и inactive/archived.
+  Archive visibility реализована в Sprint 9.12.3a через `active|archived|all`; остальные части
+  составного пункта и real-world UAT остаются открытыми.
+- [ ] Операционный UI Category: list/create/edit/activate/deactivate/archive/delete.
+- [ ] Операционный UI Supplier: list/create/edit/activate/deactivate/archive/delete.
+- [x] Ровно один current operational barcode Variant: INTERNAL или внешний; replace, а для
+  внешнего также delete → fresh INTERNAL; старые значения не являются aliases.
+- [ ] Массовые операции и архивирование Product/Variant.
 - [ ] QR label use cases:
   - открыть карточку Variant в Core;
   - открыть карточку RentalAsset;
@@ -472,9 +570,9 @@ Sprint 10G — Rental Economics & Business Insights ✅.
   и общий fallback. Авторизованный ручной smoke-test и физический iPhone/Safari остаются
   отдельными критериями приёмки Sprint 9.11, не заменяются API/JS-тестами.
 
-- [ ] **Intake Workspace / Ready-for-Sale Workflow** — крупный gap Epic 3, повторно открытый в
-  Sprint 9.11; его канонический scope и критерии перечислены выше и не дробятся на отдельные
-  несвязанные UI-fixes.
+- [ ] **Intake Workspace / Ready-for-Sale Workflow polish** — канонический scope Sprint 9.11
+  перечислен выше. Новые наблюдения сохраняются как точечный backlog и не открывают новый Intake
+  redesign без существенных операционных данных.
 - [ ] Согласовать ledger-операции физического выбытия для RentalAsset `LOST` и `RETIRED`:
   текущий lifecycle сохраняет историю, но не уменьшает Inventory balance.
 - [ ] Определить политику acquisition cost для RentalAsset, выделенного из уже смешанного
@@ -486,12 +584,46 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 - [ ] При подготовке полностью автономного/offline deployment перевести фиксированный ZXing UMD
   bundle с unpkg на локальную раздачу Core; текущий lazy CDN fallback имеет SRI и не влияет на
   ручной/hardware ввод, но требует сети при первом camera scan в Safari.
-- [ ] Перед Sprint 9.12 отдельно зафиксировать контракт AQSI для нескольких штрихкодов: текущая
-  проверенная интеграция публикует один предпочтительный manufacturer code, затем internal EAN.
-- [ ] Определить нужны ли lifecycle-команды удаления/архивирования ошибочно привязанного
-  manufacturer barcode; текущий readiness-проход намеренно разрешает только append.
+- [ ] Терминологический follow-up без изменения поведения: заменить compatibility literal
+  `manufacturer` на доменный origin `EXTERNAL`, когда будет безопасно мигрировать API/данные.
 
 ### Milestone
 
 После завершения Epic 9 каталогом можно полноценно управлять без SQLAdmin, не смешивая
 редактирование справочных данных с ежедневными операционными workflow.
+
+---
+
+## Epic 10 — Customers & Loyalty
+
+**Status: ⏳ Planned after Sales Foundation / POS**
+
+Customers уже существует как отдельный bounded context и используется Rental: есть карточка,
+поиск и история. Epic 10 не создаёт Customer заново и не встраивает его полями внутрь Sale. Он
+расширяет общий Customer для Sales, purchase history, будущих returns/customer service и простого
+Loyalty MVP.
+
+### Customer directory
+
+- [ ] Переиспользовать существующие `id`, name, phone, optional email, active/inactive и audit
+  fields; не добавлять чувствительные или marketing fields без реальной необходимости.
+- [ ] Phone — основной быстрый операционный lookup identifier, если design не выявит конфликт.
+- [ ] Create/search/edit/deactivate/archive Customer из обычного UI.
+- [ ] Attach Customer to Sale и сохранить возможность совместного использования с Rental.
+- [ ] Общая purchase/rental history без потери snapshots исторических документов.
+
+### Loyalty MVP
+
+- [ ] Только постоянная процентная скидка Customer; points, cashback, levels, campaigns,
+  gamification и referrals отложены.
+- [ ] Скидка применяется в Cart/Sale и не изменяет Product, Variant или Pricing: retail price
+  остаётся base/current catalog price.
+- [ ] SaleItem сохраняет base unit price, applied discount, final unit price, quantity и line
+  total; точная схема определяется позже.
+- [ ] В AQSI fiscalization передаётся итоговая discounted price/amount.
+
+### Sequencing
+
+Customer/Loyalty delivery начинается только после устойчивого Sales/Cart context, но границы
+Customer и price/discount snapshots учитываются при проектировании Sales, чтобы избежать
+разрушающего redesign.

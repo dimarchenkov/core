@@ -1,5 +1,8 @@
 # Architecture Review v1 — Transaction Map
 
+> Historical Sprint 8-era snapshot. Transaction statements are retained as validated-at-the-time
+> evidence; use accepted ADRs and current architecture documentation for present rules.
+
 ## How transactions currently start
 
 SQLAlchemy `Session` uses autobegin, so the first query/write implicitly opens a

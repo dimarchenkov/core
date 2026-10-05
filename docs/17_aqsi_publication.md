@@ -8,7 +8,7 @@ This boundary includes:
 
 - creating an AQSI good;
 - updating an already published good;
-- assigning its retail price and primary barcode;
+- assigning its retail price and current operational barcode;
 - binding it to the configured AQSI shop at the current retail price;
 - recording who requested publication and what happened;
 - verifying the remote representation after AQSI accepts the request.
@@ -28,7 +28,48 @@ Those are separate workflows. Publishing a catalog card must never change the Co
 
 Core remains the source of truth. AQSI is a sales channel and a remote projection of Core data.
 
-Edits made directly in AQSI can be detected by verification, but they are not imported back into the Core catalog. The operator resolves drift by publishing the authoritative Core representation again.
+Edits made directly in AQSI can be detected when an explicit verification/reconciliation read is
+performed, but they are not imported back into the Core catalog. The current manual path has no
+automatic drift monitor. The operator resolves a detected mismatch by publishing the authoritative
+Core representation again.
+
+The integration depends on the AQSI cloud API and Internet connectivity. A network or AQSI-cloud
+failure must be visible as an external integration failure and must not corrupt Catalog, Pricing or
+Inventory. General offline behavior is an open operational decision, not an implicit two-way
+ownership model.
+
+## Target workflow — Sprint 7.13
+
+The current manual publication path is production-used and operationally useful, but it is not the
+target everyday workflow. Sprint 7.13 — **AQSI Automatic Synchronization** introduces an
+administrator setting:
+
+```text
+AQSI synchronization
+[ ON / OFF ]
+```
+
+With synchronization enabled, an operator normally does not publish each product manually. Core
+automatically maintains AQSI as its external projection:
+
+```text
+new eligible Variant                         -> create/publish in AQSI
+price, name, barcode or synchronized change -> update AQSI
+archived/deleted item                       -> remove/deactivate using supported AQSI semantics
+previously incomplete item becomes eligible -> publish automatically
+```
+
+Eligibility includes a current positive retail price, the required photo, active/not-archived
+state, and all existing AQSI-specific required fields. The exact event contracts are intentionally
+left for Sprint 7.13 design.
+
+The target combines event-driven/near-immediate synchronization with periodic reconciliation
+(initial operating assumption: daily). Reconciliation asks only: “Does AQSI match the state Core
+expects?” It does not import AQSI edits as authoritative business data. `Synchronize now / Force
+sync` remains available as an administrative and diagnostic fallback, not the normal workflow.
+
+Automatic sync must expose pending/error/retry/drift state to operators. It does not imply AQSI
+stock ownership, sales import, receipt import or general bidirectional catalog synchronization.
 
 ## Official API contract
 
@@ -99,7 +140,7 @@ The first implementation sends only required AQSI fields plus the Core data need
   "paymentMethodType": 4,
   "sku": "<Variant SKU>",
   "price": 100.00,
-  "barcodes": ["<preferred sales-channel barcode>"]
+  "barcodes": ["<Variant current operational barcode>"]
 }
 ```
 
@@ -130,7 +171,7 @@ When an AQSI account has exactly one active shop, Core may select it automatical
 | `name` | Product title plus meaningful Variant title, limited to 128 characters |
 | `sku` | `CatalogVariant.sku`, limited to 64 characters |
 | `price` | current positive `retail` RUB Price |
-| `barcodes` | one-element array: first suitable manufacturer code, otherwise internal EAN |
+| `barcodes` | one-element array containing the Variant's current operational barcode |
 | `tax` | administrator-configured AQSI VAT code; `6` for the first installation |
 | `unit` | AQSI-module ordinary-goods constant `Штука` |
 | `unitCode` | AQSI-module ordinary-goods constant `0` |
@@ -204,7 +245,7 @@ AQSI publication adds channel-specific requirements:
 - exactly one AQSI shop resolvable;
 - fiscal profile complete;
 - mapped name within AQSI limits;
-- SKU and barcode within AQSI limits;
+- SKU and current barcode within AQSI limits;
 - current positive retail RUB price.
 
 A Variant can therefore be Ready for Sale while not yet ready for AQSI.
@@ -233,10 +274,12 @@ The current channel projection uses these meanings:
 - `accepted` — AQSI accepted create/update into its processing queue;
 - `published` — a later AQSI read verified the expected remote representation;
 - `failed` — a definitive, operator-actionable error occurred;
-- `outdated` — the current Core payload differs from the last verified payload;
+- locally derived `outdated` — the current Core payload differs from the last verified payload;
 - `disabled` — channel publication was intentionally disabled in Core.
 
-`outdated` can be derived by comparing the current canonical payload hash with the last verified payload hash. Catalog and Pricing modules do not call AQSI directly.
+`outdated` is not remote drift detection. It is derived locally by comparing the current canonical
+payload hash with the last verified payload hash. Catalog and Pricing modules do not call AQSI
+directly.
 
 An individual PublicationAttempt additionally uses `processing` while a worker owns it. The worker commits that claim before starting network I/O, so no database transaction remains open while AQSI responds.
 
@@ -327,7 +370,11 @@ Core soft deletion or deactivation does not automatically delete the AQSI good i
 
 Remote deletion is a separate explicit command because it is destructive and may affect cash-register operation. The future command must be authenticated, attributed and recorded as its own attempt.
 
-## First implementation slice
+For the Sprint 7.13 target, archive/delete becomes an automatic synchronization trigger, but the
+adapter must first establish whether the supported AQSI operation is removal or deactivation. Core
+history remains preserved regardless of the remote projection semantics.
+
+## Implemented manual publication slice
 
 1. AQSI configuration, secret handling and connection check.
 2. Configured initial VAT code `6` and deterministic default category.
@@ -340,4 +387,6 @@ Remote deletion is a separate explicit command because it is destructive and may
 9. Fake-client integration tests before using real credentials.
 10. One controlled sandbox or live smoke test with a dedicated test Variant.
 
-The runtime fiscal-profile editor, scheduled VAT changes and controlled bulk republishing remain a documented follow-up. They do not block the first product publication slice.
+This slice is implemented and physically used. The runtime fiscal-profile editor, scheduled VAT
+changes and controlled bulk republishing remain documented follow-up and do not block manual
+product publication.

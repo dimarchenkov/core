@@ -1,5 +1,8 @@
 # Architecture Review v1 — Module Map
 
+> Historical snapshot at the Sprint 8 baseline. It is preserved as audit evidence and must not
+> be used as current capability, label-format or Rental status documentation.
+
 ## Scope
 
 This map describes the current monolith in `src/core` as of Sprint 8. A module is a

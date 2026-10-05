@@ -1,5 +1,8 @@
 # Architecture Review v1 — Service Map
 
+> Historical Sprint 8-era snapshot. Classifications and “current” statements are evidence from
+> that review, not the current source of truth.
+
 ## Classification rule
 
 Every service-like component receives exactly one primary category:

@@ -17,8 +17,9 @@ The employee opens Intake and chooses the natural identification action:
 
 Barcode entry is one workflow regardless of input device: manual typing, a keyboard-emulating
 scanner ending with Enter, and the browser camera all call the same exact lookup. A found code
-offers the existing Variant. An unknown valid code is carried into Photo First creation as its
-manufacturer barcode; the operator does not type it again.
+offers the existing Variant. An unknown valid code is carried into Photo First creation as the
+future EXTERNAL current barcode; the compatibility API field is still named
+`manufacturer_barcode`, and the operator does not type it again.
 
 Supplier, quantity and prices are requested after the physical item has been identified. Supplier remains mandatory before completion because one completed IntakeSession produces exactly one Receipt.
 
@@ -76,7 +77,8 @@ Common fields:
 - nullable `variant_id` for a known position;
 - nullable `product_id` for a new Variant of an existing Product;
 - nullable `image_id`;
-- nullable manufacturer barcode for a new Product/Variant;
+- nullable external barcode for a new Product/Variant (compatibility field
+  `manufacturer_barcode`);
 - new Product and Variant input fields;
 - quantity;
 - purchase price;
@@ -201,7 +203,7 @@ The client supports:
 
 - local email/password login with a token kept only for the browser session;
 - starting and resuming employee-owned drafts;
-- scanner-friendly multi-barcode input plus SKU and Variant selection;
+- scanner-friendly barcode input supporting the accepted formats plus SKU and Variant selection;
 - camera scanning through the native `BarcodeDetector` API when it supports all required formats;
 - `@zxing/browser` 0.2.1 fallback for Safari/iOS and other browsers without BarcodeDetector,
   loaded lazily from a version-pinned unpkg UMD URL with SHA-384 integrity verification;

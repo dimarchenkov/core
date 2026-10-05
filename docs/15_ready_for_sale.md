@@ -13,7 +13,7 @@ A Variant is ready only when all checks pass:
 - the Variant exists, is not archived and is active;
 - it has an active primary image link to a non-deleted Image;
 - it has a non-empty system SKU;
-- it has a numeric primary barcode containing 4–22 digits;
+- it has a numeric current operational barcode containing 4–22 digits;
 - it has a current positive `retail` price in RUB.
 
 Product publication and channel-specific requirements remain separate. Passing this check means the Core item is commercially complete, not that AQSI or another channel has accepted it.

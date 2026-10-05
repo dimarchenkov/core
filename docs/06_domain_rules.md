@@ -15,14 +15,17 @@ and is not a sellable inventory unit.
 
 ## CatalogVariant
 
-`CatalogVariant` is the sellable inventory unit. A variant owns its SKU.
+`CatalogVariant` is the sellable inventory unit. A Variant owns its stable SKU and has exactly one
+replaceable current operational barcode. Stock quantity is derived from immutable Inventory
+movements, not stored on Variant.
 
 ## Separate concepts
 
 Price, Stock, Image, and Publication are separate concepts. They must not be
 stored directly on `CatalogProduct`.
 
-Variant readiness validation will be implemented later.
+Variant readiness is implemented as a derived read policy over current Catalog, Media and Pricing
+facts. It is not persisted as a mutable status.
 
 ## Image concepts
 

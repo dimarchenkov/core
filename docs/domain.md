@@ -54,9 +54,29 @@ Movement является источником истины для остатк�
 
 ## Sale
 
-Документ или подтверждённый внешний факт продажи.
+Транзакционный контекст подтверждённой продажи. Sale владеет Cart/Sale lifecycle, выбором клиента,
+итогами, payment state и fiscalization state; он не является действием Catalog.
 
-После проведения Sale создаёт отрицательные Movement. Inventory не обязан знать детали кассы или канала продаж: он получает контролируемое движение с источником.
+После успешного проведения Sale создаёт отрицательные immutable Movement типа `SALE`. Inventory
+не обязан знать детали кассы или канала продаж: он получает контролируемое движение с источником.
+
+## SaleItem
+
+Историческая позиция Sale. Она ссылается на разрешённый в момент checkout Variant и сохраняет
+достаточный snapshot для реконструкции base unit price, applied discount, final unit price,
+quantity и line total. Изменение будущей цены Variant не переписывает SaleItem.
+
+## Cart
+
+Редактируемая подготовка Sale в отдельном POS workspace. Текущий operational barcode разрешает
+Variant и добавляет одну единицу; повторный scan увеличивает количество. Неизвестный barcode не
+создаёт Catalog entities. Точный lifecycle Cart определяется в Epic 5.
+
+## Customer
+
+Общая бизнес-сущность с актуальными именем и контактами, используемая Rental, будущими Sales,
+Loyalty, purchase history и customer service. Customer не является полями внутри Sale; документы
+хранят ссылку и необходимые исторические snapshots.
 
 ## Rental
 
@@ -87,7 +107,8 @@ Catalog        → описывает Product и Variant
 Supplier       → отвечает, от кого поступил товар
 Receipt        → фиксирует поставку
 Movement       → фиксирует изменение количества
-Sale           → фиксирует продажу
+Customer       → хранит общую актуальную identity клиента
+Sale           → владеет Cart, transaction, payment/fiscal state и фиксирует продажу
 RentalAsset    → идентифицирует арендный экземпляр
 Rental         → управляет временной выдачей RentalAsset
 Workflow       → проводит человека через несколько доменных возможностей

@@ -43,10 +43,20 @@
 
 ## 4. Продажа
 
-1. Касса или пользователь идентифицирует Variant по штрихкоду.
-2. Продажа фиксируется как документ или внешний факт.
-3. Inventory ledger получает расходное движение.
-4. Остаток и автор/источник операции доступны владельцу.
+Это целевой будущий workflow Epic 5, а не текущая product capability:
+
+1. Оператор сканирует один current operational barcode 2D hardware scanner; Core разрешает
+   Variant и добавляет его в Cart. Повторный scan увеличивает quantity на 1.
+2. При необходимости используется fallback search по тексту, SKU или barcode. Неизвестный код
+   даёт ясную ошибку и никогда не создаёт Product/Variant.
+3. Sales/POS, а не Catalog, владеет Cart, Sale, SaleItem, Customer selection, скидками, totals,
+   payment state и fiscalization state.
+4. SaleItem сохраняет base price, applied discount, final price, quantity и line total; скидка
+   Customer не изменяет Catalog Pricing.
+5. После успешного Sale Inventory ledger получает неизменяемые движения `SALE`.
+
+Физически подтверждённый direct AQSI checkout является предпочтительным integration direction,
+но временный spike не является постоянной реализацией Sales.
 
 ## 5. Выдача в аренду
 

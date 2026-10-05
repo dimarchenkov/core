@@ -1,5 +1,11 @@
 # Core MVP
 
+> Historical planning baseline. This document preserves the original MVP boundary and is not the
+> current roadmap or implementation-status source. Rental and later Intake capabilities have
+> since been delivered, while Tilda CSV import remains planned. See
+> [`planning/current.md`](../planning/current.md), [`planning/backlog.md`](../planning/backlog.md)
+> and release notes for current status.
+
 ## Цель MVP
 
 Первая версия Core должна решить одну задачу:

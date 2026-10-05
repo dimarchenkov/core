@@ -2,16 +2,17 @@
 
 Детальные пользовательские сценарии, язык предметной области и продуктовые принципы описаны в [docs/02_user_journeys.md](02_user_journeys.md), [docs/domain.md](domain.md) и [docs/01_principles.md](01_principles.md).
 
-## MVP scope
+## Operational scope
 
-В первой версии Core описываются только процессы, которые нужны для запуска учета:
+Документ описывает текущие рабочие процессы и ближайшие границы:
 
-1. Photo-first приёмка товара с телефона.
-2. Импорт существующих товаров из Tilda CSV.
-3. Подготовка и отправка товаров в AQSI.
-4. Первый вертикальный срез аренды оборудования как равноправного жизненного цикла.
+1. Операционно пригодная photo-first приёмка товара с телефона.
+2. Ручная подготовка и публикация товаров Core → AQSI.
+3. Реализованный операционный жизненный цикл аренды оборудования.
+4. Будущий отдельный Sales/POS context.
 
-Все остальные процессы считаются будущими расширениями.
+Импорт Tilda CSV, автоматическая AQSI synchronization и Sales остаются roadmap; они не должны
+описываться как уже работающие части Intake.
 
 ---
 
@@ -79,8 +80,9 @@ Completed Intake
   → per-variant status / retry failures
 ```
 
-Barcode однозначно идентифицирует Variant. Один manufacturer barcode нельзя назначить нескольким
-Variant; неоднозначный lookup и Product-level barcode пока не поддерживаются.
+Variant имеет ровно один current operational barcode. Barcode не является identity Variant;
+заменённые значения не остаются активными aliases. Неоднозначный lookup и Product-level barcode
+не поддерживаются.
 
 Camera scanning по HTTPS является deployment requirement. При недоступности камеры оператор
 использует ручной ввод или аппаратный scanner.

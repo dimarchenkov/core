@@ -107,6 +107,7 @@ FastAPI Application
         +-- Pricing
         +-- Media
         +-- Customers
+        +-- Sales
         +-- Rental
         +-- Publishing
         +-- ImportExport
@@ -160,6 +161,7 @@ API не должен содержать сложную бизнес-логик�
 - сгенерировать SKU;
 - загрузить фото;
 - отправить товар в AQSI;
+- провести продажу;
 - создать договор аренды.
 
 ---
@@ -288,17 +290,20 @@ Product содержит название, категорию, основное 
 штрихкода, quantity, закупочной цены, цены продажи или rental commercial terms.
 
 Variant существует всегда. Даже товар без видимых вариантов имеет один default Variant, который
-клиентский UI может скрывать, пока он единственный. Variant имеет SKU, barcode, variant photo,
-коммерческие условия и публикации. Quantity существует только для Variant в контексте Intake и
-Inventory и изменяется через складской ledger.
+клиентский UI может скрывать, пока он единственный. Variant имеет SKU, ровно один current
+operational barcode, variant photo, коммерческие условия и публикации. Quantity существует
+только для Variant в контексте Intake и Inventory и изменяется через складской ledger.
 
-Один barcode глобально и однозначно идентифицирует один Variant. Несколько кодов одного Variant
-допустимы, но одинаковый manufacturer barcode у разных Variant, Product-level barcode и
-ambiguous barcode lookup пока не поддерживаются.
+Barcode не является identity Variant. Он имеет origin INTERNAL или EXTERNAL, может быть заменён,
+а старое значение не остаётся active scanner alias. Удаление EXTERNAL создаёт fresh INTERNAL;
+delete-to-regenerate для INTERNAL не является нормальной операцией. Product-level barcode и
+ambiguous lookup не поддерживаются. Канонические правила: `docs/14_product_identifiers.md`.
 ```
 
 Catalog управляет уже существующим каталогом: исправляет карточки, меняет коммерческие данные,
 перепечатывает labels и повторяет публикации. Он не является обязательным вторым шагом Intake.
+Catalog не владеет Cart, Sale, скидками, оплатой или фискализацией и не должен скрывать checkout
+как action внутри карточки товара.
 
 ---
 
@@ -333,17 +338,64 @@ Catalog управляет уже существующим каталогом: �
 Цена не хранится напрямую в Variant.
 ```
 
-Один Variant может иметь несколько типов цен:
+Реализованные типы текущих предложений Variant:
 
-- purchase;
 - retail;
 - promo;
-- rental_day;
-- rental_week;
-- aqsi;
-- tilda;
-- wb;
-- yamarket.
+- rental;
+- rental_deposit.
+
+Purchase price принадлежит ReceiptItem как исторический факт поставки. Customer discount в
+будущем принадлежит Cart/Sale snapshot и не меняет Pricing.
+
+---
+
+## Sales
+
+Sales — отдельный transaction context и будущее рабочее место POS. Он отвечает за Cart, Sale,
+позиции, customer selection, скидки, totals, payment state и fiscalization state. Catalog остаётся
+product reference/master data: Product, Variant, current barcode и ссылки на current Price. Stock
+projection принадлежит Inventory и только читается Sales. Точные имена классов и state machine
+будут утверждены в design Epic 5.
+
+Целевой пользовательский поток:
+
+```text
+2D HID/keyboard scan current operational barcode
+    -> resolve active Variant
+    -> add quantity 1 to Cart (repeat scan: quantity +1)
+    -> optional text / SKU / barcode search
+    -> optional Customer and percentage discount
+    -> calculate and snapshot totals
+    -> direct AQSI acquiring
+    -> itemized fiscalization
+    -> complete Sale
+    -> immutable Inventory SALE movements
+```
+
+Неизвестный barcode даёт ясную операторскую ошибку и не создаёт Product или Variant. Sales
+сохраняет снимки base price, discount, final price, quantity и totals; customer discount не
+изменяет Pricing. Sales является бизнес-источником будущих движений `SALE`, а Inventory остаётся
+неизменяемым ledger.
+
+Граница AQSI для Sales:
+
+```text
+Core owns Cart / Sale and final business outcome
+    -> AQSI cloud/device performs acquiring and fiscal operations
+    -> Core records payment, fiscalization and Sale result
+```
+
+Физически подтверждены два integration pattern. Pending Order передаёт itemized order, который
+оператор выбирает в меню AQSI; он полезен для pre-created/remote/pickup orders, но не является
+предпочтительным обычным checkout. Direct checkout запускает acquiring без menu navigation, а
+после оплаты — itemized fiscalization; это целевое направление обычного POS. Временный spike
+доказал внешнюю интеграцию, но не является production-архитектурой Sales.
+
+Оба pattern зависят от Internet и AQSI cloud API. Поведение при недоступности, durable duplicate
+payment protection, unknown outcome, acquiring success + fiscalization failure,
+cancellation/refund/reversal и поддерживаемые cash/card/SBP сценарии остаются открытыми решениями
+Epic 5.
 
 ---
 
@@ -418,6 +470,11 @@ Customers владеет актуальной карточкой и контак
 snapshot данных, необходимых для исторического представления заказа. Customers не управляет
 заказами, экземплярами, платежами или пользовательскими аккаунтами.
 
+Customer — shared business entity, а не часть Rental или набор полей внутри Sale. Существующий
+bounded context должен позже обслуживать Sales, Loyalty, purchase history, returns/customer
+service и Rental. Начальный Loyalty MVP — постоянная процентная скидка клиента; он проектируется
+после устойчивого Cart/Sale context и не меняет Catalog/Pricing.
+
 ### Intake и границы транзакции
 
 Rental и Inventory не координируют друг друга напрямую.
@@ -426,15 +483,17 @@ Intake является application orchestration workflow и полным ра�
 `ready-for-sale`. Одна пользовательская позиция Intake представляет Product и один или несколько
 Variant, поступивших сейчас. Draft допускает добавление, удаление и редактирование вариантов.
 
-Сохранённый Variant со штрихкодом должен иметь доступную barcode label до Complete Intake и
+Сохранённый Variant с current EAN-13 barcode имеет доступную barcode label до Complete Intake и
 независимо от экрана, на котором Variant был создан. Генерация label зависит от сохранённой
 identity Variant, а не от наличия StockMovement или завершённой Intake.
 
 Для нового Variant Intake резервирует следующий номер общей Catalog sequence и сохраняет
-`reserved_sku` вместе с соответствующим internal EAN-13. Резервация не создаёт Catalog Variant
-или Inventory fact, не переиспользуется после удаления draft и атомарно переносится в настоящий
-Variant при Complete. Поэтому label до Complete и Catalog после Complete печатают одну и ту же
-физическую identity без временных браузерных кодов.
+`reserved_sku` вместе с кандидатом INTERNAL EAN-13. Резервация не создаёт Catalog Variant или
+Inventory fact и не переиспользуется после удаления draft. Если оператор не указал внешний код,
+этот INTERNAL становится current при Complete. Если внешний код указан, именно он становится
+единственным current barcode; зарезервированное внутреннее значение не становится active
+fallback. Label до Complete и Catalog после Complete используют один и тот же выбранный current
+code, а не временный браузерный идентификатор.
 
 При завершении `CompleteIntakeWorkflow` координирует Catalog, Pricing, Receipt, Inventory и Rental
 и является единственным владельцем общей SQL-транзакции. Проведение атомарно фиксирует складские
@@ -462,10 +521,14 @@ flowchart LR
 
 ### Печать товарных этикеток
 
-`Labels` формирует векторные PDF с точным физическим размером 40 × 30 или 58 × 40 мм. Готовность
-этикетки означает наличие сохранённой Variant identity и корректного internal EAN-13; она не
-зависит от Inventory, фото, retail price, AQSI или Complete Intake. Печать является отдельным
-side effect и никогда не входит в транзакцию проведения Intake.
+Каноническая Product label — векторный PDF 40 × 30 мм с current EAN-13: X-dimension 0,300 мм,
+95 bar modules = 28,5 мм, quiet zones по 9 modules, total width 33,9 мм. Она показывает Product,
+meaningful Variant, текущую retail price и barcode, но не технический default Variant или SKU.
+Отсутствующая цена не превращается в ноль. Профиль Product 58 × 40 сохраняется только для
+совместимости; независимые RentalAsset/RENT labels могут иметь оба размера. Канонические правила:
+`docs/16_labels.md`.
+
+Печать является отдельным side effect и никогда не входит в транзакцию проведения Intake.
 
 Граница прямой печати:
 
@@ -518,11 +581,17 @@ USB passthrough и privileged container не нужны. PDF/system print ост
 Внешние системы не являются источником истины.
 ```
 
+Для AQSI Core является business source of truth, а AQSI — внешней catalog/payment/fiscal
+интеграцией. Текущая manual publication уже используется в production. Целевая автоматическая
+синхронизация выполняет near-immediate event-driven projection и периодическую reconciliation;
+reconciliation проверяет ожидаемое состояние Core, а не создаёт двустороннее владение. Все AQSI
+операции зависят от AQSI cloud API и доступности Internet.
+
 ---
 
 ## ImportExport
 
-Отвечает за:
+Целевая, пока не реализованная граница отвечает за:
 
 - импорт CSV из Tilda;
 - будущий импорт Excel;
