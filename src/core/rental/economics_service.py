@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -64,9 +65,7 @@ class RentalEconomicsService:
         economics = [self._asset_projection(asset) for asset in assets]
         lifetime_days = [
             max(
-                Decimal(
-                    str((self._now - self._aware(asset.created_at)).total_seconds() / 86400)
-                ),
+                Decimal(str((self._now - self._aware(asset.created_at)).total_seconds() / 86400)),
                 Decimal("1"),
             )
             for asset in assets
@@ -104,23 +103,70 @@ class RentalEconomicsService:
             ).all()
         )
         rows = [self.get_variant(variant_id) for variant_id in variant_ids]
+        return self.summarize_product(product_id, rows)
+
+    def summarize_product(
+        self,
+        product_id: UUIDv7,
+        rows: Iterable[RentalAssetEconomicsRead | RentalVariantEconomicsRead],
+    ) -> RentalProductEconomicsRead:
+        """Aggregate already-loaded rental economics without additional database queries."""
+        collected = list(rows)
         return RentalProductEconomicsRead(
             product_id=product_id,
-            asset_count=sum(row.asset_count for row in rows),
-            revenue=self._sum(row.revenue for row in rows),
-            expenses=self._sum(row.expenses for row in rows),
-            profit=self._sum(row.profit for row in rows),
-            rental_count=sum(row.rental_count for row in rows),
+            asset_count=sum(getattr(row, "asset_count", 1) for row in collected),
+            revenue=self._sum(row.revenue for row in collected),
+            expenses=self._sum(row.expenses for row in collected),
+            profit=self._sum(
+                row.profit if isinstance(row, RentalVariantEconomicsRead) else row.net_income
+                for row in collected
+            ),
+            rental_count=sum(row.rental_count for row in collected),
         )
 
     def get_assets(self, asset_ids: list[UUIDv7]) -> dict[UUIDv7, RentalAssetEconomicsRead]:
         """Build projections for a bounded asset collection used by catalog reads."""
         if not asset_ids:
             return {}
-        assets = self._session.scalars(
-            select(RentalAssetRecord).where(RentalAssetRecord.id.in_(asset_ids))
+        assets = list(
+            self._session.scalars(
+                select(RentalAssetRecord).where(RentalAssetRecord.id.in_(asset_ids))
+            ).all()
+        )
+        order_rows = self._session.execute(
+            select(RentalOrderItemRecord, RentalOrderRecord)
+            .join(RentalOrderRecord, RentalOrderRecord.id == RentalOrderItemRecord.order_id)
+            .where(
+                RentalOrderItemRecord.rental_asset_id.in_(asset_ids),
+                RentalOrderItemRecord.status.in_(
+                    (RentalOrderItemStatus.RETURNED, RentalOrderItemStatus.LOST)
+                ),
+                RentalOrderItemRecord.charged_amount.is_not(None),
+            )
+            .order_by(RentalOrderItemRecord.returned_at)
         ).all()
-        return {asset.id: self._asset_projection(asset) for asset in assets}
+        maintenance_rows = self._session.scalars(
+            select(RentalMaintenanceRecord).where(
+                RentalMaintenanceRecord.rental_asset_id.in_(asset_ids)
+            )
+        ).all()
+        orders_by_asset: dict[
+            UUIDv7,
+            list[tuple[RentalOrderItemRecord, RentalOrderRecord]],
+        ] = defaultdict(list)
+        maintenance_by_asset: dict[UUIDv7, list[RentalMaintenanceRecord]] = defaultdict(list)
+        for item, order in order_rows:
+            orders_by_asset[item.rental_asset_id].append((item, order))
+        for maintenance in maintenance_rows:
+            maintenance_by_asset[maintenance.rental_asset_id].append(maintenance)
+        return {
+            asset.id: self._asset_projection_from_rows(
+                asset,
+                orders_by_asset[asset.id],
+                maintenance_by_asset[asset.id],
+            )
+            for asset in assets
+        }
 
     def _asset_projection(self, asset: RentalAssetRecord) -> RentalAssetEconomicsRead:
         rows = self._session.execute(
@@ -142,6 +188,15 @@ class RentalEconomicsService:
                 )
             ).all()
         )
+        return self._asset_projection_from_rows(asset, rows, maintenance)
+
+    def _asset_projection_from_rows(
+        self,
+        asset: RentalAssetRecord,
+        rows: Sequence[tuple[RentalOrderItemRecord, RentalOrderRecord]],
+        maintenance: Sequence[RentalMaintenanceRecord],
+    ) -> RentalAssetEconomicsRead:
+        """Calculate one asset projection from facts already loaded by the caller."""
         revenue = self._sum(item.charged_amount or ZERO for item, _ in rows)
         expenses = self._sum(record.cost for record in maintenance)
         durations = [

@@ -177,6 +177,7 @@ class IntakeSessionRead(PydanticBaseModel):
     id: UUIDv7
     owner_id: UUIDv7
     status: IntakeSessionStatus
+    is_test: bool
     supplier_id: UUIDv7 | None
     receipt_id: UUIDv7 | None
     completed_at: datetime | None

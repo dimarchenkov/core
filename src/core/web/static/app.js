@@ -39,6 +39,7 @@ function routeFromLocation() {
     return {
       name,
       mode: params.get("mode") || undefined,
+      status: params.get("status") || undefined,
       query: params.get("query") || undefined,
       categoryId: params.get("category_id") || undefined,
       supplierId: params.get("supplier_id") || undefined,
@@ -185,12 +186,15 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     let detail = `Ошибка ${response.status}`;
+    let responseDetail = null;
     try {
       const payload = await response.json();
+      responseDetail = payload.detail;
       detail = typeof payload.detail === "string" ? payload.detail : detail;
     } catch { /* response is not JSON */ }
     const error = new Error(detail);
     error.status = response.status;
+    error.detail = responseDetail;
     throw error;
   }
   if (response.status === 204) return null;
@@ -1329,12 +1333,14 @@ async function refreshIntakeAqsi() {
 
 function normalizeCatalogState(value = {}) {
   const modes = ["sale", "rental", "all"];
+  const statuses = ["active", "archived", "all"];
   const filters = ["missing_price", "missing_photo", "aqsi_problem", "out_of_stock"];
   const rentalFilters = ["all", "available", "needs_price", "never_rented", "paid_back", "high_expenses", "long_idle"];
   const sorts = ["title", "revenue", "rental_count", "profit", "last_rental"];
   const mode = modes.includes(value.mode) ? value.mode : "sale";
   return {
     mode,
+    status: statuses.includes(value.status) ? value.status : "active",
     query: String(value.query || "").trim(),
     categoryId: value.categoryId || "",
     supplierId: value.supplierId || "",
@@ -1348,6 +1354,7 @@ function catalogUrlParams(value, includeDefaults = true) {
   const catalog = normalizeCatalogState(value);
   const params = new URLSearchParams();
   if (includeDefaults || catalog.mode !== "sale") params.set("mode", catalog.mode);
+  if (includeDefaults || catalog.status !== "active") params.set("status", catalog.status);
   if (catalog.query) params.set("query", catalog.query);
   if (catalog.categoryId) params.set("category_id", catalog.categoryId);
   if (catalog.supplierId) params.set("supplier_id", catalog.supplierId);
@@ -1376,12 +1383,7 @@ async function openOperationsCatalog(options = {}) {
 function renderOperationsCatalog(catalog) {
   document.body.classList.remove("catalog-drawer-open");
   const rows = state.operations.products.length
-    ? state.operations.products.map((product) => `
-      <button class="catalog-row catalog-product-row" data-product-id="${product.id}">
-        ${product.primary_image_id ? `<img class="catalog-photo image-preview-trigger" data-image-id="${product.primary_image_id}" data-image-preview="${product.primary_image_id}" tabindex="0" role="button" aria-label="Открыть фото: ${escapeHtml(product.title)}" alt="${escapeHtml(product.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
-        <span><strong>${escapeHtml(product.title)}</strong><br><span class="muted small">${escapeHtml(product.skus.join(", ") || "Без SKU")}</span></span>
-        <span class="catalog-counts"><strong>${formatMoney(product.economics.profit)}</strong><span>Операционный результат</span><span>Доход ${formatMoney(product.economics.revenue)}</span><span>${product.economics.rental_count} аренд</span><span class="${product.available_asset_count ? "available-text" : "muted"}">${product.available_asset_count} доступно</span>${product.needs_initial_price ? '<span class="chip warn">Нужно указать цену</span>' : ""}</span>
-      </button>`).join("")
+    ? state.operations.products.map((product) => renderCatalogProductCard(product, catalog)).join("")
     : '<div class="empty">Товары не найдены</div>';
   const selectedCategory = state.categories.find((category) => category.id === catalog.categoryId);
   const categoryLabel = selectedCategory?.title || "Все";
@@ -1429,6 +1431,7 @@ function renderOperationsCatalog(catalog) {
       </form>
     </dialog>
     ${renderCategoryCreateDialog()}
+    <dialog class="catalog-action-dialog" id="catalog-action-dialog"><div id="catalog-action-content"></div></dialog>
   </div>`;
   bindTopbar();
   hydrateImages();
@@ -1436,12 +1439,88 @@ function renderOperationsCatalog(catalog) {
   bindCatalogShell(catalog);
 }
 
+function renderCatalogProductCard(product, catalog) {
+  const mode = catalog.mode;
+  const visibleVariants = catalogVariantsForMode(product.card_variants, mode);
+  const variants = visibleVariants.length
+    ? visibleVariants.map((variant) => renderCatalogVariantRow(variant, mode)).join("")
+    : `<span class="catalog-card-empty muted">${catalog.status === "archived" ? "Нет архивных вариантов" : "Нет активных вариантов"}</span>`;
+  const category = product.is_archived
+    ? `<span class="chip category-chip">${escapeHtml(product.category_label)}</span>`
+    : `<button class="chip category-chip category-action" data-change-product-category="${product.id}" type="button" title="Изменить категорию: ${escapeHtml(product.category_label)}">${escapeHtml(product.category_label)} <span aria-hidden="true">⌄</span></button>`;
+  return `<article class="catalog-row catalog-product-row catalog-product-card ${product.is_archived ? "archived" : ""}">
+    ${product.primary_image_id ? `<img class="catalog-photo" data-image-id="${product.primary_image_id}" alt="${escapeHtml(product.title)}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
+    <span class="catalog-card-body">
+      <span class="catalog-card-heading"><button class="catalog-card-open" data-open-product="${product.id}" type="button"><strong class="catalog-card-title">${escapeHtml(product.title)}</strong>${product.is_test ? '<span class="chip test-chip">ТЕСТ</span>' : ""}${product.is_archived ? '<span class="chip archive-chip">АРХИВ</span>' : ""}</button>${category}</span>
+      <span class="catalog-variant-list">${variants}</span>
+      ${renderCatalogEconomicsSummary(product, mode)}
+    </span>
+    <button class="catalog-card-chevron" data-open-product="${product.id}" type="button" aria-label="Открыть товар ${escapeHtml(product.title)}">›</button>
+  </article>`;
+}
+
+function catalogVariantsForMode(variants, mode) {
+  if (mode === "rental") return variants.filter((variant) => variant.rental_row_visible);
+  if (mode === "sale") {
+    const saleVariants = variants.filter((variant) => variant.sale_row_visible);
+    return saleVariants.length ? saleVariants : variants.filter((variant) => variant.rental_row_visible);
+  }
+  return variants;
+}
+
+function renderCatalogVariantRow(variant, mode) {
+  const commercialRows = [];
+  if (mode !== "rental" && variant.sale_row_visible) commercialRows.push(renderCatalogSaleRow(variant));
+  if (mode !== "sale" && variant.rental_row_visible) commercialRows.push(renderCatalogRentalRow(variant));
+  if (mode === "sale" && !variant.sale_row_visible && variant.rental_row_visible) commercialRows.push(renderCatalogRentalRow(variant));
+  return `<span class="catalog-variant-row ${variant.is_archived ? "archived" : ""}">
+    <span class="catalog-variant-identity">${variant.title ? `<strong>${escapeHtml(variant.title)}</strong>` : ""}${variant.is_archived ? '<span class="chip archive-chip">АРХИВНЫЙ ВАРИАНТ</span>' : ""}<span class="catalog-sku">${escapeHtml(variant.sku)}</span></span>
+    <span class="catalog-commercial-rows">${commercialRows.join("")}</span>
+  </span>`;
+}
+
+function renderCatalogSaleRow(variant) {
+  const quantity = Number(variant.sale_quantity);
+  const quantityClass = quantity < 0 ? "negative" : quantity === 0 ? "zero" : "positive";
+  const price = variant.current_retail_price === null
+    ? '<strong class="catalog-price missing">Цена не указана</strong>'
+    : `<strong class="catalog-price">${formatMoney(variant.current_retail_price)}</strong>`;
+  return `<span class="catalog-commercial-row sale"><span class="catalog-channel-label">Продажа</span>${price}<span class="catalog-quantity ${quantityClass}">${formatQuantity(variant.sale_quantity)}</span>${renderCatalogCardAqsiStatus(variant)}</span>`;
+}
+
+function renderCatalogRentalRow(variant) {
+  const price = variant.current_rental_price === null
+    ? '<strong class="catalog-price missing">Цена аренды не указана</strong>'
+    : `<strong class="catalog-price">${formatMoney(variant.current_rental_price)}</strong>`;
+  return `<span class="catalog-commercial-row rental"><span class="catalog-channel-label">Аренда</span>${price}<span class="catalog-quantity">${variant.rental_asset_count} экз.</span></span>`;
+}
+
+function renderCatalogCardAqsiStatus(variant) {
+  if (variant.aqsi_status === "failed") return '<span class="chip danger catalog-aqsi">⚠ AQSI: ошибка</span>';
+  if (variant.aqsi_status === "disabled") return '<span class="chip catalog-aqsi">AQSI отключено</span>';
+  if (variant.aqsi_status === "published" && variant.aqsi_is_current) return '<span class="chip good catalog-aqsi">✓ AQSI</span>';
+  if (variant.aqsi_status === "published") return '<span class="chip warn catalog-aqsi">⚠ Требует обновления</span>';
+  if (["pending", "accepted"].includes(variant.aqsi_status)) return '<span class="chip catalog-aqsi">● Публикуется</span>';
+  return '<span class="chip warn catalog-aqsi">⚠ Не опубликовано</span>';
+}
+
+function renderCatalogEconomicsSummary(product, mode) {
+  if (mode === "sale" || !product.rental_economics_applicable) return "";
+  const metrics = [
+    `<span class="catalog-economics-metric rental"><span class="muted">Результат аренды:</span> <strong>${formatMoney(product.economics.profit)}</strong></span>`,
+  ];
+  const details = mode === "rental"
+    ? `<span>Доход ${formatMoney(product.economics.revenue)}</span><span>${product.economics.rental_count} аренд</span><span>${product.available_asset_count} доступно</span>`
+    : `<span>${product.economics.rental_count} аренд · ${product.available_asset_count} доступно</span>`;
+  return `<span class="catalog-economics-summary ${mode}"><span class="catalog-economics-metrics">${metrics.join("")}</span>${details}</span>`;
+}
+
 function catalogModeButton(value, label, active) {
   return `<button class="catalog-mode ${value === active ? "active" : ""}" data-catalog-mode="${value}" type="button" aria-pressed="${value === active}">${label}</button>`;
 }
 
 function catalogFilterCount(catalog) {
-  return catalog.attention.length + (catalog.supplierId ? 1 : 0) + (catalog.productFilter !== "all" ? 1 : 0);
+  return catalog.attention.length + (catalog.status !== "active" ? 1 : 0) + (catalog.supplierId ? 1 : 0) + (catalog.productFilter !== "all" ? 1 : 0);
 }
 
 function renderCatalogCategoryNavigation(catalog) {
@@ -1498,8 +1577,17 @@ function renderCatalogFilters(catalog, mobile) {
     ${catalogRentalFilter("high_expenses", "Высокие расходы", catalog.productFilter, prefix)}
     ${catalogRentalFilter("long_idle", "Давно не сдавался", catalog.productFilter, prefix)}
   </fieldset>` : "";
-  return `<fieldset class="catalog-filter-group"><legend>Требуют внимания</legend>${attention}</fieldset>
+  return `<fieldset class="catalog-filter-group"><legend>Статус</legend>
+      ${catalogStatusFilter("active", "Активные", catalog.status, prefix)}
+      ${catalogStatusFilter("archived", "Архивные", catalog.status, prefix)}
+      ${catalogStatusFilter("all", "Все", catalog.status, prefix)}
+    </fieldset>
+    <fieldset class="catalog-filter-group"><legend>Требуют внимания</legend>${attention}</fieldset>
     <div class="field"><label for="${prefix}-catalog-supplier">Поставщик</label><select id="${prefix}-catalog-supplier" name="supplier_id" ${mobile ? "" : "data-desktop-supplier"}><option value="">Все</option>${suppliers}</select></div>${rental}`;
+}
+
+function catalogStatusFilter(value, label, active, prefix) {
+  return `<label class="catalog-check"><input type="radio" name="status" value="${value}" ${value === active ? "checked" : ""} ${prefix === "desktop" ? "data-desktop-status" : ""}><span>${label}</span></label>`;
 }
 
 function catalogRentalFilter(value, label, active, prefix) {
@@ -1541,14 +1629,18 @@ function bindCatalogShell(catalog) {
       openOperationsCatalog({ ...catalog, attention });
     });
   });
+  document.querySelectorAll("[data-desktop-status]").forEach((input) => {
+    input.addEventListener("change", () => openOperationsCatalog({ ...catalog, status: input.value }));
+  });
   document.querySelector("[data-desktop-supplier]").addEventListener("change", (event) => openOperationsCatalog({ ...catalog, supplierId: event.target.value }));
   document.querySelectorAll("[data-desktop-rental-filter]").forEach((input) => {
     input.addEventListener("change", () => openOperationsCatalog({ ...catalog, productFilter: input.value }));
   });
   document.querySelector("#operations-product-sort").addEventListener("change", (event) => openOperationsCatalog({ ...catalog, sort: event.target.value }));
-  document.querySelectorAll("[data-product-id]").forEach((button) => {
-    button.addEventListener("click", () => openOperationsProduct(button.dataset.productId));
+  document.querySelectorAll("[data-open-product]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsProduct(button.dataset.openProduct));
   });
+  document.querySelectorAll("[data-change-product-category]").forEach((button) => button.addEventListener("click", () => openCatalogCategoryPicker(button.dataset.changeProductCategory)));
   document.querySelector("#open-category-drawer").addEventListener("click", () => openCatalogDrawer("#catalog-category-dialog"));
   document.querySelector("#open-filter-drawer").addEventListener("click", () => openCatalogDrawer("#catalog-filter-dialog"));
   document.querySelectorAll(".catalog-drawer").forEach((dialog) => {
@@ -1572,9 +1664,162 @@ function bindCatalogShell(catalog) {
   document.querySelector("#catalog-mobile-filter-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    openOperationsCatalog({ ...catalog, attention: data.getAll("attention"), supplierId: data.get("supplier_id") || "", productFilter: data.get("product_filter") || "all" });
+    openOperationsCatalog({ ...catalog, status: data.get("status") || "active", attention: data.getAll("attention"), supplierId: data.get("supplier_id") || "", productFilter: data.get("product_filter") || "all" });
   });
-  document.querySelector("#catalog-filters-reset").addEventListener("click", () => openOperationsCatalog({ ...catalog, attention: [], supplierId: "", productFilter: "all" }));
+  document.querySelector("#catalog-filters-reset").addEventListener("click", () => openOperationsCatalog({ ...catalog, status: "active", attention: [], supplierId: "", productFilter: "all" }));
+}
+
+function openCatalogActionDialog(content) {
+  const dialog = document.querySelector("#catalog-action-dialog");
+  document.querySelector("#catalog-action-content").innerHTML = content;
+  document.body.classList.add("catalog-drawer-open");
+  if (!dialog.open) dialog.showModal();
+  dialog.addEventListener("close", () => document.body.classList.remove("catalog-drawer-open"), { once: true });
+  return dialog;
+}
+
+function openCatalogCategoryPicker(productId) {
+  const product = state.operations.products.find((item) => item.id === productId);
+  if (!product) return;
+  const activeCategories = state.categories.filter((category) => category.is_active);
+  const currentIsActive = activeCategories.some((category) => category.id === product.category_id);
+  const currentOption = currentIsActive ? "" : `<option value="" selected disabled>${escapeHtml(product.category_label)} · недоступна</option>`;
+  const options = currentOption + activeCategories.map((category) => `<option value="${category.id}" ${category.id === product.category_id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
+  const dialog = openCatalogActionDialog(`<form id="catalog-category-picker-form">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">${escapeHtml(product.title)}</p><h2>Категория товара</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <div class="field"><label for="catalog-card-category">Активная категория</label><select id="catalog-card-category" name="category_id" required autofocus>${options}</select></div>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button" type="submit">Сохранить</button></div>
+  </form>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector("#catalog-category-picker-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      await api(`/api/catalog/products/${productId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ category_id: new FormData(event.currentTarget).get("category_id") }),
+      });
+      dialog.close();
+      await openOperationsCatalog(state.operations.catalog || {});
+      showToast("Категория обновлена");
+    } catch (error) {
+      showToast(error.message, true);
+      button.disabled = false;
+    }
+  });
+}
+
+async function openCatalogDeletePreflight(entityType, entityId) {
+  try {
+    const collection = entityType === "product" ? "products" : "variants";
+    const preflight = await api(`/api/catalog/${collection}/${entityId}/hard-delete-preflight`);
+    renderCatalogDeletePreflight(preflight);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function renderCatalogDependencyList(items) {
+  return items.length
+    ? `<ul class="catalog-dependency-list">${items.map((item) => `<li><strong>${item.count}</strong> · ${escapeHtml(item.label)}</li>`).join("")}</ul>`
+    : "";
+}
+
+function renderCatalogDeletePreflight(preflight) {
+  const blocked = !preflight.can_delete;
+  const entityLabel = preflight.entity_type === "product" ? "товар" : "вариант";
+  const lastVariant = preflight.entity_type === "variant" && preflight.is_last_variant;
+  const dialog = openCatalogActionDialog(`<div class="catalog-delete-dialog">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Безвозвратное действие</p><h2>${blocked ? `Нельзя удалить ${entityLabel} навсегда` : `Удалить «${escapeHtml(preflight.title)}» навсегда?`}</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    ${blocked ? `<p>С объектом связана защищённая бизнес-история:</p>${renderCatalogDependencyList(preflight.blockers)}` : `<p>Будет удалено:</p>${renderCatalogDependencyList(preflight.will_delete)}<p class="danger-note">Отменить это действие будет невозможно.</p>`}
+    ${preflight.warnings.map((warning) => `<p class="catalog-delete-warning">⚠ ${escapeHtml(warning)}</p>`).join("")}
+    ${lastVariant ? '<p class="catalog-delete-warning">Это последний вариант товара. Товар без вариантов допустим и останется в каталоге.</p>' : ""}
+    <div class="catalog-dialog-actions ${lastVariant && !blocked ? "three" : ""}">
+      <button class="button secondary" data-action-cancel type="button">Отмена</button>
+      ${blocked ? '<button class="button danger" data-archive-entity type="button">Архивировать вместо удаления</button>' : `<button class="button danger" data-confirm-hard-delete type="button">${lastVariant ? "Удалить только вариант" : "Удалить навсегда"}</button>${lastVariant ? '<button class="button danger outline" data-delete-whole-product type="button">Удалить товар целиком</button>' : ""}`}
+    </div>
+  </div>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector("[data-confirm-hard-delete]")?.addEventListener("click", (event) => executeCatalogDelete(preflight, event.currentTarget, true));
+  dialog.querySelector("[data-archive-entity]")?.addEventListener("click", (event) => executeCatalogDelete(preflight, event.currentTarget, false));
+  dialog.querySelector("[data-delete-whole-product]")?.addEventListener("click", () => {
+    dialog.close();
+    openCatalogDeletePreflight("product", preflight.product_id);
+  });
+}
+
+async function executeCatalogDelete(preflight, button, hardDelete) {
+  button.disabled = true;
+  const collection = preflight.entity_type === "product" ? "products" : "variants";
+  const suffix = hardDelete ? "/hard" : "";
+  try {
+    await api(`/api/catalog/${collection}/${preflight.entity_id}${suffix}`, { method: "DELETE" });
+    document.querySelector("#catalog-action-dialog")?.close();
+    if (preflight.entity_type === "variant") {
+      await openOperationsProduct(preflight.product_id);
+    } else {
+      await openOperationsCatalog(state.operations.catalog || {});
+    }
+    showToast(hardDelete ? "Удалено навсегда" : "Перемещено в архив");
+  } catch (error) {
+    if (error.status === 409 && error.detail && typeof error.detail === "object") {
+      renderCatalogDeletePreflight(error.detail);
+      return;
+    }
+    showToast(error.message, true);
+    button.disabled = false;
+  }
+}
+
+async function openCatalogTestDataPreflight(productId, action) {
+  try {
+    const preflight = await api(`/api/catalog/products/${productId}/test-data-preflight`);
+    renderCatalogTestDataPreflight(preflight, action);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function renderCatalogTestDataPreflight(preflight, action) {
+  const classify = action === "classify";
+  const allowed = classify ? preflight.can_classify : preflight.can_purge;
+  const title = classify ? "Пометить как тестовые данные?" : "Удалить тестовые данные навсегда?";
+  const dialog = openCatalogActionDialog(`<div class="catalog-delete-dialog">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Административная операция</p><h2>${title}</h2><p><strong>${escapeHtml(preflight.title)}</strong></p></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    ${allowed ? `<p>${classify ? "Граф будет явно классифицирован как TEST:" : "Будет удалено навсегда:"}</p>${renderCatalogDependencyList(preflight.dependencies)}` : `<p>Операция заблокирована зависимостями:</p>${renderCatalogDependencyList(preflight.blockers)}`}
+    ${preflight.warnings.map((warning) => `<p class="catalog-delete-warning">⚠ ${escapeHtml(warning)}</p>`).join("")}
+    ${classify ? '<p class="muted small">Классификация не удаляет данные. Перед будущей очисткой сервер снова проверит весь граф.</p>' : '<p class="danger-note">Эти данные не попадут в архив. Отменить удаление будет невозможно.</p>'}
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button>${allowed ? `<button class="button danger" data-confirm-test-data type="button">${classify ? "Пометить как тестовые данные" : "Удалить тест полностью"}</button>` : ""}</div>
+  </div>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector("[data-confirm-test-data]")?.addEventListener("click", (event) => executeCatalogTestData(preflight, action, event.currentTarget));
+}
+
+async function executeCatalogTestData(preflight, action, button) {
+  button.disabled = true;
+  const endpoint = action === "classify" ? "classify-test-data" : "purge-test-data";
+  try {
+    await api(`/api/catalog/products/${preflight.product_id}/${endpoint}`, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    });
+    document.querySelector("#catalog-action-dialog")?.close();
+    if (action === "classify") {
+      await openOperationsProduct(preflight.product_id);
+      showToast("Товар и его граф помечены как тестовые данные");
+    } else {
+      await openOperationsCatalog(state.operations.catalog || {});
+      showToast("Тестовые данные удалены полностью");
+    }
+  } catch (error) {
+    if (error.status === 409 && error.detail && typeof error.detail === "object") {
+      renderCatalogTestDataPreflight(error.detail, action);
+      return;
+    }
+    showToast(error.message, true);
+    button.disabled = false;
+  }
 }
 
 async function createCatalogCategory(event, catalog) {
@@ -1612,31 +1857,34 @@ async function openOperationsProduct(productId) {
       api("/api/catalog/categories"),
       api("/api/media/image-links"),
     ]);
-    await loadAqsiStates(state.operations.product.variants);
+    await loadAqsiStates(state.operations.product.variants.filter((variant) => !variant.is_archived));
     renderOperationsProduct();
   } catch (error) { showToast(error.message, true); }
 }
 
 function renderOperationsProduct() {
   const product = state.operations.product;
+  const canDeleteCatalog = !product.is_archived && (state.user?.is_admin || state.user?.is_superuser);
+  const canManageTestData = state.user?.is_admin || state.user?.is_superuser;
   const categoryOptions = state.categories.map((category) => `<option value="${category.id}" ${category.id === product.category_id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
   const variants = product.variants.length
-    ? product.variants.map((variant) => `<article class="variant-commercial-card card">
-        ${renderCatalogMedia("catalog_variant", variant.id, product)}
-        <span class="variant-commercial-main"><strong>${escapeHtml(visibleVariantTitle(variant.title, "Единственный вариант"))}</strong><span class="muted small">${escapeHtml(variant.sku)}</span>${renderVariantBarcodes(variant)}
-          <span class="commercial-block"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span><button class="link-button" data-set-sale-price="${variant.id}">Изменить</button></span>
-          <span class="commercial-block"><strong>Аренда</strong><span>Цена: ${variant.current_rental_price === null ? "не настроена" : formatMoney(variant.current_rental_price)}</span><span>Залог: ${variant.current_recommended_deposit === null ? "не указан" : formatMoney(variant.current_recommended_deposit)}</span><button class="link-button" data-set-rental-prices="${variant.id}">Изменить условия</button></span>
-          ${renderAqsiState(variant)}
+    ? product.variants.map((variant) => `<article class="variant-commercial-card card ${variant.is_archived ? "archived" : ""}">
+        ${renderCatalogMedia("catalog_variant", variant.id, product, product.is_archived || variant.is_archived)}
+        <span class="variant-commercial-main"><strong>${escapeHtml(visibleVariantTitle(variant.title, "Единственный вариант"))}</strong>${variant.is_archived ? '<span class="chip archive-chip">АРХИВНЫЙ ВАРИАНТ</span>' : ""}<span class="muted small">${escapeHtml(variant.sku)}</span>${renderVariantBarcodes(variant, product.is_archived || variant.is_archived)}
+          <span class="commercial-block"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span>${product.is_archived || variant.is_archived ? "" : `<button class="link-button" data-set-sale-price="${variant.id}">Изменить</button>`}</span>
+          <span class="commercial-block"><strong>Аренда</strong><span>Цена: ${variant.current_rental_price === null ? "не настроена" : formatMoney(variant.current_rental_price)}</span><span>Залог: ${variant.current_recommended_deposit === null ? "не указан" : formatMoney(variant.current_recommended_deposit)}</span>${product.is_archived || variant.is_archived ? "" : `<button class="link-button" data-set-rental-prices="${variant.id}">Изменить условия</button>`}</span>
+          ${product.is_archived || variant.is_archived ? "" : renderAqsiState(variant)}
         </span>
         <span class="catalog-counts"><strong>На учёте ${formatQuantity(variant.physical_quantity)}</strong><span>Для продажи ${formatQuantity(variant.ordinary_quantity)}</span><span>Арендных экземпляров ${variant.rental_asset_count}</span><span class="available-text">Доступно сейчас ${variant.available_asset_count}</span><span>Выдано ${variant.rented_asset_count}</span></span>
-        <span class="variant-actions">
+        ${product.is_archived || variant.is_archived ? "" : `<span class="variant-actions">
           <button class="button secondary compact" data-edit-variant="${variant.id}">Редактировать</button>
           ${Number(variant.ordinary_quantity) > 0 ? `<button class="button secondary compact" data-allocate-rental="${variant.id}">Выделить в аренду</button>` : ""}
           ${state.user?.is_admin ? `<button class="button ghost compact" data-adjust-inventory="${variant.id}">Корректировка остатка</button>` : ""}
           <button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button>
           <button class="button compact" data-print-label="${variant.id}">Системная печать</button>
           ${renderAqsiAction(variant)}
-        </span>
+          ${canDeleteCatalog ? `<button class="button danger compact" data-delete-variant="${variant.id}" type="button">Удалить вариант</button>` : ""}
+        </span>`}
       </article>`).join("")
     : '<div class="empty">У товара пока нет вариантов</div>';
   const assets = product.rental_assets.length
@@ -1645,10 +1893,10 @@ function renderOperationsProduct() {
   root.innerHTML = `<div class="shell">
     ${topbar(true)}
     <p class="eyebrow">Карточка товара</p>
-    <h1>${escapeHtml(product.title)}</h1>
-    ${renderCatalogMedia("catalog_product", product.id, product)}
+    <h1>${escapeHtml(product.title)} ${product.is_test ? '<span class="chip test-chip">ТЕСТ</span>' : ""} ${product.is_archived ? '<span class="chip archive-chip">АРХИВ</span>' : ""}</h1>
+    ${renderCatalogMedia("catalog_product", product.id, product, product.is_archived)}
     ${product.description ? `<p>${escapeHtml(product.description)}</p>` : '<p class="muted">Описание не заполнено.</p>'}
-    <details class="card"><summary><strong>Управление товаром</strong></summary>
+    ${product.is_archived ? '<p class="muted">Архивная карточка доступна только для просмотра.</p>' : `<details class="card"><summary><strong>Управление товаром</strong></summary>
       <form id="catalog-product-form">
         <div class="field"><label>Название</label><input name="title" value="${escapeHtml(product.title)}" required></div>
         <div class="field"><label>Описание</label><textarea name="description">${escapeHtml(product.description || "")}</textarea></div>
@@ -1664,7 +1912,7 @@ function renderOperationsProduct() {
         <div class="field"><label>Атрибуты JSON <span class="muted">(необязательно)</span></label><textarea name="attributes" placeholder='{"color":"blue"}'></textarea></div>
         <button class="button full" type="submit">Создать вариант</button>
       </form>
-    </details>
+    </details>`}
     <section class="card order-facts">
       <div><span class="muted small">SKU</span><strong>${escapeHtml(product.skus.join(", ") || "—")}</strong></div>
       <div><span class="muted small">Варианты</span><strong>${product.variant_count}</strong></div>
@@ -1672,20 +1920,23 @@ function renderOperationsProduct() {
       <div><span class="muted small">Доступно</span><strong>${product.available_asset_count}</strong></div>
       <div><span class="muted small">Доход</span><strong>${formatMoney(product.economics.revenue)}</strong></div>
       <div><span class="muted small">Расходы</span><strong>${formatMoney(product.economics.expenses)}</strong></div>
-      <div><span class="muted small">Операционный результат</span><strong>${formatMoney(product.economics.profit)}</strong></div>
+      <div><span class="muted small">Результат аренды</span><strong>${formatMoney(product.economics.profit)}</strong></div>
       <div><span class="muted small">Аренд</span><strong>${product.economics.rental_count}</strong></div>
     </section>
     <div class="section-heading"><h2>Варианты</h2><span class="muted small">${product.variant_count}</span></div>
     <div class="session-list">${variants}</div>
+    ${canDeleteCatalog ? `<div class="catalog-detail-product-actions"><button class="button danger compact" data-delete-product="${product.id}" type="button">Удалить товар</button></div>` : ""}
+    ${canManageTestData ? `<section class="card catalog-test-data-actions"><p class="eyebrow">Тестовые данные</p><p class="muted small">Отдельная административная операция с полной серверной проверкой зависимостей.</p>${product.is_test ? `<button class="button danger compact" data-purge-test-product="${product.id}" type="button">Удалить тестовые данные</button>` : `<button class="button secondary compact" data-classify-test-product="${product.id}" type="button">Пометить как тестовые данные</button>`}</section>` : ""}
     <div class="section-heading"><h2>Предметы аренды</h2></div>
     <div class="session-list">${assets}</div>
+    <dialog class="catalog-action-dialog" id="catalog-action-dialog"><div id="catalog-action-content"></div></dialog>
   </div>`;
   bindTopbar();
   bindOperationsAssetRows();
   hydrateImages();
   bindImagePreviews();
-  document.querySelector("#catalog-product-form").addEventListener("submit", saveCatalogProduct);
-  document.querySelector("#catalog-variant-create-form").addEventListener("submit", createCatalogVariant);
+  document.querySelector("#catalog-product-form")?.addEventListener("submit", saveCatalogProduct);
+  document.querySelector("#catalog-variant-create-form")?.addEventListener("submit", createCatalogVariant);
   document.querySelectorAll("[data-media-upload]").forEach((input) => input.addEventListener("change", () => uploadCatalogImage(input)));
   document.querySelectorAll("[data-edit-variant]").forEach((button) => button.addEventListener("click", () => editCatalogVariant(button.dataset.editVariant)));
   document.querySelectorAll("[data-replace-barcode]").forEach((button) => button.addEventListener("click", () => replaceVariantBarcode(button.dataset.replaceBarcode)));
@@ -1700,6 +1951,10 @@ function renderOperationsProduct() {
   document.querySelectorAll("[data-delete-link]").forEach((button) => button.addEventListener("click", () => deleteCatalogImageLink(button.dataset.deleteLink)));
   document.querySelectorAll("[data-open-label]").forEach((button) => button.addEventListener("click", () => openVariantLabel(button.dataset.openLabel)));
   document.querySelectorAll("[data-print-label]").forEach((button) => button.addEventListener("click", () => printVariantLabels(button.dataset.printLabel, 1)));
+  document.querySelectorAll("[data-delete-product]").forEach((button) => button.addEventListener("click", () => openCatalogDeletePreflight("product", button.dataset.deleteProduct)));
+  document.querySelectorAll("[data-delete-variant]").forEach((button) => button.addEventListener("click", () => openCatalogDeletePreflight("variant", button.dataset.deleteVariant)));
+  document.querySelectorAll("[data-classify-test-product]").forEach((button) => button.addEventListener("click", () => openCatalogTestDataPreflight(button.dataset.classifyTestProduct, "classify")));
+  document.querySelectorAll("[data-purge-test-product]").forEach((button) => button.addEventListener("click", () => openCatalogTestDataPreflight(button.dataset.purgeTestProduct, "purge")));
 }
 
 async function openVariantLabel(variantId) {
@@ -1801,9 +2056,9 @@ function aqsiBarcode(variant) {
   return variant.barcode;
 }
 
-function renderVariantBarcodes(variant) {
+function renderVariantBarcodes(variant, readOnly = false) {
   const external = variant.barcode_source === "manufacturer";
-  return `<span class="commercial-block"><strong>Штрихкод</strong><span><span class="barcode-value">${escapeHtml(variant.barcode)}</span> <span class="muted small">${external ? "Внешний" : "Системный"}</span></span><span class="barcode-actions"><button class="link-button" data-replace-barcode="${variant.id}">Заменить</button>${external ? `<button class="link-button danger-text" data-delete-external-barcode="${variant.id}">Удалить</button>` : ""}</span></span>`;
+  return `<span class="commercial-block"><strong>Штрихкод</strong><span><span class="barcode-value">${escapeHtml(variant.barcode)}</span> <span class="muted small">${external ? "Внешний" : "Системный"}</span></span>${readOnly ? "" : `<span class="barcode-actions"><button class="link-button" data-replace-barcode="${variant.id}">Заменить</button>${external ? `<button class="link-button danger-text" data-delete-external-barcode="${variant.id}">Удалить</button>` : ""}</span>`}</span>`;
 }
 
 async function replaceVariantBarcode(variantId) {
@@ -1841,7 +2096,7 @@ function renderAqsiAction(variant) {
   return `<button class="button ghost compact" data-publish-aqsi="${variant.id}">Синхронизировать повторно</button>`;
 }
 
-function renderCatalogMedia(entityType, entityId, product) {
+function renderCatalogMedia(entityType, entityId, product, readOnly = false) {
   const links = state.operations.imageLinks.filter((link) => link.entity_type === entityType && link.entity_id === entityId);
   const primary = links.find((link) => link.role === "primary") || links[0];
   const fallback = !links.length && entityType === "catalog_variant"
@@ -1851,17 +2106,16 @@ function renderCatalogMedia(entityType, entityId, product) {
   const gallery = links.length ? links.map((link) => `<figure class="catalog-media-item">
     <img class="image-preview-trigger" data-image-id="${link.image_id}" data-image-preview="${link.image_id}" tabindex="0" role="button" aria-label="Открыть фото крупно" alt="Фото товара">
     <figcaption><span class="chip ${link.role === "primary" ? "good" : ""}">${link.role === "primary" ? "Основное" : "Галерея"}</span>
-      ${link.role !== "primary" ? `<button class="link-button" data-primary-link="${link.id}">Сделать основным</button>` : ""}
-      <button class="link-button danger-text" data-delete-link="${link.id}">Отвязать</button></figcaption>
+      ${readOnly ? "" : `${link.role !== "primary" ? `<button class="link-button" data-primary-link="${link.id}">Сделать основным</button>` : ""}<button class="link-button danger-text" data-delete-link="${link.id}">Отвязать</button>`}</figcaption>
   </figure>`).join("") : '<div class="empty">Фотографий пока нет</div>';
   return `<section class="contextual-media" aria-label="${entityType === "catalog_product" ? "Фото товара" : "Фото варианта"}">
     ${image ? `<img class="catalog-photo image-preview-trigger" data-image-id="${image.image_id}" data-image-preview="${image.image_id}" tabindex="0" role="button" aria-label="Открыть фото крупно" alt="${entityType === "catalog_product" ? "Фото товара" : "Фото варианта"}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
     ${fallback ? '<p class="muted small">Используется общее фото товара</p>' : ""}
-    <div class="media-actions">
+    ${readOnly ? "" : `<div class="media-actions">
       <label class="button secondary compact">Сфотографировать<input class="media-file-input" type="file" accept="image/*" capture="environment" data-media-upload="${entityType}" data-media-entity="${entityId}" aria-label="Сфотографировать"></label>
       <label class="button secondary compact">Выбрать фото<input class="media-file-input" type="file" accept="image/*" data-media-upload="${entityType}" data-media-entity="${entityId}" aria-label="Выбрать фото"></label>
-    </div>
-    ${links.length ? `<details><summary>Фото: ${links.length} · Управление</summary><div class="catalog-media-grid">${gallery}</div></details>` : ""}
+    </div>`}
+    ${links.length ? `<details><summary>Фото: ${links.length}${readOnly ? "" : " · Управление"}</summary><div class="catalog-media-grid">${gallery}</div></details>` : ""}
   </section>`;
 }
 

@@ -5,6 +5,7 @@ const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 const source = readFileSync('src/core/web/static/app.js', 'utf8')
   .replace('if (state.token) bootstrap(); else renderLogin();', '');
+const styles = readFileSync('src/core/web/static/styles.css', 'utf8');
 
 function setup() {
   const timers = new Map();
@@ -198,14 +199,16 @@ test('Catalog shell defaults to Sale and serializes reproducible server query st
   const s = setup();
   const defaults = s.context.normalizeCatalogState({});
   assert.equal(defaults.mode, 'sale');
+  assert.equal(defaults.status, 'active');
   assert.equal(defaults.sort, 'title');
   assert.equal(defaults.attention.length, 0);
 
   const params = s.context.catalogUrlParams({
-    mode: 'rental', query: 'SKU-1', categoryId: 'category', supplierId: 'supplier',
+    mode: 'rental', status: 'archived', query: 'SKU-1', categoryId: 'category', supplierId: 'supplier',
     attention: ['missing_photo', 'out_of_stock'], productFilter: 'available', sort: 'last_rental',
   });
   assert.equal(params.get('mode'), 'rental');
+  assert.equal(params.get('status'), 'archived');
   assert.equal(params.get('query'), 'SKU-1');
   assert.equal(params.get('category_id'), 'category');
   assert.equal(params.get('supplier_id'), 'supplier');
@@ -245,6 +248,64 @@ test('Catalog mobile drawers use native modal open and explicit scroll lock', ()
   assert.match(source, /dialog\.addEventListener\("close"/);
   assert.match(source, /catalog-filters-reset/);
   assert.match(source, /data\.getAll\("attention"\)/);
+  assert.match(source, /data\.get\("status"\)/);
+});
+
+test('Catalog desktop and mobile filters expose archive status selection', () => {
+  const s = setup();
+  vm.runInContext('state.suppliers = [];', s.context);
+  const catalog = s.context.normalizeCatalogState({status:'archived'});
+  const desktop = s.context.renderCatalogFilters(catalog, false);
+  const mobile = s.context.renderCatalogFilters(catalog, true);
+
+  for (const html of [desktop, mobile]) {
+    assert.match(html, /<legend>Статус<\/legend>/);
+    assert.match(html, /value="active"[\s\S]*Активные/);
+    assert.match(html, /value="archived"[^>]*checked[\s\S]*Архивные/);
+    assert.match(html, /value="all"[\s\S]*Все/);
+  }
+  assert.match(desktop, /data-desktop-status/);
+  assert.doesNotMatch(mobile, /data-desktop-status/);
+});
+
+test('Archived Product and Variant reuse Catalog cards with visible markers', () => {
+  const s = setup();
+  const product = {
+    id:'archived-product', title:'Старый товар', category_label:'Архив', is_archived:true,
+    primary_image_id:null, card_variants:[{
+      id:'archived-variant', title:'Вариант', sku:'SKU-ARCHIVED', is_archived:true,
+      current_retail_price:'100.00', current_rental_price:null, sale_quantity:'1',
+      rental_asset_count:0, sale_row_visible:true, rental_row_visible:false,
+      aqsi_status:null, aqsi_is_current:false,
+    }], rental_economics_applicable:false,
+  };
+  const html = s.context.renderCatalogProductCard(product, {mode:'all', status:'archived'});
+
+  assert.match(html, /catalog-product-card archived/);
+  assert.match(html, />АРХИВ</);
+  assert.match(html, /АРХИВНЫЙ ВАРИАНТ/);
+  assert.doesNotMatch(html, /data-change-product-category/);
+  assert.doesNotMatch(source, /data-restore-(?:product|variant)/);
+});
+
+test('Explicit TEST Products are marked and expose a separate confirmed admin purge', () => {
+  const s = setup();
+  const product = {
+    id:'test-product', title:'UAT fixture', category_label:'Тесты', is_test:true,
+    is_archived:false, primary_image_id:null, card_variants:[],
+    rental_economics_applicable:false,
+  };
+  const html = s.context.renderCatalogProductCard(product, {mode:'all', status:'active'});
+
+  assert.match(html, />ТЕСТ</);
+  assert.match(source, /data-purge-test-product/);
+  assert.match(source, /data-classify-test-product/);
+  assert.match(source, /test-data-preflight/);
+  assert.match(source, /classify-test-data/);
+  assert.match(source, /purge-test-data/);
+  assert.match(source, /JSON\.stringify\(\{ confirm: true \}\)/);
+  assert.match(source, /Эти данные не попадут в архив/);
+  assert.match(source, /Удалить тест полностью/);
 });
 
 test('Catalog correction keeps search and results in one main column without SQLAdmin', () => {
@@ -275,4 +336,141 @@ test('Native Category create form exposes only title and optional parent', () =>
   assert.match(html, /— Объективы/);
   assert.doesNotMatch(html, /name="slug"/);
   assert.match(source, /\/api\/catalog\/categories\/quick/);
+});
+
+test('Catalog Product cards separate Sale and Rental facts without false warnings', () => {
+  const s = setup();
+  const rentalOnly = {
+    id:'rental', title:'Karcher', sku:'SKU-RENT', current_retail_price:null,
+    current_rental_price:null, sale_quantity:'0', rental_asset_count:1,
+    sale_row_visible:false, rental_row_visible:true, aqsi_status:null, aqsi_is_current:false,
+  };
+  const saleOnly = {
+    id:'sale', title:'Ручка синяя', sku:'SKU-SALE', current_retail_price:null,
+    current_rental_price:null, sale_quantity:'24', rental_asset_count:0,
+    sale_row_visible:true, rental_row_visible:false, aqsi_status:null, aqsi_is_current:false,
+  };
+  const mixed = {
+    id:'mixed', title:'Конструктор Цветы', sku:'SKU-MIXED', current_retail_price:'590.00',
+    current_rental_price:'190.00', sale_quantity:'6', rental_asset_count:2,
+    sale_row_visible:true, rental_row_visible:true, aqsi_status:'published', aqsi_is_current:true,
+  };
+
+  const rentalHtml = s.context.renderCatalogVariantRow(rentalOnly, 'all');
+  const saleHtml = s.context.renderCatalogVariantRow(saleOnly, 'all');
+  const mixedHtml = s.context.renderCatalogVariantRow(mixed, 'all');
+
+  assert.match(rentalHtml, /Аренда/);
+  assert.match(rentalHtml, /1 экз\./);
+  assert.match(rentalHtml, /Цена аренды не указана/);
+  assert.doesNotMatch(rentalHtml, /Цена не указана/);
+  assert.doesNotMatch(rentalHtml, /AQSI|Не опубликовано/);
+  assert.doesNotMatch(rentalHtml, /0 ₽|0 экз\./);
+
+  assert.match(saleHtml, /Продажа/);
+  assert.match(saleHtml, /Цена не указана/);
+  assert.match(saleHtml, /24 шт\./);
+  assert.match(saleHtml, /Не опубликовано/);
+  assert.doesNotMatch(saleHtml, /Аренда/);
+
+  assert.equal((mixedHtml.match(/SKU-MIXED/g) || []).length, 1);
+  assert.match(mixedHtml, /Продажа[\s\S]*590[\s\S]*6 шт\.[\s\S]*✓ AQSI/);
+  assert.match(mixedHtml, /Аренда[\s\S]*190[\s\S]*2 экз\./);
+  assert.ok(mixedHtml.indexOf('✓ AQSI') < mixedHtml.indexOf('Аренда'));
+});
+
+test('Catalog modes preserve channel emphasis without duplicate card implementations', () => {
+  const s = setup();
+  const mixed = {
+    id:'mixed', title:'Комплект', sku:'SKU-MIXED', current_retail_price:'590.00',
+    current_rental_price:'190.00', sale_quantity:'6', rental_asset_count:2,
+    sale_row_visible:true, rental_row_visible:true, aqsi_status:'published', aqsi_is_current:true,
+  };
+
+  const sale = s.context.renderCatalogVariantRow(mixed, 'sale');
+  const rental = s.context.renderCatalogVariantRow(mixed, 'rental');
+  const all = s.context.renderCatalogVariantRow(mixed, 'all');
+
+  assert.match(sale, /Продажа/);
+  assert.doesNotMatch(sale, /Аренда/);
+  assert.match(rental, /Аренда/);
+  assert.doesNotMatch(rental, /Продажа|AQSI/);
+  assert.match(all, /Продажа[\s\S]*Аренда/);
+  assert.equal((all.match(/SKU-MIXED/g) || []).length, 1);
+});
+
+test('Catalog economics footer separates applicability from a legitimate zero result', () => {
+  const s = setup();
+  const saleOnly = {
+    rental_economics_applicable:false,
+    economics:{profit:'0.00', revenue:'0.00', rental_count:0},
+    available_asset_count:0,
+  };
+  const rentalZero = {
+    rental_economics_applicable:true,
+    economics:{profit:'0.00', revenue:'0.00', rental_count:0},
+    available_asset_count:1,
+  };
+  const rentalNonZero = {
+    rental_economics_applicable:true,
+    economics:{profit:'1240.00', revenue:'2200.00', rental_count:8},
+    available_asset_count:2,
+  };
+
+  assert.equal(s.context.renderCatalogEconomicsSummary(saleOnly, 'all'), '');
+  assert.equal(s.context.renderCatalogEconomicsSummary(rentalZero, 'sale'), '');
+
+  const rentalZeroHtml = s.context.renderCatalogEconomicsSummary(rentalZero, 'rental');
+  const rentalNonZeroHtml = s.context.renderCatalogEconomicsSummary(rentalNonZero, 'rental');
+  const allRentalHtml = s.context.renderCatalogEconomicsSummary(rentalNonZero, 'all');
+
+  assert.match(rentalZeroHtml, /Результат аренды:[\s\S]*0/);
+  assert.match(rentalNonZeroHtml, /Результат аренды:[\s\S]*1[^<]*240/);
+  assert.match(rentalNonZeroHtml, /Доход[\s\S]*8 аренд[\s\S]*2 доступно/);
+  assert.match(allRentalHtml, /Результат аренды:[\s\S]*8 аренд · 2 доступно/);
+  assert.doesNotMatch(
+    `${rentalZeroHtml}${rentalNonZeroHtml}${allRentalHtml}`,
+    /Результат продаж|Продажи:|Операционный результат/,
+  );
+});
+
+test('Catalog Product card keeps commercial rows in a wrapping mobile layout', () => {
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-variant-row \{ grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-commercial-row \{ grid-template-columns: 64px minmax\(0, 1fr\) auto/);
+  assert.match(styles, /\.catalog-aqsi \{ grid-column: 1 \/ -1/);
+  assert.match(styles, /\.catalog-card-body \{[^}]*min-width: 0/);
+});
+
+test('Catalog delete actions live in the opened Product card, not the dense list card', () => {
+  const listCardSource = source.slice(
+    source.indexOf('function renderCatalogProductCard'),
+    source.indexOf('function catalogVariantsForMode'),
+  );
+  const variantRowSource = source.slice(
+    source.indexOf('function renderCatalogVariantRow'),
+    source.indexOf('function renderCatalogSaleRow'),
+  );
+  const detailSource = source.slice(
+    source.indexOf('function renderOperationsProduct'),
+    source.indexOf('async function openVariantLabel'),
+  );
+
+  assert.match(source, /data-change-product-category/);
+  assert.doesNotMatch(listCardSource, /data-delete-product/);
+  assert.doesNotMatch(variantRowSource, /data-delete-variant/);
+  assert.match(detailSource, /data-delete-product/);
+  assert.match(detailSource, /data-delete-variant/);
+  assert.match(source, /hard-delete-preflight/);
+  assert.match(source, /Будет удалено/);
+  assert.match(source, /защищённая бизнес-история/);
+  assert.match(source, /Архивировать вместо удаления/);
+  assert.match(source, /Это последний вариант товара/);
+  assert.doesNotMatch(source, />Изменить категорию</);
+});
+
+test('Catalog action dialog is scrollable and becomes a touch-friendly mobile sheet', () => {
+  assert.match(styles, /\.catalog-action-dialog \{[^}]*overflow-y: auto/);
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-action-dialog \{[^}]*max-height: 88dvh/);
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.variant-actions \.button\.danger \{ min-height: 44px/);
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-dialog-actions, \.catalog-dialog-actions\.three \{ grid-template-columns: 1fr/);
 });

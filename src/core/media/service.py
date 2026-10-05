@@ -261,9 +261,9 @@ class ImageLinkService:
     ) -> None:
         """Raise when a target is missing, deleted, or inactive."""
         if entity_type is ImageLinkEntityType.CATALOG_PRODUCT:
-            entity = self._product_repository.get(entity_id)
+            entity = self._product_repository.get_for_reference(entity_id)
         else:
-            entity = self._variant_repository.get(entity_id)
+            entity = self._variant_repository.get_for_reference(entity_id)
         if entity is None or not entity.is_active:
             raise ImageLinkEntityError
 

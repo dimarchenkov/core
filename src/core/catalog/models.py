@@ -61,6 +61,13 @@ class CatalogProduct(BaseModel):
         default=True,
         server_default="true",
     )
+    is_test: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        index=True,
+    )
 
     category: Mapped[Category] = relationship("Category")
     variants: Mapped[list[CatalogVariant]] = relationship(

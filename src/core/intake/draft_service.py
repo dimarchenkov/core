@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from core.activity.service import ActivityEventService, elapsed_seconds
 from core.catalog.barcode import InternalBarcodeGenerator
 from core.catalog.barcodes import normalize_barcode
+from core.catalog.models import CatalogProduct
 from core.catalog.repository import (
     CatalogProductRepository,
     CatalogVariantRepository,
@@ -134,7 +135,7 @@ class IntakeDraftWorkflow:
         actor_id: UUIDv7,
     ) -> IntakeItemDraftRead:
         """Add a known Variant by exact ID or scanner barcode without requiring a photo."""
-        self._get_owned_draft(session_id, actor_id)
+        intake_session = self._get_owned_draft(session_id, actor_id)
         variant = (
             self._variants.get(data.variant_id)
             if data.variant_id is not None
@@ -142,6 +143,10 @@ class IntakeDraftWorkflow:
         )
         if variant is None or not variant.is_active:
             raise IntakeVariantError
+        product = self._products.get(variant.product_id)
+        if product is None:
+            raise IntakeVariantError
+        self._align_test_scope(intake_session, product.is_test, IntakeVariantError)
         retail_price = data.retail_price
         if retail_price is None:
             try:
@@ -186,11 +191,12 @@ class IntakeDraftWorkflow:
         manufacturer_barcode: str | None = None,
     ) -> IntakeItemDraftRead:
         """Persist a Product/Variant draft and an optional Variant source photo."""
-        self._get_owned_draft(session_id, actor_id)
+        intake_session = self._get_owned_draft(session_id, actor_id)
         if product_id is not None and draft_product_item_id is not None:
             raise IntakeItemFieldError
         if product_id is not None:
-            self._ensure_product_is_active(product_id)
+            product = self._ensure_product_is_active(product_id)
+            self._align_test_scope(intake_session, product.is_test, IntakeProductError)
         if draft_product_item_id is not None:
             root = self._get_draft_item(session_id, draft_product_item_id)
             if root.kind is not IntakeItemKind.NEW_PRODUCT:
@@ -408,11 +414,26 @@ class IntakeDraftWorkflow:
         if supplier is None or not supplier.is_active:
             raise IntakeSupplierError
 
-    def _ensure_product_is_active(self, product_id: UUIDv7) -> None:
+    def _ensure_product_is_active(self, product_id: UUIDv7) -> CatalogProduct:
         """Require an active Product when adding a new Variant photo."""
         product = self._products.get(product_id)
         if product is None or not product.is_active:
             raise IntakeProductError
+        return product
+
+    @staticmethod
+    def _align_test_scope(
+        intake_session: IntakeSession,
+        product_is_test: bool,
+        error_type: type[Exception],
+    ) -> None:
+        """Promote an empty Intake to TEST or reject mixed Product scopes."""
+        has_items = bool(intake_session.items)
+        if not has_items:
+            intake_session.is_test = product_is_test
+            return
+        if intake_session.is_test is not product_is_test:
+            raise error_type
 
     def _ensure_category_is_active(self, category_id: UUIDv7) -> None:
         """Reject inactive or unavailable Categories as soon as they are selected."""

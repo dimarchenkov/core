@@ -72,6 +72,18 @@ class CatalogProductRepository:
         )
         return self._session.scalar(statement)
 
+    def get_for_reference(self, product_id: UUIDv7) -> CatalogProduct | None:
+        """Return a Product under a shared lock while a polymorphic reference is added."""
+        statement = (
+            select(CatalogProduct)
+            .where(
+                CatalogProduct.id == product_id,
+                CatalogProduct.deleted_at.is_(None),
+            )
+            .with_for_update(read=True, key_share=True)
+        )
+        return self._session.scalar(statement)
+
     def get_by_slug(self, slug: str) -> CatalogProduct | None:
         """Return a non-deleted catalog product by slug."""
         statement = select(CatalogProduct).where(
@@ -119,6 +131,18 @@ class CatalogVariantRepository:
                 CatalogVariant.deleted_at.is_(None),
             )
             .with_for_update()
+        )
+        return self._session.scalar(statement)
+
+    def get_for_reference(self, variant_id: UUIDv7) -> CatalogVariant | None:
+        """Return a Variant under a shared lock while a polymorphic reference is added."""
+        statement = (
+            select(CatalogVariant)
+            .where(
+                CatalogVariant.id == variant_id,
+                CatalogVariant.deleted_at.is_(None),
+            )
+            .with_for_update(read=True, key_share=True)
         )
         return self._session.scalar(statement)
 

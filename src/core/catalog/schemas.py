@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, computed_field, field_validator
@@ -98,6 +99,7 @@ class CatalogProductRead(CatalogProductBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUIDv7
+    is_test: bool
     created_at: datetime
     updated_at: datetime
     version: int
@@ -145,6 +147,7 @@ class CatalogVariantBarcodeRead(PydanticBaseModel):
     id: UUIDv7
     value: str
     source: BarcodeSource
+
     @computed_field
     @property
     def format(self) -> BarcodeFormat:
@@ -230,3 +233,46 @@ class CatalogVariantBarcodeReplace(PydanticBaseModel):
     def validate_value(cls, value: str) -> str:
         """Normalize and validate the replacement operational barcode."""
         return normalize_barcode(value)
+
+
+class CatalogDeletionDependency(PydanticBaseModel):
+    """One operator-readable dependency count from a hard-delete preflight."""
+
+    code: str
+    label: str
+    count: int = Field(ge=1)
+
+
+class CatalogDeletionPreflight(PydanticBaseModel):
+    """Authoritative eligibility and impact projection for one hard delete."""
+
+    entity_type: str
+    entity_id: UUIDv7
+    title: str
+    can_delete: bool
+    will_delete: list[CatalogDeletionDependency]
+    blockers: list[CatalogDeletionDependency]
+    warnings: list[str]
+    is_last_variant: bool = False
+    product_id: UUIDv7 | None = None
+
+
+class CatalogTestDataConfirmation(PydanticBaseModel):
+    """Require an explicit affirmative payload for test-data mutations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: Literal[True]
+
+
+class CatalogTestDataPreflight(PydanticBaseModel):
+    """Authoritative graph classification and purge eligibility projection."""
+
+    product_id: UUIDv7
+    title: str
+    is_test: bool
+    can_classify: bool
+    can_purge: bool
+    dependencies: list[CatalogDeletionDependency]
+    blockers: list[CatalogDeletionDependency]
+    warnings: list[str]

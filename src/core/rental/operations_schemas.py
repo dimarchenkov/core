@@ -8,6 +8,7 @@ from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict
 
 from core.catalog.barcodes import BarcodeSource
+from core.integrations.aqsi.enums import PublicationStatus
 from core.rental.economics_schemas import (
     EfficiencyFlag,
     RentalAssetEconomicsRead,
@@ -37,6 +38,14 @@ class CatalogMode(StrEnum):
 
     SALE = "sale"
     RENTAL = "rental"
+    ALL = "all"
+
+
+class CatalogStatus(StrEnum):
+    """Archive visibility for the shared operational Catalog."""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
     ALL = "all"
 
 
@@ -81,6 +90,28 @@ class RentalAssetOperationsSort(StrEnum):
     LAST_RENTAL = "last_rental"
 
 
+class CatalogVariantCardRead(PydanticBaseModel):
+    """Commercial and operational Variant facts shown in a Catalog list card."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUIDv7
+    title: str | None
+    sku: str
+    is_archived: bool
+    current_retail_price: Decimal | None
+    retail_currency: str | None
+    current_rental_price: Decimal | None
+    rental_currency: str | None
+    stock_balance: Decimal
+    sale_quantity: Decimal
+    rental_asset_count: int
+    sale_row_visible: bool
+    rental_row_visible: bool
+    aqsi_status: PublicationStatus | None
+    aqsi_is_current: bool
+
+
 class CatalogProductOperationsRead(PydanticBaseModel):
     """Product row enriched with rental availability counts."""
 
@@ -90,10 +121,15 @@ class CatalogProductOperationsRead(PydanticBaseModel):
     title: str
     description: str | None
     category_id: UUIDv7
+    category_label: str
     is_active: bool
+    is_archived: bool
+    is_test: bool
     skus: list[str]
     variant_count: int
+    card_variants: list[CatalogVariantCardRead]
     rental_asset_count: int
+    rental_economics_applicable: bool
     available_asset_count: int
     primary_image_id: UUIDv7 | None
     needs_initial_price: bool
@@ -114,6 +150,7 @@ class CatalogVariantOperationsRead(PydanticBaseModel):
     barcode_source: BarcodeSource
     attributes: dict[str, str | int | bool]
     is_active: bool
+    is_archived: bool
     physical_quantity: Decimal
     ordinary_quantity: Decimal
     rental_asset_count: int

@@ -11,6 +11,7 @@ from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.integrations.aqsi.enums import PublicationChannel, PublicationStatus
 from core.integrations.aqsi.models import Publication
 from core.inventory.service import InventoryService
+from core.labels.renderer import meaningful_variant_name
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import ImageLink
 from core.pricing.enums import PriceType
@@ -29,6 +30,8 @@ from core.rental.operations_schemas import (
     CatalogOperationsSort,
     CatalogProductOperationsDetail,
     CatalogProductOperationsRead,
+    CatalogStatus,
+    CatalogVariantCardRead,
     CatalogVariantOperationsRead,
     RentalAssetOperationsFilter,
     RentalAssetOperationsRead,
@@ -55,6 +58,7 @@ class RentalOperationsReadService:
         query: str | None = None,
         *,
         mode: CatalogMode = CatalogMode.SALE,
+        catalog_status: CatalogStatus = CatalogStatus.ACTIVE,
         category_id: UUIDv7 | None = None,
         supplier_id: UUIDv7 | None = None,
         attention_filters: frozenset[CatalogAttentionFilter] = frozenset(),
@@ -62,16 +66,15 @@ class RentalOperationsReadService:
         sort: CatalogOperationsSort = CatalogOperationsSort.TITLE,
     ) -> list[CatalogProductOperationsRead]:
         """Return shared Catalog products using server-side workspace filters."""
-        statement = select(CatalogProduct).where(CatalogProduct.deleted_at.is_(None))
-        if mode is CatalogMode.SALE:
+        statement = select(CatalogProduct)
+        if catalog_status is CatalogStatus.ACTIVE:
+            statement = statement.where(CatalogProduct.deleted_at.is_(None))
+        elif catalog_status is CatalogStatus.ARCHIVED:
             statement = statement.where(
-                CatalogProduct.is_active.is_(True),
-                CatalogProduct.variants.any(
-                    and_(
-                        CatalogVariant.deleted_at.is_(None),
-                        CatalogVariant.is_active.is_(True),
-                    )
-                ),
+                or_(
+                    CatalogProduct.deleted_at.is_not(None),
+                    CatalogProduct.variants.any(CatalogVariant.deleted_at.is_not(None)),
+                )
             )
         if category_id is not None:
             category_ids = self._category_with_descendants(category_id)
@@ -86,49 +89,84 @@ class RentalOperationsReadService:
         normalized = (query or "").strip()
         if normalized:
             pattern = f"%{normalized}%"
-            statement = statement.where(
-                or_(
+            variant_matches = or_(
+                CatalogVariant.title.ilike(pattern),
+                CatalogVariant.sku.ilike(pattern),
+                CatalogVariant.barcode.ilike(pattern),
+            )
+            if catalog_status is CatalogStatus.ACTIVE:
+                search_matches = or_(
                     CatalogProduct.title.ilike(pattern),
                     CatalogProduct.variants.any(
-                        or_(
-                            CatalogVariant.title.ilike(pattern),
-                            CatalogVariant.sku.ilike(pattern),
-                            CatalogVariant.barcode.ilike(pattern),
-                        )
+                        and_(CatalogVariant.deleted_at.is_(None), variant_matches)
                     ),
                 )
-            )
+            elif catalog_status is CatalogStatus.ARCHIVED:
+                search_matches = or_(
+                    CatalogProduct.title.ilike(pattern),
+                    and_(
+                        CatalogProduct.deleted_at.is_not(None),
+                        CatalogProduct.variants.any(variant_matches),
+                    ),
+                    CatalogProduct.variants.any(
+                        and_(CatalogVariant.deleted_at.is_not(None), variant_matches)
+                    ),
+                )
+            else:
+                search_matches = or_(
+                    CatalogProduct.title.ilike(pattern),
+                    CatalogProduct.variants.any(variant_matches),
+                )
+            statement = statement.where(search_matches)
         products = self._session.scalars(statement.order_by(CatalogProduct.title)).all()
         product_ids = [product.id for product in products]
-        variants = self._variants_for_products(product_ids)
-        assets = self._asset_records_for_products(product_ids)
+        all_variants = self._variants_for_products(product_ids)
+        products_by_id = {product.id: product for product in products}
+        variants = [
+            variant
+            for variant in all_variants
+            if variant.is_active
+            and self._variant_matches_status(
+                variant,
+                product=products_by_id[variant.product_id],
+                catalog_status=catalog_status,
+            )
+        ]
+        visible_variant_ids = {variant.id for variant in variants}
+        assets = [
+            asset
+            for asset in self._asset_records_for_products(product_ids)
+            if asset.variant_id in visible_variant_ids
+        ]
         variant_ids = [variant.id for variant in variants]
         image_ids = self._primary_images(products, variants)
         priced_variant_ids = self._ever_priced_variant_ids(variant_ids)
-        current_priced_variant_ids = (
-            self._current_priced_variant_ids(variant_ids)
-            if CatalogAttentionFilter.MISSING_PRICE in attention_filters
-            else set()
-        )
-        balances = (
-            InventoryService(self._session).get_balances(variant_ids)
-            if CatalogAttentionFilter.OUT_OF_STOCK in attention_filters
-            else {}
-        )
-        aqsi_problem_variant_ids = (
-            self._aqsi_problem_variant_ids(variant_ids)
-            if CatalogAttentionFilter.AQSI_PROBLEM in attention_filters
-            else set()
-        )
+        current_prices = self._current_prices(variant_ids)
+        balances = InventoryService(self._session).get_balances(variant_ids)
+        reserved_counts = self._reserved_asset_counts(variant_ids)
+        publications = self._aqsi_publications(variant_ids)
+        category_labels = self._category_labels([product.category_id for product in products])
+        current_priced_variant_ids = {
+            variant_id
+            for variant_id, price_type in current_prices
+            if price_type is PriceType.RETAIL
+        }
+        aqsi_problem_variant_ids = {
+            variant.id
+            for variant in variants
+            if not self._aqsi_is_current(publications.get(variant.id))
+        }
         economics_service = RentalEconomicsService(self._session)
         asset_economics = economics_service.get_assets([asset.id for asset in assets])
         variants_by_product: dict[UUIDv7, list[CatalogVariant]] = defaultdict(list)
         assets_by_product: dict[UUIDv7, list[RentalAssetRecord]] = defaultdict(list)
+        assets_by_variant: dict[UUIDv7, list[RentalAssetRecord]] = defaultdict(list)
         for variant in variants:
             variants_by_product[variant.product_id].append(variant)
-        variant_products = {variant.id: variant.product_id for variant in variants}
+        variant_products = {variant.id: variant.product_id for variant in all_variants}
         for asset in assets:
             assets_by_product[variant_products[asset.variant_id]].append(asset)
+            assets_by_variant[asset.variant_id].append(asset)
 
         rows = [
             CatalogProductOperationsRead(
@@ -136,10 +174,25 @@ class RentalOperationsReadService:
                 title=product.title,
                 description=product.description,
                 category_id=product.category_id,
+                category_label=category_labels.get(product.category_id, "Без категории"),
                 is_active=product.is_active,
+                is_archived=product.deleted_at is not None,
+                is_test=product.is_test,
                 skus=[variant.sku for variant in variants_by_product[product.id]],
                 variant_count=len(variants_by_product[product.id]),
+                card_variants=[
+                    self._variant_card(
+                        variant,
+                        current_prices=current_prices,
+                        balances=balances,
+                        publications=publications,
+                        rental_asset_count=len(assets_by_variant[variant.id]),
+                        reserved_asset_count=reserved_counts.get(variant.id, 0),
+                    )
+                    for variant in variants_by_product[product.id]
+                ],
                 rental_asset_count=len(assets_by_product[product.id]),
+                rental_economics_applicable=bool(assets_by_product[product.id]),
                 available_asset_count=sum(
                     asset.availability is RentalAvailability.AVAILABLE
                     for asset in assets_by_product[product.id]
@@ -156,7 +209,10 @@ class RentalOperationsReadService:
                     variant.id not in priced_variant_ids
                     for variant in variants_by_product[product.id]
                 ),
-                economics=economics_service.get_product(product.id),
+                economics=economics_service.summarize_product(
+                    product.id,
+                    [asset_economics[asset.id] for asset in assets_by_product[product.id]],
+                ),
                 last_rental_at=max(
                     (
                         asset_economics[asset.id].last_rental_at
@@ -176,6 +232,8 @@ class RentalOperationsReadService:
             )
             for product in products
         ]
+        if mode is CatalogMode.SALE:
+            rows = [row for row in rows if row.is_active and row.variant_count > 0]
         if mode is CatalogMode.RENTAL:
             rows = [row for row in rows if row.rental_asset_count > 0]
         if CatalogAttentionFilter.MISSING_PRICE in attention_filters:
@@ -282,57 +340,51 @@ class RentalOperationsReadService:
             ).all()
         )
 
-    def _current_priced_variant_ids(self, variant_ids: list[UUIDv7]) -> set[UUIDv7]:
-        """Return Variants with a retail price effective at the current time."""
+    def _current_prices(
+        self,
+        variant_ids: list[UUIDv7],
+    ) -> dict[tuple[UUIDv7, PriceType], Price]:
+        """Return current retail and rental Prices for each Variant in one query."""
         if not variant_ids:
-            return set()
-        return set(
-            self._session.scalars(
-                select(Price.variant_id)
-                .where(
-                    Price.variant_id.in_(variant_ids),
-                    Price.price_type == PriceType.RETAIL,
-                    Price.effective_from <= datetime.now(UTC),
-                )
-                .distinct()
-            ).all()
-        )
+            return {}
+        prices = self._session.scalars(
+            select(Price)
+            .where(
+                Price.variant_id.in_(variant_ids),
+                Price.price_type.in_((PriceType.RETAIL, PriceType.RENTAL)),
+                Price.effective_from <= datetime.now(UTC),
+            )
+            .order_by(
+                Price.variant_id,
+                Price.price_type,
+                Price.effective_from.desc(),
+                Price.created_at.desc(),
+                Price.id.desc(),
+            )
+        ).all()
+        current: dict[tuple[UUIDv7, PriceType], Price] = {}
+        for price in prices:
+            current.setdefault((price.variant_id, price.price_type), price)
+        return current
 
-    def _aqsi_problem_variant_ids(self, variant_ids: list[UUIDv7]) -> set[UUIDv7]:
-        """Return Variants not known to be published and current in AQSI."""
+    def _aqsi_publications(self, variant_ids: list[UUIDv7]) -> dict[UUIDv7, Publication]:
+        """Return persisted AQSI publication rows for the requested Variants."""
         if not variant_ids:
-            return set()
-        publications = self._session.scalars(
+            return {}
+        rows = self._session.scalars(
             select(Publication).where(
                 Publication.variant_id.in_(variant_ids),
                 Publication.channel == PublicationChannel.AQSI,
                 Publication.deleted_at.is_(None),
             )
         ).all()
-        healthy = {
-            publication.variant_id
-            for publication in publications
-            if publication.status is PublicationStatus.PUBLISHED
-            and publication.last_requested_payload_hash is not None
-            and publication.last_requested_payload_hash == publication.last_verified_payload_hash
-        }
-        return set(variant_ids) - healthy
+        return {publication.variant_id: publication for publication in rows}
 
-    def get_product(self, product_id: UUIDv7) -> CatalogProductOperationsDetail:
-        """Return one product with all variants and RentalAssets."""
-        product = self._session.scalar(
-            select(CatalogProduct).where(
-                CatalogProduct.id == product_id,
-                CatalogProduct.deleted_at.is_(None),
-            )
-        )
-        if product is None:
-            raise OperationsProductNotFoundError
-        variants = self._variants_for_products([product_id])
-        image_ids = self._primary_images([product], variants)
-        variant_ids = [variant.id for variant in variants]
-        balances = InventoryService(self._session).get_balances(variant_ids)
-        reserved_rows = self._session.execute(
+    def _reserved_asset_counts(self, variant_ids: list[UUIDv7]) -> dict[UUIDv7, int]:
+        """Count tracked units unavailable to ordinary Sale using existing detail semantics."""
+        if not variant_ids:
+            return {}
+        rows = self._session.execute(
             select(RentalAssetRecord.variant_id, func.count(RentalAssetRecord.id))
             .where(
                 RentalAssetRecord.variant_id.in_(variant_ids),
@@ -341,7 +393,109 @@ class RentalOperationsReadService:
             )
             .group_by(RentalAssetRecord.variant_id)
         )
-        reserved_counts = {variant_id: count for variant_id, count in reserved_rows}
+        return {variant_id: count for variant_id, count in rows}
+
+    @staticmethod
+    def _aqsi_is_current(publication: Publication | None) -> bool:
+        """Return whether local evidence says AQSI has the requested payload."""
+        return bool(
+            publication is not None
+            and publication.status is PublicationStatus.PUBLISHED
+            and publication.last_requested_payload_hash is not None
+            and publication.last_requested_payload_hash == publication.last_verified_payload_hash
+        )
+
+    def _variant_card(
+        self,
+        variant: CatalogVariant,
+        *,
+        current_prices: dict[tuple[UUIDv7, PriceType], Price],
+        balances: dict[UUIDv7, Decimal],
+        publications: dict[UUIDv7, Publication],
+        rental_asset_count: int,
+        reserved_asset_count: int,
+    ) -> CatalogVariantCardRead:
+        """Build one list-card Variant from already-loaded application facts."""
+        retail_price = current_prices.get((variant.id, PriceType.RETAIL))
+        rental_price = current_prices.get((variant.id, PriceType.RENTAL))
+        publication = publications.get(variant.id)
+        stock_balance = balances.get(variant.id, Decimal("0"))
+        sale_quantity = stock_balance - Decimal(reserved_asset_count)
+        sale_row_visible = bool(
+            reserved_asset_count == 0
+            or sale_quantity != 0
+            or retail_price is not None
+            or publication is not None
+        )
+        return CatalogVariantCardRead(
+            id=variant.id,
+            title=meaningful_variant_name(variant.title) or None,
+            sku=variant.sku,
+            is_archived=variant.deleted_at is not None,
+            current_retail_price=retail_price.amount if retail_price is not None else None,
+            retail_currency=retail_price.currency if retail_price is not None else None,
+            current_rental_price=rental_price.amount if rental_price is not None else None,
+            rental_currency=rental_price.currency if rental_price is not None else None,
+            stock_balance=stock_balance,
+            sale_quantity=sale_quantity,
+            rental_asset_count=rental_asset_count,
+            sale_row_visible=sale_row_visible,
+            rental_row_visible=rental_asset_count > 0,
+            aqsi_status=publication.status if publication is not None else None,
+            aqsi_is_current=self._aqsi_is_current(publication),
+        )
+
+    @staticmethod
+    def _variant_matches_status(
+        variant: CatalogVariant,
+        *,
+        product: CatalogProduct,
+        catalog_status: CatalogStatus,
+    ) -> bool:
+        """Select card Variants without mixing live and archived child state."""
+        if catalog_status is CatalogStatus.ACTIVE:
+            return product.deleted_at is None and variant.deleted_at is None
+        if catalog_status is CatalogStatus.ARCHIVED:
+            return product.deleted_at is not None or variant.deleted_at is not None
+        return True
+
+    def _category_labels(self, category_ids: list[UUIDv7]) -> dict[UUIDv7, str]:
+        """Build bounded readable Category paths without relationship N+1 queries."""
+        if not category_ids:
+            return {}
+        categories = list(
+            self._session.scalars(select(Category).where(Category.deleted_at.is_(None))).all()
+        )
+        by_id = {category.id: category for category in categories}
+        labels: dict[UUIDv7, str] = {}
+        for category_id in set(category_ids):
+            path: list[str] = []
+            visited: set[UUIDv7] = set()
+            current = by_id.get(category_id)
+            while current is not None and current.id not in visited:
+                visited.add(current.id)
+                path.append(current.title)
+                current = by_id.get(current.parent_id) if current.parent_id else None
+            path.reverse()
+            if len(path) > 3:
+                path = ["…", *path[-2:]]
+            labels[category_id] = " › ".join(path)
+        return labels
+
+    def get_product(self, product_id: UUIDv7) -> CatalogProductOperationsDetail:
+        """Return one product with all variants and RentalAssets."""
+        product = self._session.scalar(
+            select(CatalogProduct).where(CatalogProduct.id == product_id)
+        )
+        if product is None:
+            raise OperationsProductNotFoundError
+        variants = self._variants_for_products([product_id])
+        image_ids = self._primary_images([product], variants)
+        variant_ids = [variant.id for variant in variants]
+        balances = InventoryService(self._session).get_balances(variant_ids)
+        current_card_prices = self._current_prices(variant_ids)
+        publications = self._aqsi_publications(variant_ids)
+        reserved_counts = self._reserved_asset_counts(variant_ids)
         priced_variant_ids = self._ever_priced_variant_ids(variant_ids)
         prices = PriceRepository(self._session)
         now = datetime.now(UTC)
@@ -355,10 +509,28 @@ class RentalOperationsReadService:
             title=product.title,
             description=product.description,
             category_id=product.category_id,
+            category_label=self._category_labels([product.category_id]).get(
+                product.category_id, "Без категории"
+            ),
             is_active=product.is_active,
+            is_archived=product.deleted_at is not None,
+            is_test=product.is_test,
             skus=[variant.sku for variant in variants],
             variant_count=len(variants),
+            card_variants=[
+                self._variant_card(
+                    variant,
+                    current_prices=current_card_prices,
+                    balances=balances,
+                    publications=publications,
+                    rental_asset_count=len(assets_by_variant[variant.id]),
+                    reserved_asset_count=reserved_counts.get(variant.id, 0),
+                )
+                for variant in variants
+                if variant.is_active
+            ],
             rental_asset_count=len(assets),
+            rental_economics_applicable=bool(assets),
             available_asset_count=sum(
                 asset.availability is RentalAvailability.AVAILABLE for asset in assets
             ),
@@ -393,6 +565,7 @@ class RentalOperationsReadService:
                     barcode_source=variant.barcode_source,
                     attributes=variant.attributes,
                     is_active=variant.is_active,
+                    is_archived=variant.deleted_at is not None,
                     physical_quantity=balances[variant.id],
                     ordinary_quantity=(balances[variant.id] - reserved_counts.get(variant.id, 0)),
                     rental_asset_count=len(assets_by_variant[variant.id]),
@@ -409,22 +582,18 @@ class RentalOperationsReadService:
                         or image_ids.get((ImageLinkEntityType.CATALOG_PRODUCT, product.id))
                     ),
                     current_retail_price=(
-                        current_price.amount
-                        if (
-                            current_price := prices.get_current(
-                                variant.id, PriceType.RETAIL, at=now
-                            )
-                        )
-                        is not None
+                        current_card_prices[(variant.id, PriceType.RETAIL)].amount
+                        if (variant.id, PriceType.RETAIL) in current_card_prices
                         else None
                     ),
-                    retail_currency=(current_price.currency if current_price is not None else None),
+                    retail_currency=(
+                        current_card_prices[(variant.id, PriceType.RETAIL)].currency
+                        if (variant.id, PriceType.RETAIL) in current_card_prices
+                        else None
+                    ),
                     current_rental_price=(
-                        rental_price.amount
-                        if (
-                            rental_price := prices.get_current(variant.id, PriceType.RENTAL, at=now)
-                        )
-                        is not None
+                        current_card_prices[(variant.id, PriceType.RENTAL)].amount
+                        if (variant.id, PriceType.RENTAL) in current_card_prices
                         else None
                     ),
                     current_recommended_deposit=(
@@ -543,10 +712,7 @@ class RentalOperationsReadService:
         return list(
             self._session.scalars(
                 select(CatalogVariant)
-                .where(
-                    CatalogVariant.product_id.in_(product_ids),
-                    CatalogVariant.deleted_at.is_(None),
-                )
+                .where(CatalogVariant.product_id.in_(product_ids))
                 .order_by(CatalogVariant.title, CatalogVariant.sku)
             ).all()
         )

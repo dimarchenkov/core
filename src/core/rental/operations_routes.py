@@ -18,6 +18,7 @@ from core.rental.operations_schemas import (
     CatalogOperationsSort,
     CatalogProductOperationsDetail,
     CatalogProductOperationsRead,
+    CatalogStatus,
     RentalAssetOperationsFilter,
     RentalAssetOperationsRead,
     RentalAssetOperationsSort,
@@ -43,6 +44,7 @@ def list_operational_products(
     service: Annotated[RentalOperationsReadService, Depends(get_operations_read_service)],
     query: Annotated[str | None, Query(max_length=255)] = None,
     mode: CatalogMode = CatalogMode.SALE,
+    catalog_status: Annotated[CatalogStatus, Query(alias="status")] = CatalogStatus.ACTIVE,
     category_id: Annotated[UUIDv7 | None, Query()] = None,
     supplier_id: Annotated[UUIDv7 | None, Query()] = None,
     attention: Annotated[list[CatalogAttentionFilter] | None, Query()] = None,
@@ -53,6 +55,7 @@ def list_operational_products(
     return service.list_products(
         query,
         mode=mode,
+        catalog_status=catalog_status,
         category_id=category_id,
         supplier_id=supplier_id,
         attention_filters=frozenset(attention or []),

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from core.catalog.repository import CatalogVariantRepository
+from core.catalog.repository import CatalogProductRepository, CatalogVariantRepository
 from core.receipt.enums import ReceiptStatus
 from core.receipt.models import Receipt, ReceiptItem
 from core.receipt.receipt_number import ReceiptNumberGenerator
@@ -58,6 +58,7 @@ class ReceiptService:
         data: ReceiptCreate,
         *,
         actor_id: UUIDv7 | None = None,
+        is_test: bool = False,
     ) -> Receipt:
         """Validate and stage a draft receipt for the command owner to commit."""
         self._ensure_supplier_is_active(data.supplier_id)
@@ -66,6 +67,7 @@ class ReceiptService:
             supplier_id=data.supplier_id,
             receipt_date=data.receipt_date,
             status=ReceiptStatus.DRAFT,
+            is_test=is_test,
             source_document_number=self._normalize_source_document_number(
                 data.source_document_number
             ),
@@ -148,6 +150,7 @@ class ReceiptItemService:
         self._receipt_service = ReceiptService(session)
         self._repository = ReceiptItemRepository(session)
         self._variant_repository = CatalogVariantRepository(session)
+        self._product_repository = CatalogProductRepository(session)
 
     def add_item(
         self,
@@ -159,7 +162,7 @@ class ReceiptItemService:
         """Validate and stage a receipt line for the command owner to commit."""
         receipt = self._receipt_service.get_receipt(receipt_id)
         self._ensure_draft(receipt)
-        self._ensure_variant_is_active(data.variant_id)
+        self._ensure_variant_is_active(data.variant_id, expected_is_test=receipt.is_test)
         item = ReceiptItem(
             receipt_id=receipt_id,
             variant_id=data.variant_id,
@@ -185,7 +188,7 @@ class ReceiptItemService:
         item = self._get_item(receipt_id, item_id)
         changes = data.model_dump(exclude_unset=True)
         if "variant_id" in changes:
-            self._ensure_variant_is_active(data.variant_id)
+            self._ensure_variant_is_active(data.variant_id, expected_is_test=receipt.is_test)
             item.variant_id = data.variant_id
         if "quantity" in changes:
             item.quantity = data.quantity
@@ -222,12 +225,23 @@ class ReceiptItemService:
             raise ReceiptItemNotFoundError
         return item
 
-    def _ensure_variant_is_active(self, variant_id: UUIDv7 | None) -> None:
+    def _ensure_variant_is_active(
+        self,
+        variant_id: UUIDv7 | None,
+        *,
+        expected_is_test: bool,
+    ) -> None:
         """Require an active, non-deleted variant for every receipt line."""
         if variant_id is None:
             raise ReceiptVariantError
         variant = self._variant_repository.get(variant_id)
-        if variant is None or not variant.is_active:
+        product = self._product_repository.get(variant.product_id) if variant is not None else None
+        if (
+            variant is None
+            or not variant.is_active
+            or product is None
+            or product.is_test is not expected_is_test
+        ):
             raise ReceiptVariantError
 
     def _ensure_draft(self, receipt: Receipt) -> None:

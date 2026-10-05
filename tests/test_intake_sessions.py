@@ -169,6 +169,47 @@ def _create_session(client: TestClient) -> dict[str, object]:
     return response.json()
 
 
+def test_test_product_promotes_empty_intake_and_blocks_mixed_production_items(
+    client: tuple[TestClient, User, User, Path],
+    session: Session,
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+) -> None:
+    test_client, _, _, _ = client
+    category, test_product, test_variant = catalog
+    test_product.is_test = True
+    production_product = CatalogProduct(
+        title="Production shelf",
+        slug="production-shelf",
+        category_id=category.id,
+    )
+    session.add(production_product)
+    session.flush()
+    production_variant = CatalogVariant(
+        product_id=production_product.id,
+        title="Production",
+        sku="SKU-PRODUCTION-SCOPE",
+        barcode="BARCODE-PRODUCTION-SCOPE",
+    )
+    session.add(production_variant)
+    session.commit()
+    intake = _create_session(test_client)
+
+    first = test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/existing",
+        json={"variant_id": str(test_variant.id)},
+    )
+    mixed = test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/existing",
+        json={"variant_id": str(production_variant.id)},
+    )
+    refreshed = test_client.get(f"/api/intake/sessions/{intake['id']}")
+
+    assert intake["is_test"] is False
+    assert first.status_code == 201
+    assert refreshed.json()["is_test"] is True
+    assert mixed.status_code == 400
+
+
 def test_product_autosave_partial_patches_survive_reload(
     client: tuple[TestClient, User, User, Path],
     catalog: tuple[Category, CatalogProduct, CatalogVariant],
@@ -734,6 +775,40 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
     assert completed_events[0].data["item_count"] == 1
     assert completed_events[0].data["total_quantity"] == 10
     assert int(completed_events[0].data["duration_seconds"]) >= 0
+
+
+def test_test_intake_propagates_scope_to_completed_receipt(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    test_client, _, _, _ = client
+    _, product, variant = catalog
+    product.is_test = True
+    session.commit()
+    intake = _create_session(test_client)
+    test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/existing",
+        json={
+            "variant_id": str(variant.id),
+            "quantity": 1,
+            "purchase_price": "10.00",
+        },
+    )
+    test_client.patch(
+        f"/api/intake/sessions/{intake['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+
+    completed = test_client.post(f"/api/intake/sessions/{intake['id']}/complete")
+
+    assert completed.status_code == 200
+    assert completed.json()["receipt"]["is_test"] is True
+    persisted_intake = session.get(IntakeSession, UUID(intake["id"]))
+    persisted_receipt = session.get(Receipt, UUID(completed.json()["receipt"]["id"]))
+    assert persisted_intake is not None and persisted_intake.is_test is True
+    assert persisted_receipt is not None and persisted_receipt.is_test is True
 
 
 def test_optional_retail_price_is_created_atomically_during_intake(

@@ -15,7 +15,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode
+from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.customers.customer import Customer
 from core.customers.models import CustomerRecord
 from core.customers.schemas import CustomerCreate
@@ -23,6 +23,7 @@ from core.customers.service import CustomerService
 from core.database import get_session
 from core.identity.models import User
 from core.identity.service import IdentityService
+from core.integrations.aqsi.models import Publication
 from core.inventory.enums import MovementType, SourceType
 from core.inventory.models import StockMovement
 from core.main import create_app
@@ -76,12 +77,14 @@ def session() -> Generator[Session]:
         tables=[
             User.__table__,
             CustomerRecord.__table__,
+            Category.__table__,
             CatalogProduct.__table__,
             CatalogVariant.__table__,
             CatalogVariantBarcode.__table__,
             Image.__table__,
             ImageLink.__table__,
             Price.__table__,
+            Publication.__table__,
             StockMovement.__table__,
             RentalAssetRecord.__table__,
             RentalOrderRecord.__table__,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from core.catalog.repository import CatalogVariantRepository
+from core.catalog.repository import CatalogProductRepository, CatalogVariantRepository
 from core.inventory.enums import MovementType, SourceType
 from core.inventory.service import InventoryService
 from core.receipt.enums import ReceiptStatus
@@ -32,6 +32,7 @@ class ReceiptPostingService:
         self._item_repository = ReceiptItemRepository(session)
         self._supplier_repository = SupplierRepository(session)
         self._variant_repository = CatalogVariantRepository(session)
+        self._product_repository = CatalogProductRepository(session)
         self._inventory_service = InventoryService(session)
 
     def post_receipt(
@@ -63,7 +64,7 @@ class ReceiptPostingService:
         if not items:
             raise ReceiptItemsRequiredError
         for item in items:
-            self._ensure_variant_is_active(item.variant_id)
+            self._ensure_variant_is_active(item.variant_id, expected_is_test=receipt.is_test)
         for item in items:
             self._inventory_service.create_movement(
                 item.variant_id,
@@ -94,8 +95,14 @@ class ReceiptPostingService:
         if supplier is None or not supplier.is_active:
             raise ReceiptSupplierError
 
-    def _ensure_variant_is_active(self, variant_id: UUIDv7) -> None:
+    def _ensure_variant_is_active(self, variant_id: UUIDv7, *, expected_is_test: bool) -> None:
         """Require every receipt line variant to remain active through posting time."""
         variant = self._variant_repository.get(variant_id)
-        if variant is None or not variant.is_active:
+        product = self._product_repository.get(variant.product_id) if variant is not None else None
+        if (
+            variant is None
+            or not variant.is_active
+            or product is None
+            or product.is_test is not expected_is_test
+        ):
             raise ReceiptVariantError

@@ -45,6 +45,7 @@ class ReceiptRead(PydanticBaseModel):
     supplier_id: UUIDv7
     receipt_date: date
     status: ReceiptStatus
+    is_test: bool
     source_document_number: str | None
     notes: str | None
     created_at: datetime

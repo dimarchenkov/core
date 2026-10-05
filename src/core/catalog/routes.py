@@ -8,11 +8,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.catalog.barcodes import BarcodeSource, BarcodeValidationError
+from core.catalog.deletion import (
+    CatalogHardDeleteBlockedError,
+    CatalogHardDeleteNotFoundError,
+    CatalogHardDeleteService,
+)
 from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.catalog.schemas import (
+    CatalogDeletionPreflight,
     CatalogProductCreate,
     CatalogProductRead,
     CatalogProductUpdate,
+    CatalogTestDataConfirmation,
+    CatalogTestDataPreflight,
     CatalogVariantBarcodeCreate,
     CatalogVariantBarcodeRead,
     CatalogVariantBarcodeReplace,
@@ -38,6 +46,11 @@ from core.catalog.service import (
     CategoryParentError,
     CategoryService,
     CategorySlugAlreadyExistsError,
+)
+from core.catalog.test_data import (
+    CatalogTestDataBlockedError,
+    CatalogTestDataNotFoundError,
+    CatalogTestDataService,
 )
 from core.database import get_session
 from core.identity.dependencies import get_current_user
@@ -83,6 +96,29 @@ def get_catalog_variant_service(
 ) -> CatalogVariantService:
     """Provide catalog variant service instances for route handlers."""
     return CatalogVariantService(session)
+
+
+def get_catalog_hard_delete_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> CatalogHardDeleteService:
+    """Provide dependency-aware Catalog hard-delete workflows."""
+    return CatalogHardDeleteService(session)
+
+
+def get_catalog_test_data_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> CatalogTestDataService:
+    """Provide explicit TEST graph classification and purge workflows."""
+    return CatalogTestDataService(session)
+
+
+def _require_catalog_destructive_access(current_user: User) -> None:
+    """Restrict irreversible Catalog actions to administrators."""
+    if not (current_user.is_admin or current_user.is_superuser):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator access is required for permanent deletion.",
+        )
 
 
 @router.get("", response_model=list[CategoryRead])
@@ -312,6 +348,131 @@ def update_product(
         raise
 
 
+@product_router.get(
+    "/{product_id}/hard-delete-preflight",
+    response_model=CatalogDeletionPreflight,
+)
+def preflight_product_hard_delete(
+    product_id: UUIDv7,
+    service: Annotated[CatalogHardDeleteService, Depends(get_catalog_hard_delete_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogDeletionPreflight:
+    """Return real Product deletion impact and protected-history blockers."""
+    _require_catalog_destructive_access(current_user)
+    try:
+        return service.preflight_product(product_id)
+    except CatalogHardDeleteNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Product not found.") from exc
+
+
+@product_router.delete("/{product_id}/hard", status_code=status.HTTP_204_NO_CONTENT)
+def hard_delete_product(
+    product_id: UUIDv7,
+    service: Annotated[CatalogHardDeleteService, Depends(get_catalog_hard_delete_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """Physically delete a Product only after an authoritative transactional recheck."""
+    _require_catalog_destructive_access(current_user)
+    try:
+        service.delete_product(product_id)
+        session.commit()
+    except CatalogHardDeleteNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Product not found.") from exc
+    except CatalogHardDeleteBlockedError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.preflight.model_dump(mode="json"),
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@product_router.get(
+    "/{product_id}/test-data-preflight",
+    response_model=CatalogTestDataPreflight,
+)
+def preflight_product_test_data(
+    product_id: UUIDv7,
+    service: Annotated[CatalogTestDataService, Depends(get_catalog_test_data_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogTestDataPreflight:
+    """Show the complete graph before classifying or purging TEST data."""
+    _require_catalog_destructive_access(current_user)
+    try:
+        return service.preflight(product_id)
+    except CatalogTestDataNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Product not found.") from exc
+
+
+@product_router.post(
+    "/{product_id}/classify-test-data",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def classify_product_test_data(
+    product_id: UUIDv7,
+    data: CatalogTestDataConfirmation,
+    service: Annotated[CatalogTestDataService, Depends(get_catalog_test_data_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """Explicitly classify one verified legacy Product graph as TEST."""
+    del data
+    _require_catalog_destructive_access(current_user)
+    try:
+        service.classify(product_id)
+        session.commit()
+    except CatalogTestDataNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Product not found.") from exc
+    except CatalogTestDataBlockedError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.preflight.model_dump(mode="json"),
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@product_router.post(
+    "/{product_id}/purge-test-data",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def purge_product_test_data(
+    product_id: UUIDv7,
+    data: CatalogTestDataConfirmation,
+    service: Annotated[CatalogTestDataService, Depends(get_catalog_test_data_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """Permanently remove one freshly revalidated TEST Product graph."""
+    del data
+    _require_catalog_destructive_access(current_user)
+    try:
+        service.purge(product_id)
+        session.commit()
+    except CatalogTestDataNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Product not found.") from exc
+    except CatalogTestDataBlockedError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.preflight.model_dump(mode="json"),
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @product_router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_product(
     product_id: UUIDv7,
@@ -460,9 +621,7 @@ def replace_variant_barcode(
 ) -> CatalogVariant:
     """Replace the single operational barcode with an external code."""
     try:
-        variant = service.replace_barcode(
-            variant_id, data.value, actor_id=_actor_id(current_user)
-        )
+        variant = service.replace_barcode(variant_id, data.value, actor_id=_actor_id(current_user))
         session.commit()
         session.refresh(variant)
         return variant
@@ -490,9 +649,7 @@ def delete_variant_external_barcode(
 ) -> CatalogVariant:
     """Replace an external operational barcode with a fresh Core INTERNAL EAN-13."""
     try:
-        variant = service.delete_external_barcode(
-            variant_id, actor_id=_actor_id(current_user)
-        )
+        variant = service.delete_external_barcode(variant_id, actor_id=_actor_id(current_user))
         session.commit()
         session.refresh(variant)
         return variant
@@ -501,9 +658,7 @@ def delete_variant_external_barcode(
         raise HTTPException(status_code=404, detail="Variant not found.") from exc
     except CatalogVariantBarcodeDeleteError as exc:
         session.rollback()
-        raise HTTPException(
-            status_code=409, detail="A system barcode cannot be deleted."
-        ) from exc
+        raise HTTPException(status_code=409, detail="A system barcode cannot be deleted.") from exc
 
 
 @variant_router.get("/{variant_id}", response_model=CatalogVariantRead)
@@ -550,6 +705,50 @@ def update_variant(
     except Exception:
         session.rollback()
         raise
+
+
+@variant_router.get(
+    "/{variant_id}/hard-delete-preflight",
+    response_model=CatalogDeletionPreflight,
+)
+def preflight_variant_hard_delete(
+    variant_id: UUIDv7,
+    service: Annotated[CatalogHardDeleteService, Depends(get_catalog_hard_delete_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogDeletionPreflight:
+    """Return real Variant deletion impact and protected-history blockers."""
+    _require_catalog_destructive_access(current_user)
+    try:
+        return service.preflight_variant(variant_id)
+    except CatalogHardDeleteNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Variant not found.") from exc
+
+
+@variant_router.delete("/{variant_id}/hard", status_code=status.HTTP_204_NO_CONTENT)
+def hard_delete_variant(
+    variant_id: UUIDv7,
+    service: Annotated[CatalogHardDeleteService, Depends(get_catalog_hard_delete_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    """Physically delete one Variant only after an authoritative transactional recheck."""
+    _require_catalog_destructive_access(current_user)
+    try:
+        service.delete_variant(variant_id)
+        session.commit()
+    except CatalogHardDeleteNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Variant not found.") from exc
+    except CatalogHardDeleteBlockedError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.preflight.model_dump(mode="json"),
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @variant_router.delete("/{variant_id}", status_code=status.HTTP_204_NO_CONTENT)

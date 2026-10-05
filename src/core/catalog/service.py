@@ -207,12 +207,17 @@ class CatalogProductService:
         data: CatalogProductCreate,
         *,
         actor_id: UUIDv7 | None = None,
+        is_test: bool = False,
     ) -> CatalogProduct:
         """Validate and stage a product for the command owner to commit."""
         self._ensure_slug_available(data.slug)
         self._ensure_category_is_active(data.category_id)
 
-        product = CatalogProduct(**data.model_dump(), created_by_id=actor_id)
+        product = CatalogProduct(
+            **data.model_dump(),
+            is_test=is_test,
+            created_by_id=actor_id,
+        )
         self._repository.add(product)
         self._session.flush()
         return product

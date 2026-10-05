@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -44,6 +45,13 @@ class IntakeSession(BaseModel):
         nullable=False,
         default=IntakeSessionStatus.DRAFT,
         server_default=IntakeSessionStatus.DRAFT.value,
+        index=True,
+    )
+    is_test: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
         index=True,
     )
     supplier_id: Mapped[UUIDv7 | None] = mapped_column(

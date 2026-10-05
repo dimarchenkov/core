@@ -97,6 +97,7 @@ class CompleteIntakeWorkflow:
                     notes=f"Created from IntakeSession {intake_session.id}",
                 ),
                 actor_id=actor_id,
+                is_test=intake_session.is_test,
             )
 
             completed_items: list[IntakeCompletionItemRead] = []
@@ -212,6 +213,9 @@ class CompleteIntakeWorkflow:
                 variant = self._variants.get(item.variant_id) if item.variant_id else None
                 if variant is None or not variant.is_active:
                     raise IntakeCompletionIncompleteError
+                product = self._products.get(variant.product_id)
+                if product is None or product.is_test is not intake_session.is_test:
+                    raise IntakeCompletionIncompleteError
             else:
                 if (
                     item.kind is IntakeItemKind.NEW_VARIANT
@@ -223,7 +227,11 @@ class CompleteIntakeWorkflow:
                         raise IntakeCompletionIncompleteError
                     if item.product_id is not None:
                         product = self._products.get(item.product_id)
-                        if product is None or not product.is_active:
+                        if (
+                            product is None
+                            or not product.is_active
+                            or product.is_test is not intake_session.is_test
+                        ):
                             raise IntakeCompletionIncompleteError
                     elif item.draft_product_item_id is not None:
                         root = next(
@@ -272,6 +280,7 @@ class CompleteIntakeWorkflow:
                     category_id=item.category_id,
                 ),
                 actor_id=actor_id,
+                is_test=item.session.is_test,
             )
             product_id = product.id
             materialized_products[item.id] = product_id

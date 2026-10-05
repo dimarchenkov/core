@@ -67,7 +67,7 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Каталог" in script.text
     assert "Экземпляры" not in script.text
     assert "Цена продажи" in script.text
-    assert "Нужно указать цену" in script.text
+    assert "Цена не указана" in script.text
     assert "/api/labels/variants/" in script.text
     assert "/api/labels/variants/print-capability" in script.text
     assert 'data-print-label="${variant.id}">Системная печать' in script.text

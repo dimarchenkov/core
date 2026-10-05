@@ -93,6 +93,7 @@ def test_product_service_creates_product(
         "description",
         "category_id",
         "is_active",
+        "is_test",
         "id",
         "created_at",
         "updated_at",
