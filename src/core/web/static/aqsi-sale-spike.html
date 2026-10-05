@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#621b16">
+    <title>Core — AQSI Sale Spike</title>
+    <link rel="stylesheet" href="/app/assets/styles.css?v=aqsi-sale-spike-1">
+    <style>
+      .spike-warning { padding: 18px; color: #621b16; background: #fff0ed; border: 2px solid #b84235; border-radius: 18px; }
+      .spike-line { display: grid; gap: 10px; padding: 16px 0; border-top: 1px solid var(--line); }
+      .spike-line-controls { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
+      .spike-total { font-size: 1.5rem; font-weight: 800; text-align: right; }
+      .direct-action { font-size: 1.08rem; background: #8a241a; }
+      .critical-result { padding: 18px; border: 3px solid #b42318; border-radius: 16px; background: #fff0ed; color: #7a1b13; font-weight: 800; }
+      dialog { max-width: 560px; border: 0; border-radius: 20px; padding: 24px; box-shadow: 0 20px 80px #0005; }
+      dialog::backdrop { background: #201b1688; }
+      .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+      pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+      @media (max-width: 560px) { .spike-line-controls { grid-template-columns: 1fr 1fr; } }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar"><div class="brand"><span class="brand-mark">C</span> Core</div><a class="button ghost" href="/app">← Core</a></header>
+      <p class="eyebrow">Temporary integration spike</p>
+      <h1>AQSI SALE SPIKE</h1>
+      <div class="spike-warning">
+        <strong>ЭКСПЕРИМЕНТАЛЬНАЯ РЕАЛЬНАЯ ОПЕРАЦИЯ</strong>
+        <p>AQSI может сформировать реальный фискальный чек. Используйте только небольшую тестовую сумму 30–50 ₽.</p>
+        <p>Core не изменяет цены, остатки и не записывает продажу.</p>
+      </div>
+      <section class="card">
+        <h2>Найти существующий Variant</h2>
+        <form id="search-form" class="search-row"><input id="query" autocomplete="off" placeholder="Название, SKU или штрихкод" required><button class="button" type="submit">Найти</button></form>
+        <div id="search-results" class="muted small">Начните вводить название, SKU или штрихкод.</div>
+      </section>
+      <section class="card">
+        <h2>Выбранные позиции</h2>
+        <div id="selected"><div class="empty">Выберите 2–3 реальных товара</div></div>
+        <p class="spike-total">TEST TOTAL: <span id="total">0,00 ₽</span></p>
+      </section>
+      <section class="card">
+        <label><input id="confirm" type="checkbox"> Я понимаю, что выбранное действие создаёт реальную операцию AQSI.</label>
+        <button class="button secondary full" id="pending-send" type="button" disabled>Отправить как отложенный заказ</button>
+        <button class="button danger full direct-action" id="direct-send" type="button" disabled>⚡ ОПЛАТИТЬ КАРТОЙ НА AQSI</button>
+        <p id="error" class="danger-text" role="alert"></p>
+      </section>
+      <section class="card hidden" id="pending-result">
+        <h2>Проверка отправки заказа</h2>
+        <div id="pending-result-summary"></div>
+        <ol><li>На кассе откройте раздел «Отложенные заказы».</li><li>Выберите заказ по номеру CORE-SPIKE.</li><li>Проверьте отдельные позиции и итог.</li><li>Нажмите «Оплатить» и выберите способ оплаты.</li></ol>
+        <button class="button secondary full" id="pending-status" type="button">Проверить статус в AQSI</button>
+        <pre id="pending-status-output"></pre>
+      </section>
+      <section class="card hidden" id="direct-result">
+        <h2>Прямая оплата AQSI</h2>
+        <div id="direct-result-summary"></div>
+        <button class="button secondary full hidden" id="direct-resume" type="button">Продолжить проверку статуса</button>
+        <button class="button secondary full hidden" id="direct-new" type="button">Подтвердить новую попытку оплаты</button>
+      </section>
+      <dialog id="direct-confirmation">
+        <h2>РЕАЛЬНАЯ ОПЛАТА</h2>
+        <p>На AQSI будет запущен эквайринг на <strong id="direct-confirm-total"></strong>.</p>
+        <p>После подтверждённой оплаты Core попытается сформировать фискальный чек с теми же позициями.</p>
+        <p><strong>При неизвестном статусе не нажимайте оплату повторно.</strong></p>
+        <div class="dialog-actions"><button class="button ghost" id="direct-cancel" type="button">Отмена</button><button class="button danger" id="direct-confirm" type="button">Начать оплату</button></div>
+      </dialog>
+    </main>
+    <script type="module" src="/app/assets/aqsi-sale-spike.js?v=2"></script>
+  </body>
+</html>

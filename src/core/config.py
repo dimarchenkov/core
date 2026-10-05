@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     aqsi_timeout_seconds: float = Field(default=10.0, gt=0)
     aqsi_verification_attempts: int = Field(default=5, ge=1, le=20)
     aqsi_verification_interval_seconds: float = Field(default=1.0, ge=0)
+    aqsi_sale_spike_enabled: bool = Field(default=False)
+    aqsi_sale_spike_device_id: str | None = Field(default=None, min_length=1)
+    aqsi_sale_spike_tax_system_code: int | None = Field(default=None)
+    aqsi_sale_spike_operation_ttl_ms: int = Field(default=120_000, ge=30_000, le=300_000)
     printing_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("PRINTING_ENABLED", "CORE_PRINTING_ENABLED"),

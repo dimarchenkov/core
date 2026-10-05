@@ -10,6 +10,8 @@ from core.catalog.routes import router as catalog_router
 from core.catalog.search_routes import router as catalog_search_router
 from core.config import get_settings
 from core.customers.routes import router as customer_router
+from core.dev.aqsi_sale_spike import page_router as aqsi_sale_spike_page_router
+from core.dev.aqsi_sale_spike import router as aqsi_sale_spike_router
 from core.identity.routes import router as identity_router
 from core.intake.routes import router as intake_router
 from core.integrations.aqsi.routes import router as aqsi_router
@@ -44,6 +46,8 @@ def create_app() -> FastAPI:
     setup_admin(app)
     app.include_router(catalog_router)
     app.include_router(catalog_search_router)
+    app.include_router(aqsi_sale_spike_router)
+    app.include_router(aqsi_sale_spike_page_router)
     app.include_router(product_router)
     app.include_router(variant_router)
     app.include_router(image_router)

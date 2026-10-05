@@ -16,10 +16,18 @@ from core.integrations.aqsi.schemas import (
 class AqsiApiError(Exception):
     """Raised when AQSI returns a definitive HTTP or response error."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        outcome_unknown: bool = False,
+    ) -> None:
         """Create a sanitized integration error."""
         self.code = code
         self.retryable = retryable
+        self.outcome_unknown = outcome_unknown
         super().__init__(message)
 
 
@@ -46,6 +54,25 @@ class AqsiGateway(Protocol):
 
     def set_shop_price(self, payload: AqsiShopPricePayload) -> None:
         """Bind one good to a shop and set its retail price."""
+
+
+class AqsiPendingOrderGateway(Protocol):
+    """Temporary port for the isolated deferred-order and checkout spike."""
+
+    def create_pending_order(self, payload: dict[str, object]) -> dict[str, object]:
+        """Create or update one AQSI V2 deferred order."""
+
+    def get_pending_order(self, order_id: str) -> dict[str, object]:
+        """Read one AQSI V2 deferred order by its external ID."""
+
+    def create_purchase(self, payload: dict[str, object]) -> dict[str, object]:
+        """Create one AQSI acquiring purchase device operation."""
+
+    def get_operation(self, operation_id: str) -> dict[str, object]:
+        """Read one AQSI device operation and its real status."""
+
+    def create_receipt(self, payload: dict[str, object]) -> dict[str, object]:
+        """Create one AQSI fiscal receipt device operation."""
 
 
 class AqsiHttpClient:
@@ -139,6 +166,52 @@ class AqsiHttpClient:
         """Bind one good to its shop and apply the current retail price."""
         self._request("POST", "/v2/Goods/prices", json=[payload.as_aqsi_json()])
 
+    def create_pending_order(self, payload: dict[str, object]) -> dict[str, object]:
+        """Submit one temporary itemized deferred order."""
+        response = self._request("POST", "/v2/Orders/simple", json=payload)
+        if response is None:
+            raise AqsiApiError("invalid_response", "AQSI returned an empty order response.")
+        value = response.json()
+        if not isinstance(value, dict):
+            raise AqsiApiError("invalid_response", "AQSI returned an invalid order response.")
+        return value
+
+    def get_pending_order(self, order_id: str) -> dict[str, object]:
+        """Read one temporary deferred order without creating another operation."""
+        response = self._request("GET", f"/v2/Orders/simple/{order_id}")
+        if response is None:
+            raise AqsiApiError("invalid_response", "AQSI returned an empty order response.")
+        value = response.json()
+        if not isinstance(value, dict):
+            raise AqsiApiError("invalid_response", "AQSI returned an invalid order response.")
+        return value
+
+    def create_purchase(self, payload: dict[str, object]) -> dict[str, object]:
+        """Start a card acquiring operation on the configured physical device."""
+        return self._device_operation("POST", "/v4/Slips/process/purchase", payload)
+
+    def get_operation(self, operation_id: str) -> dict[str, object]:
+        """Read the authoritative AQSI state for one device operation."""
+        return self._device_operation("GET", f"/v4/Operations/{operation_id}")
+
+    def create_receipt(self, payload: dict[str, object]) -> dict[str, object]:
+        """Start fiscalization of an itemized receipt on the physical device."""
+        return self._device_operation("POST", "/v4/Receipts/process", payload)
+
+    def _device_operation(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        response = self._request(method, path, json=payload)
+        if response is None:
+            raise AqsiApiError("invalid_response", "AQSI returned an empty operation response.")
+        value = response.json()
+        if not isinstance(value, dict):
+            raise AqsiApiError("invalid_response", "AQSI returned an invalid operation response.")
+        return value
+
     def _request(
         self,
         method: str,
@@ -150,10 +223,32 @@ class AqsiHttpClient:
         """Send one request and convert failures into safe domain errors."""
         try:
             response = self._client.request(method, path, json=json)
+        except httpx2.ConnectTimeout as exc:
+            raise AqsiApiError(
+                "connect_timeout",
+                "Could not connect to AQSI before the request was sent.",
+                retryable=True,
+            ) from exc
+        except httpx2.ConnectError as exc:
+            raise AqsiApiError(
+                "connect_error",
+                "Could not connect to AQSI before the request was sent.",
+                retryable=True,
+            ) from exc
         except httpx2.TimeoutException as exc:
-            raise AqsiApiError("timeout", "AQSI request timed out.", retryable=True) from exc
+            raise AqsiApiError(
+                "timeout",
+                "AQSI request timed out.",
+                retryable=True,
+                outcome_unknown=True,
+            ) from exc
         except httpx2.RequestError as exc:
-            raise AqsiApiError("network_error", "AQSI request failed.", retryable=True) from exc
+            raise AqsiApiError(
+                "network_error",
+                "AQSI request failed.",
+                retryable=True,
+                outcome_unknown=True,
+            ) from exc
 
         if allow_not_found and response.status_code in {400, 404}:
             return None
@@ -169,8 +264,14 @@ class AqsiHttpClient:
         if isinstance(body, dict):
             remote_code = body.get("code")
             errors = body.get("errors")
+            reason = body.get("reason")
+            remote_message = body.get("message")
             if isinstance(remote_code, str) and remote_code:
                 code = remote_code[:128]
+            elif isinstance(reason, str) and reason:
+                code = reason[:128]
             if isinstance(errors, list) and errors:
                 message = "; ".join(str(item) for item in errors)[:1000]
+            elif isinstance(remote_message, str) and remote_message:
+                message = remote_message[:1000]
         raise AqsiApiError(code, message, retryable=response.status_code >= 500)
