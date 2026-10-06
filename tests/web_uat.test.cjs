@@ -474,3 +474,22 @@ test('Catalog action dialog is scrollable and becomes a touch-friendly mobile sh
   assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.variant-actions \.button\.danger \{ min-height: 44px/);
   assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-dialog-actions, \.catalog-dialog-actions\.three \{ grid-template-columns: 1fr/);
 });
+
+test('Settings exposes safe AQSI controls without a secret reveal action', () => {
+  assert.match(source, /route\.name === "settings"/);
+  assert.match(source, /<strong>Настройки<\/strong>/);
+  assert.match(source, /Настройки[\s\S]*<h1>Интеграции<\/h1>/);
+  assert.match(source, /API key[\s\S]*•{10,}/);
+  assert.match(source, /type="password"[\s\S]*autocomplete="new-password"/);
+  assert.match(source, /Заменить ключ/);
+  assert.match(source, /Проверить подключение/);
+  assert.match(source, /Автоматическая синхронизация каталога/);
+  assert.match(source, /Синхронизировать сейчас/);
+  assert.match(source, /catalog_sync_enabled/);
+  assert.match(source, /\/api\/settings\/integrations\/\$\{integration\.id\}\/sync/);
+  assert.match(source, /Используются устаревшие настройки из окружения/);
+  assert.match(source, /\/api\/settings\/integrations\/aqsi\/migrate/);
+  assert.doesNotMatch(source, /Показать ключ/);
+  assert.match(styles, /\.settings-facts \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.settings-facts \{ grid-template-columns: 1fr/);
+});

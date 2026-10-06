@@ -48,7 +48,7 @@ function routeFromLocation() {
       sort: params.get("sort") || undefined,
     };
   }
-  if (["workspace", "rental"].includes(name)) return { name };
+  if (["workspace", "rental", "settings"].includes(name)) return { name };
   return null;
 }
 
@@ -60,6 +60,7 @@ async function restoreRoute(route) {
     else if (route.name === "catalog") await openOperationsCatalog(route);
     else if (route.name === "product") await openOperationsProduct(route.productId);
     else if (route.name === "rental") await openRentalHub();
+    else if (route.name === "settings") await openSettings();
     else if (route.name === "customer") await selectRentalCustomer(route.customerId);
     else if (route.name === "order") await openRentalReturnOrder(route.orderId);
     else if (route.name === "intake") await openSession(route.sessionId);
@@ -322,6 +323,7 @@ function renderHome(activity) {
         <button class="action-card" id="open-intake"><span class="action-icon">＋</span><strong>Приёмка</strong><span class="muted small">Принять товар</span></button>
         <button class="action-card" id="open-catalog"><span class="action-icon">▦</span><strong>Каталог</strong><span class="muted small">Товары и варианты</span></button>
         <button class="action-card" id="open-rental"><span class="action-icon">↔</span><strong>Аренда</strong><span class="muted small">Активные, выдача и возврат</span></button>
+        ${state.user?.is_admin || state.user?.is_superuser ? '<button class="action-card" id="open-settings"><span class="action-icon">⚙</span><strong>Настройки</strong><span class="muted small">Интеграции и доступы</span></button>' : ""}
       </div>
       <section id="intake-home" class="hidden">
       <p class="muted">Сначала определяем товар. Поставщика и цены добавим после.</p>
@@ -339,10 +341,190 @@ function renderHome(activity) {
   });
   document.querySelector("#open-catalog").addEventListener("click", () => openOperationsCatalog());
   document.querySelector("#open-rental").addEventListener("click", () => openRentalHub());
+  document.querySelector("#open-settings")?.addEventListener("click", () => openSettings());
   document.querySelector("#start-session").addEventListener("click", () => startSession());
   document.querySelectorAll("[data-resume]").forEach((button) => {
     button.addEventListener("click", () => openSession(button.dataset.resume));
   });
+}
+
+async function openSettings() {
+  recordRoute("settings");
+  logicalParent = () => loadHome();
+  try {
+    const aqsi = await api("/api/settings/integrations/aqsi");
+    renderSettings(aqsi);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function integrationStatusLabel(aqsi) {
+  if (aqsi.using_legacy_environment) return "Устаревшая конфигурация";
+  if (aqsi.status === "connected") return "Подключено";
+  if (aqsi.status === "disabled") return "Выключено";
+  return "Не подключено";
+}
+
+function renderSettings(aqsi) {
+  const integration = aqsi.integration;
+  const configuration = integration?.configuration || {};
+  const savedAt = integration?.credential_rotated_at || integration?.credential_saved_at;
+  root.innerHTML = `<div class="shell settings-shell">
+    ${topbar(true)}
+    <p class="eyebrow">Настройки</p>
+    <h1>Интеграции</h1>
+    <p class="muted">Подключения внешних сервисов. Каталог и цены остаются под управлением Core.</p>
+    ${aqsi.using_legacy_environment ? `<div class="settings-warning"><strong>Используются устаревшие настройки из окружения</strong><p class="muted small">Перенесите ключ в защищённые настройки после подготовки master key на сервере.</p><button class="button secondary" id="migrate-aqsi" type="button">Перенести в настройки</button></div>` : ""}
+    <section class="card integration-card">
+      <div class="section-heading"><div><p class="eyebrow">Интеграция</p><h2>AQSI</h2></div><span class="chip ${aqsi.status === "connected" ? "good" : aqsi.status === "not_connected" ? "warn" : ""}">${escapeHtml(integrationStatusLabel(aqsi))}</span></div>
+      <p class="muted small">${configuration.catalog_sync_enabled ? "Core автоматически поддерживает каталог AQSI как внешнюю проекцию." : "Ручная проекция каталога Core в AQSI. Автоматическая синхронизация выключена."}</p>
+      ${integration ? `<div class="settings-facts">
+        <div><span class="muted small">API key</span><strong>${savedAt ? "••••••••••••••••••••" : "Не сохранён"}</strong>${savedAt ? `<span class="muted small">Сохранён: ${formatDate(savedAt)}</span>` : ""}</div>
+        <label class="settings-toggle"><input id="aqsi-enabled" type="checkbox" ${integration.enabled ? "checked" : ""}> <span>Интеграция включена</span></label>
+      </div>
+      <div class="inline-actions">
+        <button class="button secondary" id="replace-aqsi-key" type="button">${savedAt ? "Заменить ключ" : "Сохранить ключ"}</button>
+        <button class="button ghost" id="test-aqsi" type="button" ${savedAt ? "" : "disabled"}>Проверить подключение</button>
+      </div>
+      <form id="aqsi-key-form" class="settings-secret-form hidden">
+        <div class="field"><label for="aqsi-api-key">Новый API key</label><input id="aqsi-api-key" name="api_key" type="password" autocomplete="new-password" required></div>
+        <div class="inline-actions"><button class="button" type="submit">Сохранить</button><button class="button ghost" id="cancel-aqsi-key" type="button">Отмена</button></div>
+      </form>
+      <div class="divider"></div>
+      <div class="field"><label for="aqsi-shop">Магазин AQSI</label><select id="aqsi-shop"><option value="${escapeHtml(configuration.shop_id || "")}">${configuration.shop_id ? `AQSI ${escapeHtml(configuration.shop_id)}` : "Определять автоматически, если магазин один"}</option></select></div>
+      <button class="button ghost" id="discover-aqsi-shops" type="button" ${savedAt ? "" : "disabled"}>Обновить список магазинов</button>
+      <div class="divider"></div>
+      <div class="settings-sync-control">
+        <label class="settings-toggle"><input id="aqsi-auto-sync" type="checkbox" ${configuration.catalog_sync_enabled ? "checked" : ""} ${integration.enabled && savedAt ? "" : "disabled"}> <span>Автоматическая синхронизация каталога</span></label>
+        <p class="muted small">Каждые 5 минут Core отправляет новые и изменившиеся готовые варианты. Архивирование в AQSI пока выполняется отдельно.</p>
+        <button class="button secondary" id="sync-aqsi-now" type="button" ${integration.enabled && savedAt ? "" : "disabled"}>Синхронизировать сейчас</button>
+      </div>` : `<form id="new-aqsi-form">
+        <div class="field"><label for="new-aqsi-key">API key</label><input id="new-aqsi-key" name="api_key" type="password" autocomplete="new-password" required></div>
+        <label class="settings-toggle"><input name="enabled" type="checkbox" checked> <span>Интеграция включена</span></label>
+        <button class="button" type="submit">Подключить AQSI</button>
+      </form>`}
+    </section>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#migrate-aqsi")?.addEventListener("click", migrateLegacyAqsi);
+  document.querySelector("#new-aqsi-form")?.addEventListener("submit", createAqsiIntegration);
+  document.querySelector("#aqsi-enabled")?.addEventListener("change", updateAqsiEnabled);
+  document.querySelector("#replace-aqsi-key")?.addEventListener("click", () => document.querySelector("#aqsi-key-form").classList.remove("hidden"));
+  document.querySelector("#cancel-aqsi-key")?.addEventListener("click", () => document.querySelector("#aqsi-key-form").classList.add("hidden"));
+  document.querySelector("#aqsi-key-form")?.addEventListener("submit", (event) => replaceAqsiKey(event, integration.id));
+  document.querySelector("#test-aqsi")?.addEventListener("click", () => testAqsiConnection(integration.id));
+  document.querySelector("#discover-aqsi-shops")?.addEventListener("click", () => discoverAqsiShops(integration));
+  document.querySelector("#aqsi-shop")?.addEventListener("change", () => saveAqsiShop(integration));
+  document.querySelector("#aqsi-auto-sync")?.addEventListener("change", (event) => updateAqsiAutoSync(event, integration));
+  document.querySelector("#sync-aqsi-now")?.addEventListener("click", () => synchronizeAqsiNow(integration));
+}
+
+async function migrateLegacyAqsi() {
+  try {
+    await api("/api/settings/integrations/aqsi/migrate", { method: "POST" });
+    showToast("Настройки AQSI перенесены");
+    await openSettings();
+  } catch (error) {
+    showToast(error.message, true);
+    await openSettings();
+  }
+}
+
+async function createAqsiIntegration(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    const integration = await api("/api/settings/integrations", {
+      method: "POST",
+      body: JSON.stringify({ provider: "aqsi", name: "AQSI", enabled: data.get("enabled") === "on", configuration: {} }),
+    });
+    await api(`/api/settings/integrations/${integration.id}/credential`, {
+      method: "PUT",
+      body: JSON.stringify({ api_key: data.get("api_key") }),
+    });
+    showToast("AQSI подключена");
+    await openSettings();
+  } catch (error) {
+    showToast(error.message, true);
+    await openSettings();
+  }
+}
+
+async function updateAqsiEnabled(event) {
+  const aqsi = await api("/api/settings/integrations/aqsi");
+  if (!aqsi.integration) return;
+  try {
+    await api(`/api/settings/integrations/${aqsi.integration.id}`, { method: "PATCH", body: JSON.stringify({ enabled: event.currentTarget.checked }) });
+    showToast(event.currentTarget.checked ? "Интеграция включена" : "Интеграция выключена");
+    await openSettings();
+  } catch (error) {
+    event.currentTarget.checked = !event.currentTarget.checked;
+    showToast(error.message, true);
+  }
+}
+
+async function replaceAqsiKey(event, integrationId) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api(`/api/settings/integrations/${integrationId}/credential`, { method: "PUT", body: JSON.stringify({ api_key: data.get("api_key") }) });
+    event.currentTarget.reset();
+    showToast("API key сохранён");
+    await openSettings();
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function testAqsiConnection(integrationId) {
+  try {
+    const result = await api(`/api/settings/integrations/${integrationId}/test`, { method: "POST" });
+    showToast(result.ok ? `✓ ${result.message}` : result.message, !result.ok);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function discoverAqsiShops(integration) {
+  try {
+    const shops = await api(`/api/settings/integrations/${integration.id}/shops`);
+    const select = document.querySelector("#aqsi-shop");
+    select.innerHTML = '<option value="">Выберите магазин</option>' + shops.map((shop) => `<option value="${escapeHtml(shop.id)}" ${shop.id === integration.configuration.shop_id ? "selected" : ""}>${escapeHtml(shop.name)}</option>`).join("");
+    showToast(shops.length ? "Список магазинов обновлён" : "Активные магазины не найдены");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function saveAqsiShop(integration) {
+  const shopId = document.querySelector("#aqsi-shop").value || null;
+  try {
+    await api(`/api/settings/integrations/${integration.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ configuration: { ...integration.configuration, shop_id: shopId } }),
+    });
+    showToast("Магазин AQSI сохранён");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function updateAqsiAutoSync(event, integration) {
+  const enabled = event.currentTarget.checked;
+  try {
+    await api(`/api/settings/integrations/${integration.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ configuration: { ...integration.configuration, catalog_sync_enabled: enabled } }),
+    });
+    if (enabled) {
+      await api(`/api/settings/integrations/${integration.id}/sync`, { method: "POST" });
+    }
+    showToast(enabled ? "Автоматическая синхронизация включена" : "Автоматическая синхронизация выключена");
+    await openSettings();
+  } catch (error) {
+    event.currentTarget.checked = !enabled;
+    showToast(error.message, true);
+  }
+}
+
+async function synchronizeAqsiNow(integration) {
+  try {
+    const result = await api(`/api/settings/integrations/${integration.id}/sync`, { method: "POST" });
+    showToast(result.message);
+  } catch (error) { showToast(error.message, true); }
 }
 
 function topbar(back = false) {
