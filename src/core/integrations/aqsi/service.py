@@ -58,7 +58,8 @@ class AqsiPublicationService:
         self,
         variant_id: UUIDv7,
         *,
-        actor_id: UUIDv7,
+        actor_id: UUIDv7 | None,
+        retry_unchanged_failure: bool = True,
     ) -> tuple[Publication, PublicationAttempt, bool]:
         """Persist one publication command or return its active duplicate."""
         self._ensure_configured()
@@ -90,6 +91,14 @@ class AqsiPublicationService:
                 latest_attempt = self._attempts.latest(publication.id)
                 if latest_attempt is not None:
                     return publication, latest_attempt, False
+            latest_attempt = self._attempts.latest(publication.id)
+            if (
+                not retry_unchanged_failure
+                and latest_attempt is not None
+                and latest_attempt.status is PublicationAttemptStatus.FAILED
+                and latest_attempt.payload_hash == payload_hash
+            ):
+                return publication, latest_attempt, False
 
         operation = (
             PublicationOperation.UPDATE

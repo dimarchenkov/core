@@ -155,6 +155,21 @@ class CatalogVariantRepository:
         )
         return self._session.scalars(statement).all()
 
+    def list_operational_ids(self) -> Sequence[UUIDv7]:
+        """Return active Variant ids whose Product is also active and not archived."""
+        statement = (
+            select(CatalogVariant.id)
+            .join(CatalogProduct, CatalogVariant.product_id == CatalogProduct.id)
+            .where(
+                CatalogVariant.deleted_at.is_(None),
+                CatalogVariant.is_active.is_(True),
+                CatalogProduct.deleted_at.is_(None),
+                CatalogProduct.is_active.is_(True),
+            )
+            .order_by(CatalogVariant.id)
+        )
+        return self._session.scalars(statement).all()
+
     def get_by_barcode(self, barcode: str) -> CatalogVariant | None:
         """Return a Variant by its one current operational barcode."""
         statement = select(CatalogVariant).where(CatalogVariant.barcode == barcode)

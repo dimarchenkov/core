@@ -31,6 +31,7 @@ from core.dev.aqsi_sale_spike import (
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
 from core.integrations.aqsi.client import AqsiApiError, AqsiHttpClient
+from core.integrations.models import Integration, IntegrationCredential
 from core.inventory.models import StockMovement
 from core.main import create_app
 from core.pricing.enums import PriceType
@@ -131,6 +132,8 @@ def session() -> Generator[Session]:
             CatalogVariantBarcode.__table__,
             Price.__table__,
             StockMovement.__table__,
+            Integration.__table__,
+            IntegrationCredential.__table__,
         ],
     )
     factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)

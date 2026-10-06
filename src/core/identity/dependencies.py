@@ -31,6 +31,18 @@ def get_current_user(
     return user
 
 
+def get_current_admin(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Allow only administrators to access security-sensitive settings."""
+    if not (user.is_admin or user.is_superuser):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator access is required.",
+        )
+    return user
+
+
 def _credentials_exception() -> HTTPException:
     """Build the standard bearer authentication failure response."""
     return HTTPException(

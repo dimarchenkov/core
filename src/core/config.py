@@ -28,6 +28,17 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = Field(default="HS256")
     jwt_access_token_expire_minutes: int = Field(default=480)
+    master_encryption_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MASTER_ENCRYPTION_KEY", "CORE_MASTER_ENCRYPTION_KEY"),
+    )
+    master_encryption_key_file: Path = Field(
+        default=Path("storage/secrets/master_encryption_key"),
+        validation_alias=AliasChoices(
+            "MASTER_ENCRYPTION_KEY_FILE",
+            "CORE_MASTER_ENCRYPTION_KEY_FILE",
+        ),
+    )
     aqsi_enabled: bool = Field(default=False)
     aqsi_base_url: str = Field(default="https://api.aqsi.ru/pub")
     aqsi_api_key: SecretStr | None = Field(default=None)
@@ -47,19 +58,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("PRINTING_ENABLED", "CORE_PRINTING_ENABLED"),
     )
     cups_server: str | None = Field(
-        default=None, min_length=1,
+        default=None,
+        min_length=1,
         validation_alias=AliasChoices("CUPS_SERVER", "CORE_CUPS_SERVER"),
     )
     cups_user: str | None = Field(
-        default=None, min_length=1,
+        default=None,
+        min_length=1,
         validation_alias=AliasChoices("CUPS_USER", "CORE_CUPS_USER"),
     )
     cups_printer: str | None = Field(
-        default=None, min_length=1,
+        default=None,
+        min_length=1,
         validation_alias=AliasChoices("CUPS_PRINTER", "CORE_CUPS_PRINTER"),
     )
     cups_ipp_version: str = Field(
-        default="1.1", pattern=r"^\d+\.\d+$",
+        default="1.1",
+        pattern=r"^\d+\.\d+$",
         validation_alias=AliasChoices("CUPS_IPP_VERSION", "CORE_CUPS_IPP_VERSION"),
     )
 
@@ -67,4 +82,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Return cached application settings for services and integrations."""
-    return Settings()
+    from core.integrations.master_key import load_master_encryption_key
+
+    settings = Settings()
+    load_master_encryption_key(settings)
+    return settings

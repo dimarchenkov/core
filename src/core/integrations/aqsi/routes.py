@@ -28,6 +28,9 @@ from core.integrations.aqsi.service import (
     PublicationNotFoundError,
     PublicationVerificationUnavailableError,
 )
+from core.integrations.credentials import CredentialDecryptionError
+from core.integrations.master_key import MasterEncryptionKeyError
+from core.integrations.runtime import AmbiguousIntegrationError, resolve_aqsi_settings
 from core.jobs import get_default_queue
 from core.shared.db import UUIDv7
 
@@ -43,7 +46,16 @@ def get_aqsi_publication_service(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AqsiPublicationService:
     """Provide AQSI publication services for request handlers."""
-    return AqsiPublicationService(session, settings)
+    try:
+        runtime_settings, _ = resolve_aqsi_settings(session, settings)
+    except AmbiguousIntegrationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (MasterEncryptionKeyError, CredentialDecryptionError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AQSI credential storage is unavailable.",
+        ) from exc
+    return AqsiPublicationService(session, runtime_settings)
 
 
 def get_aqsi_queue() -> Queue:

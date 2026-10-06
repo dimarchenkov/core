@@ -26,6 +26,9 @@ from core.integrations.aqsi.client import (
     AqsiHttpClient,
     AqsiPendingOrderGateway,
 )
+from core.integrations.credentials import CredentialDecryptionError
+from core.integrations.master_key import MasterEncryptionKeyError
+from core.integrations.runtime import AmbiguousIntegrationError, resolve_aqsi_settings
 from core.pricing.enums import PriceType
 from core.pricing.repository import PriceRepository
 from core.shared.db import UUIDv7
@@ -152,8 +155,25 @@ class DirectAttempt:
     progressing: bool = False
 
 
-def get_spike_gateway(
+def get_spike_runtime_settings(
     settings: Annotated[Settings, Depends(get_settings)],
+    session: Annotated[Session, Depends(get_session)],
+) -> Settings:
+    """Resolve Settings-backed AQSI data before falling back to legacy environment."""
+    try:
+        runtime_settings, _ = resolve_aqsi_settings(session, settings)
+        return runtime_settings
+    except AmbiguousIntegrationError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except (MasterEncryptionKeyError, CredentialDecryptionError) as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "AQSI credential storage is unavailable.",
+        ) from exc
+
+
+def get_spike_gateway(
+    settings: Annotated[Settings, Depends(get_spike_runtime_settings)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> Generator[AqsiPendingOrderGateway]:
     """Create the real AQSI adapter only for an explicitly invoked spike request."""
@@ -477,7 +497,7 @@ def _advance_direct_attempt(
 def create_spike_order(
     data: SpikeOrderRequest,
     session: Annotated[Session, Depends(get_session)],
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_spike_runtime_settings)],
     user: Annotated[User, Depends(get_current_user)],
     gateway: Annotated[AqsiPendingOrderGateway, Depends(get_spike_gateway)],
 ) -> SpikeOrderRead:
@@ -534,7 +554,7 @@ def create_spike_order(
 @router.get("/orders/{reference}")
 def get_spike_order_status(
     reference: str,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_spike_runtime_settings)],
     user: Annotated[User, Depends(get_current_user)],
     gateway: Annotated[AqsiPendingOrderGateway, Depends(get_spike_gateway)],
 ) -> dict[str, object]:
@@ -559,7 +579,7 @@ def get_spike_order_status(
 def create_direct_attempt(
     data: SpikeOrderRequest,
     session: Annotated[Session, Depends(get_session)],
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_spike_runtime_settings)],
     user: Annotated[User, Depends(get_current_user)],
     gateway: Annotated[AqsiPendingOrderGateway, Depends(get_spike_gateway)],
 ) -> DirectAttemptRead:
@@ -633,7 +653,7 @@ def create_direct_attempt(
 @router.post("/direct/{reference}/progress", response_model=DirectAttemptRead)
 def progress_direct_attempt(
     reference: str,
-    settings: Annotated[Settings, Depends(get_settings)],
+    settings: Annotated[Settings, Depends(get_spike_runtime_settings)],
     user: Annotated[User, Depends(get_current_user)],
     gateway: Annotated[AqsiPendingOrderGateway, Depends(get_spike_gateway)],
 ) -> DirectAttemptRead:

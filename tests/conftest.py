@@ -9,6 +9,14 @@ from pillow_heif import register_heif_opener
 
 os.environ.setdefault("CORE_ENV", "test")
 os.environ.setdefault("CORE_JWT_SECRET", "test-only-jwt-secret-at-least-32-bytes")
+os.environ.setdefault(
+    "MASTER_ENCRYPTION_KEY",
+    "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+)
+os.environ.setdefault(
+    "CORE_MASTER_ENCRYPTION_KEY_FILE",
+    f"/tmp/core-pytest-master-encryption-key-{os.getpid()}",
+)
 
 
 @pytest.fixture(scope="session")

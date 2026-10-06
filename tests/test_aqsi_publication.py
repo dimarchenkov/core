@@ -40,6 +40,8 @@ from core.integrations.aqsi.service import (
     AqsiIntegrationNotConfiguredError,
     AqsiPublicationService,
 )
+from core.integrations.aqsi.synchronization import AqsiCatalogSynchronizationService
+from core.integrations.models import Integration, IntegrationCredential
 from core.main import create_app
 from core.media.enums import ImageLinkEntityType, ImageLinkRole
 from core.media.models import Image, ImageLink
@@ -210,6 +212,8 @@ def session() -> Generator[Session]:
             Price.__table__,
             Publication.__table__,
             PublicationAttempt.__table__,
+            Integration.__table__,
+            IntegrationCredential.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -364,6 +368,37 @@ def test_publication_request_is_attributed_and_idempotent_while_pending(
     assert attempt.created_by_id == user.id
     assert publication.external_id == str(variant.id)
     assert session.query(PublicationAttempt).count() == 1
+
+
+def test_automatic_catalog_sweep_queues_changes_without_repeating_unchanged_failure(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+    aqsi_settings: Settings,
+) -> None:
+    """Periodic sync is system-attributed and waits for data/config change after a failure."""
+    synchronization = AqsiCatalogSynchronizationService(session, aqsi_settings)
+
+    first = synchronization.plan(actor_id=None, retry_unchanged_failures=False)
+    attempt = session.get(PublicationAttempt, first.attempt_ids[0])
+    assert attempt is not None
+    attempt.status = PublicationAttemptStatus.FAILED
+    publication = session.get(Publication, attempt.publication_id)
+    assert publication is not None
+    publication.status = PublicationStatus.FAILED
+    session.commit()
+
+    automatic_retry = synchronization.plan(actor_id=None, retry_unchanged_failures=False)
+    manual_retry = synchronization.plan(actor_id=user.id, retry_unchanged_failures=True)
+    manual_attempt = session.get(PublicationAttempt, manual_retry.attempt_ids[0])
+
+    assert first.queued == 1
+    assert attempt.created_by_id is None
+    assert automatic_retry.queued == 0
+    assert automatic_retry.unchanged == 1
+    assert manual_retry.queued == 1
+    assert manual_attempt is not None
+    assert manual_attempt.created_by_id == user.id
 
 
 def test_processor_creates_category_good_and_verifies_projection(

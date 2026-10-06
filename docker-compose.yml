@@ -16,6 +16,7 @@ services:
       - "8000"
     volumes:
       - ./storage:/app/storage
+      - core_secrets:/var/lib/core/secrets
 
   worker:
     build:
@@ -32,6 +33,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - core_secrets:/var/lib/core/secrets
 
   postgres:
     image: postgres:17-alpine
@@ -70,3 +73,4 @@ services:
 
 volumes:
   postgres_data:
+  core_secrets:

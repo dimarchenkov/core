@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session
 
 from core.activity.routes import router as activity_router
 from core.admin import setup_admin
@@ -10,11 +14,15 @@ from core.catalog.routes import router as catalog_router
 from core.catalog.search_routes import router as catalog_search_router
 from core.config import get_settings
 from core.customers.routes import router as customer_router
+from core.database import get_session
 from core.dev.aqsi_sale_spike import page_router as aqsi_sale_spike_page_router
 from core.dev.aqsi_sale_spike import router as aqsi_sale_spike_router
 from core.identity.routes import router as identity_router
 from core.intake.routes import router as intake_router
 from core.integrations.aqsi.routes import router as aqsi_router
+from core.integrations.credentials import validate_stored_integration_credentials
+from core.integrations.master_key import load_master_encryption_key
+from core.integrations.routes import router as integration_settings_router
 from core.labels.routes import rental_asset_router as rental_asset_labels_router
 from core.labels.routes import router as labels_router
 from core.logging import configure_logging
@@ -33,6 +41,28 @@ from core.web.routes import router as web_router
 from core.web.routes import static_root as web_static_root
 
 
+@asynccontextmanager
+async def application_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Validate the shared master key against persisted credentials at startup."""
+    settings_provider = app.dependency_overrides.get(get_settings, get_settings)
+    session_provider = app.dependency_overrides.get(get_session, get_session)
+    settings = settings_provider()
+    key = load_master_encryption_key(settings)
+    session_resource = session_provider()
+    if isinstance(session_resource, Session):
+        validate_stored_integration_credentials(session_resource, key)
+    else:
+        session_iterator: Iterator[Session] = iter(session_resource)
+        try:
+            session = next(session_iterator)
+            validate_stored_integration_credentials(session, key)
+        finally:
+            close = getattr(session_iterator, "close", None)
+            if close is not None:
+                close()
+    yield
+
+
 def create_app() -> FastAPI:
     """Create the Core FastAPI application with infrastructure integrations."""
     settings = get_settings()
@@ -42,6 +72,7 @@ def create_app() -> FastAPI:
         title="Core",
         description="Internal product, inventory, and rental system for 2010shop.",
         debug=settings.debug,
+        lifespan=application_lifespan,
     )
     setup_admin(app)
     app.include_router(catalog_router)
@@ -54,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(image_link_router)
     app.include_router(intake_router)
     app.include_router(aqsi_router)
+    app.include_router(integration_settings_router)
     app.include_router(labels_router)
     app.include_router(rental_asset_labels_router)
     app.include_router(pricing_router)
