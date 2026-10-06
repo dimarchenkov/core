@@ -192,6 +192,29 @@ integrations/
 
 Core не должен зависеть от конкретной внешней платформы.
 
+Обычная конфигурация внешних сервисов выполняется в пользовательском разделе
+`Настройки → Интеграции`, а не через SQLAdmin. `Integration` описывает отдельное подключение
+провайдера и не является глобальным singleton. Возможности провайдера (`payment`,
+`fiscalization`, `catalog_projection`, `external_sales_import`, `refunds`) объявляются adapter
+registry в коде независимо друг от друга. Текущий AQSI adapter подтверждает `payment`,
+`fiscalization` и `catalog_projection`; первые две возможности пока используются только
+изолированным spike и не означают наличие постоянного Sales/POS workflow.
+
+Секреты принадлежат `IntegrationCredential` и хранятся только как authenticated ciphertext.
+Core использует Fernet из Python-библиотеки `cryptography` (AES-128-CBC + HMAC-SHA256 по
+спецификации Fernet). Канонический loader сначала проверяет explicit `MASTER_ENCRYPTION_KEY`,
+затем persistent key file, а при первом запуске атомарно создаёт файл под межпроцессной
+filesystem-блокировкой. В Docker API и worker используют один volume `core_secrets`.
+Master key никогда не пишется в PostgreSQL. Read API не расшифровывает и не сериализует provider
+credentials.
+
+Store/TradePoint пока отсутствует в доменной модели. Поэтому Sprint 7.13a не создаёт фиктивный
+Store и не добавляет nullable foreign key без владельца. `Integration` допускает несколько строк
+одного provider и не имеет provider-wide unique constraint. До появления нескольких подключений
+legacy workflows используют единственную AQSI Integration; при неоднозначности операция
+останавливается. Следующий минимальный шаг при введении Store — отдельная assignment-модель
+`Store ↔ Integration ↔ role`, не изменение Catalog.
+
 ### Client Layer
 
 Клиентами Core могут быть:

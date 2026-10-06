@@ -38,24 +38,23 @@ failure must be visible as an external integration failure and must not corrupt 
 Inventory. General offline behavior is an open operational decision, not an implicit two-way
 ownership model.
 
-## Target workflow — Sprint 7.13
+## Automatic workflow — Sprint 7.13b
 
-The current manual publication path is production-used and operationally useful, but it is not the
-target everyday workflow. Sprint 7.13 — **AQSI Automatic Synchronization** introduces an
-administrator setting:
+The manual publication path remains available for diagnostics and controlled retries. Sprint
+7.13b adds an administrator setting:
 
 ```text
 AQSI synchronization
 [ ON / OFF ]
 ```
 
-With synchronization enabled, an operator normally does not publish each product manually. Core
-automatically maintains AQSI as its external projection:
+With synchronization enabled, an operator normally does not publish each product manually. Every
+five minutes Core scans operational Variants and uses the existing canonical payload hash to queue
+only new or locally changed ready projections:
 
 ```text
 new eligible Variant                         -> create/publish in AQSI
 price, name, barcode or synchronized change -> update AQSI
-archived/deleted item                       -> remove/deactivate using supported AQSI semantics
 previously incomplete item becomes eligible -> publish automatically
 ```
 
@@ -63,12 +62,16 @@ Eligibility includes a current positive retail price, the required photo, active
 state, and all existing AQSI-specific required fields. The exact event contracts are intentionally
 left for Sprint 7.13 design.
 
-The target combines event-driven/near-immediate synchronization with periodic reconciliation
-(initial operating assumption: daily). Reconciliation asks only: “Does AQSI match the state Core
-expects?” It does not import AQSI edits as authoritative business data. `Synchronize now / Force
-sync` remains available as an administrative and diagnostic fallback, not the normal workflow.
+`Synchronize now` starts the same idempotent sweep immediately and is also the explicit retry path
+after configuration or data correction. Unchanged failed payloads are not retried by every periodic
+sweep; the existing publication job retains its bounded network retry policy.
 
-Automatic sync must expose pending/error/retry/drift state to operators. It does not imply AQSI
+This first automatic slice detects changes in authoritative Core data. Periodic remote
+reconciliation (“Does AQSI still match the state Core expects?”), event-driven near-immediate
+triggers, and remote archive/deactivation remain follow-up work. AQSI edits never become
+authoritative business data.
+
+Automatic sync exposes existing pending/error/retry/outdated state to operators. It does not imply AQSI
 stock ownership, sales import, receipt import or general bidirectional catalog synchronization.
 
 ## Official API contract
@@ -81,7 +84,7 @@ x-client-key: Application <API key>
 
 Product creation and update use the account-wide Goods API. AQSI V2 accepts external-system identifiers, so Core owns the remote identifier instead of relying on a generated AQSI ID.
 
-Runtime configuration for the first installation:
+Temporary legacy environment configuration for an installation not yet migrated:
 
 ```text
 CORE_AQSI_ENABLED=true
@@ -90,7 +93,10 @@ CORE_AQSI_TAX_CODE=6
 CORE_AQSI_SHOP_ID=<required only when several active shops exist>
 ```
 
-The committed example configuration keeps AQSI disabled and contains no real key.
+The committed example configuration keeps AQSI disabled and contains no real key. Once an
+`Integration` exists, its enabled state, encrypted API key and non-secret shop configuration take
+precedence over these legacy values. The UI explicitly reports legacy fallback and can migrate it;
+the fallback remains until UAT is complete.
 
 The AQSI goods schema currently requires:
 
@@ -390,3 +396,14 @@ history remains preserved regardless of the remote projection semantics.
 This slice is implemented and physically used. The runtime fiscal-profile editor, scheduled VAT
 changes and controlled bulk republishing remain documented follow-up and do not block manual
 product publication.
+
+## Implemented automatic projection slice
+
+1. Administrator-controlled `catalog_sync_enabled` flag, disabled by default.
+2. One durable RQ repeat job registered by the worker and executed every five minutes.
+3. Operational Product/Variant filtering plus existing Ready for Sale validation.
+4. Idempotent creation/update attempts based on the canonical AQSI payload hash.
+5. No periodic retry loop for an unchanged failed payload; explicit `Synchronize now` remains.
+6. Existing worker publication, provider verification and bounded retry pipeline is reused.
+7. Archive/delete does not perform an unverified remote destructive operation.
+8. Remote drift reconciliation and near-immediate domain events remain future work.

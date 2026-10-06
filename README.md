@@ -14,6 +14,7 @@ Core развивается как операционная платформа �
 - [Deployment и bootstrap](docs/11_deployment_bootstrap.md)
 - [Структура продуктовой документации](docs/12_product_documentation.md)
 - [Публикация товаров в AQSI](docs/17_aqsi_publication.md)
+- [Настройки и интеграции](docs/20_settings_integrations.md)
 
 ## Основные возможности
 
@@ -58,11 +59,13 @@ Tilda sync/import, автоматическая AQSI synchronization и Sales/PO
 
 ## AQSI product publication
 
-AQSI is disabled by default. Product publication requires a generated external
-API key in the private `.env` runtime file and `CORE_AQSI_ENABLED=true`. Docker
-Compose loads committed defaults from `.env.example` and then applies optional
-local overrides from the git-ignored `.env`. Never put a real AQSI key in
-`.env.example` or commit it.
+AQSI is disabled by default. Administrators configure it in
+`Настройки → Интеграции`; the API key is encrypted in PostgreSQL and is never
+returned to the browser. On first Docker start Core generates the master key once in the shared
+`core_secrets` volume at `/var/lib/core/secrets/master_encryption_key`; API and worker reuse that
+file after container recreation. `MASTER_ENCRYPTION_KEY` remains an optional production secret-manager
+override. Legacy `CORE_AQSI_*` values remain a temporary fallback until Settings-backed
+configuration passes UAT. Never put real provider or master keys in `.env.example` or commit them.
 
 The first installation uses AQSI VAT code `6` (`НДС не облагается`) and creates
 the deterministic `Товары Core` goods category. If the AQSI account has one

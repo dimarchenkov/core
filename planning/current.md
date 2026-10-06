@@ -196,7 +196,19 @@
   одной транзакции. Успешно удалённый TEST Product физически отсутствует в Active/Archive/All;
 - ручной desktop/mobile UAT административных confirmations ещё предстоит выполнить.
 
-Автоматическая синхронизация AQSI не входит в Sprint 9.12. Она выделена в следующий Sprint 7.13.
+### Requested follow-up — Sprint 7.13b AQSI Catalog Projection (implemented, UAT pending)
+
+- administrator включает автоматическую проекцию отдельно от общего enabled state интеграции;
+- worker регистрирует один durable RQ sweep раз в пять минут и переиспользует существующие
+  Publication/PublicationAttempt, canonical payload hash и bounded retry pipeline;
+- sweep обрабатывает только operational Product/Variant, пропускает неготовые позиции и ставит в
+  очередь только новые или локально изменившиеся projection;
+- неизменившаяся failed projection не образует бесконечный periodic retry; после исправления
+  доступна явная команда «Синхронизировать сейчас»;
+- архивирование/удаление в AQSI, remote drift reconciliation и near-immediate domain events не
+  заявляются реализованными без подтверждённой provider semantics;
+- automated checks реализованы; controlled live AQSI UAT и наблюдение одного periodic sweep ещё
+  предстоят.
 
 ## Definition of Done
 
@@ -205,7 +217,7 @@
   фильтруются без заявления о remote drift detection;
 - archive/delete не уничтожает существующую бизнес-историю;
 - Category и Supplier управляются из обычного интерфейса без SQLAdmin;
-- Catalog показывает известный AQSI status, но не запускает скрытую автоматическую синхронизацию
-  и не обещает reconciliation drift detection;
+- Catalog показывает известный AQSI status; автоматическая синхронизация запускается только после
+  явного включения администратором и не обещает remote reconciliation drift detection;
 - существующие границы Catalog, Pricing, Inventory, Intake, Rental и AQSI не смешиваются;
 - результаты real-world UAT Sprint 9.12 честно зафиксированы.
