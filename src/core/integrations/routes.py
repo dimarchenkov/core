@@ -239,6 +239,7 @@ def migrate_legacy_aqsi(
                     "tax_code": settings.aqsi_tax_code,
                     "device_id": settings.aqsi_sale_spike_device_id,
                     "tax_system_code": settings.aqsi_sale_spike_tax_system_code,
+                    "acquiring_mode": settings.aqsi_acquiring_mode,
                     "default_group_id": settings.aqsi_default_group_id,
                     "default_group_name": settings.aqsi_default_group_name,
                 },

@@ -4,8 +4,11 @@ let logicalParent = () => loadHome();
 let restoringHistory = false;
 let zxingLoader = null;
 let intakeSearchTimer = null;
+let scannerService = null;
+let salesProgressTimer = null;
 
 function recordRoute(name, data = {}) {
+  if (name !== "intake") scannerService?.clearLocalHandler();
   const route = { name, ...data };
   if (restoringHistory) return;
   if (window.history.state?.coreRoute?.name === name
@@ -19,6 +22,7 @@ function routeUrl(route) {
   if (route.name === "customer") return `${window.location.pathname}#customer/${route.customerId}`;
   if (route.name === "order") return `${window.location.pathname}#order/${route.orderId}`;
   if (route.name === "intake") return `${window.location.pathname}#intake/${route.sessionId}`;
+  if (route.name === "sale") return `${window.location.pathname}#sale${route.saleId ? `/${route.saleId}` : ""}`;
   if (route.name === "catalog") {
     const params = catalogUrlParams(normalizeCatalogState(route), false);
     const query = params.toString();
@@ -34,6 +38,7 @@ function routeFromLocation() {
   if (name === "customer" && id) return { name, customerId: id };
   if (name === "order" && id) return { name, orderId: id };
   if (name === "intake" && id) return { name, sessionId: id };
+  if (name === "sale") return { name, saleId: id || undefined };
   if (name === "catalog") {
     const params = new URLSearchParams(queryString);
     return {
@@ -61,6 +66,7 @@ async function restoreRoute(route) {
     else if (route.name === "product") await openOperationsProduct(route.productId);
     else if (route.name === "rental") await openRentalHub();
     else if (route.name === "settings") await openSettings();
+    else if (route.name === "sale") await openSalesWorkspace(route.saleId);
     else if (route.name === "customer") await selectRentalCustomer(route.customerId);
     else if (route.name === "order") await openRentalReturnOrder(route.orderId);
     else if (route.name === "intake") await openSession(route.sessionId);
@@ -97,6 +103,11 @@ const state = {
   intakeVariantSearch: { query: "", items: [], hasMore: false, loading: false, selected: null },
   intakeProductSearch: { query: "", items: [], hasMore: false, loading: false, selected: null },
   intakeAqsi: new Map(),
+  sales: {
+    drafts: [],
+    activeId: null,
+    active: null,
+  },
   rental: {
     customers: [],
     customer: null,
@@ -108,6 +119,7 @@ const state = {
   },
   operations: {
     catalog: null,
+    categoryManagement: null,
     products: [],
     product: null,
     imageLinks: [],
@@ -172,6 +184,191 @@ function showToast(message, error = false) {
   toast.className = `toast show${error ? " error" : ""}`;
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => { toast.className = "toast"; }, 3200);
+}
+
+class ScannerService {
+  /** Route likely HID scanner sequences without treating ordinary typing as scans. */
+  constructor(target = document) {
+    this.target = target;
+    this.buffer = "";
+    this.startedAt = 0;
+    this.lastAt = 0;
+    this.fastMaxGap = 35;
+    this.bluetoothMaxGap = 180;
+    this.bluetoothAverageGap = 100;
+    this.minLength = 4;
+    this.bluetoothMinLength = 8;
+    this.localHandler = null;
+    this.globalHandler = null;
+    this.onKeyDown = this.onKeyDown.bind(this);
+    target.addEventListener("keydown", this.onKeyDown, true);
+  }
+
+  setLocalHandler(owner, handler) {
+    this.localHandler = { owner, handler };
+  }
+
+  clearLocalHandler(owner = null) {
+    if (!owner || this.localHandler?.owner === owner) this.localHandler = null;
+  }
+
+  setGlobalHandler(handler) {
+    this.globalHandler = handler;
+  }
+
+  reset() {
+    this.buffer = "";
+    this.startedAt = 0;
+    this.lastAt = 0;
+  }
+
+  isEditableTarget(target) {
+    if (!target?.closest) return false;
+    return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+  }
+
+  onKeyDown(event) {
+    if (event.isComposing || event.ctrlKey || event.altKey || event.metaKey) {
+      this.reset();
+      return;
+    }
+    if (this.isEditableTarget(event.target) || document.querySelector("dialog[open]")) {
+      this.reset();
+      return;
+    }
+    const now = Number(event.timeStamp || performance.now());
+    if (event.key === "Enter" || event.key === "Tab") {
+      const elapsed = this.lastAt && this.startedAt ? this.lastAt - this.startedAt : Infinity;
+      const terminatorGap = this.lastAt ? now - this.lastAt : Infinity;
+      const fastScanner = this.buffer.length >= this.minLength
+        && elapsed <= Math.max(90, (this.buffer.length - 1) * this.fastMaxGap)
+        && terminatorGap <= this.fastMaxGap * 2;
+      const bluetoothScanner = this.buffer.length >= this.bluetoothMinLength
+        && elapsed <= (this.buffer.length - 1) * this.bluetoothAverageGap
+        && terminatorGap <= this.bluetoothMaxGap * 2;
+      const scannerLike = fastScanner || bluetoothScanner;
+      const value = this.buffer;
+      this.reset();
+      if (!scannerLike) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.emit(value);
+      return;
+    }
+    if (event.key.length !== 1 || event.key < " " || event.key > "~") {
+      this.reset();
+      return;
+    }
+    if (this.lastAt && now - this.lastAt > this.bluetoothMaxGap) this.reset();
+    if (!this.buffer) this.startedAt = now;
+    this.buffer += event.key;
+    this.lastAt = now;
+  }
+
+  emit(value) {
+    if (this.localHandler?.handler(value) === true) return "local";
+    if (this.globalHandler?.(value) === true) return "global";
+    return null;
+  }
+}
+
+function ensureScannerService() {
+  if (scannerService) return scannerService;
+  scannerService = new ScannerService(document);
+  scannerService.setGlobalHandler((value) => {
+    void addBarcodeToActiveSale(value);
+    return true;
+  });
+  return scannerService;
+}
+
+function activeSaleStorageKey() {
+  return state.user ? `core.activeSale.${state.user.id}` : null;
+}
+
+function storedActiveSaleId() {
+  const key = activeSaleStorageKey();
+  return key ? window.localStorage?.getItem(key) || null : null;
+}
+
+function storeActiveSaleId(saleId) {
+  const key = activeSaleStorageKey();
+  if (!key || !window.localStorage) return;
+  if (saleId) window.localStorage.setItem(key, saleId);
+  else window.localStorage.removeItem(key);
+}
+
+async function refreshSalesContext(preferredId = undefined) {
+  state.sales.drafts = await api("/api/sales");
+  const candidate = preferredId === undefined ? storedActiveSaleId() : preferredId;
+  const active = state.sales.drafts.find((sale) => sale.id === candidate) || null;
+  state.sales.activeId = active?.id || null;
+  state.sales.active = active;
+  storeActiveSaleId(state.sales.activeId);
+  return active;
+}
+
+function rememberSale(sale, makeActive = true) {
+  state.sales.drafts = [sale, ...state.sales.drafts.filter((item) => item.id !== sale.id)]
+    .filter((item) => item.status === "draft");
+  if (makeActive) {
+    state.sales.activeId = sale.status === "draft" ? sale.id : null;
+    state.sales.active = sale.status === "draft" ? sale : null;
+    storeActiveSaleId(state.sales.activeId);
+  }
+  updateSalesIndicator();
+}
+
+function selectActiveSale(saleId) {
+  const sale = state.sales.drafts.find((item) => item.id === saleId) || null;
+  state.sales.activeId = sale?.id || null;
+  state.sales.active = sale;
+  storeActiveSaleId(state.sales.activeId);
+  updateSalesIndicator();
+  return sale;
+}
+
+function renderSalesIndicator() {
+  const sale = state.sales.active;
+  const summary = sale
+    ? `<strong>🛒 Продажа #${sale.sale_number}</strong><span>${sale.item_quantity} поз. · ${formatMoney(sale.total_amount)}</span>`
+    : "<strong>🛒 Продажа</strong><span>Корзина пуста</span>";
+  return `<button class="sales-indicator" id="sales-indicator" type="button" aria-label="Открыть продажи">${summary}</button>`;
+}
+
+function updateSalesIndicator() {
+  const current = document.querySelector("#sales-indicator");
+  if (current) {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = renderSalesIndicator();
+    current.replaceWith(wrapper.firstElementChild);
+    bindSalesIndicator();
+  }
+  const catalogContext = document.querySelector("#catalog-sales-context");
+  if (catalogContext) {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = renderCatalogSalesContext(state.operations.catalog);
+    catalogContext.replaceWith(wrapper.firstElementChild);
+    bindCatalogSalesContext();
+  }
+}
+
+function bindSalesIndicator() {
+  document.querySelector("#sales-indicator")?.addEventListener("click", () => {
+    openSalesWorkspace(state.sales.activeId);
+  });
+}
+
+function renderCatalogSalesContext(catalog) {
+  const sale = state.sales.active;
+  const visible = sale && ["sale", "all"].includes(catalog?.mode);
+  return `<section id="catalog-sales-context" class="catalog-sales-context ${visible ? "" : "hidden"}">
+    ${visible ? `<span><strong>Продажа #${sale.sale_number}</strong><small>${sale.item_quantity} поз. · ${formatMoney(sale.total_amount)}</small></span><button class="button ghost compact" id="catalog-open-sale" type="button">Перейти к продаже</button>` : ""}
+  </section>`;
+}
+
+function bindCatalogSalesContext() {
+  document.querySelector("#catalog-open-sale")?.addEventListener("click", () => openSalesWorkspace(state.sales.activeId));
 }
 
 async function api(path, options = {}) {
@@ -278,6 +475,8 @@ async function login(event) {
 async function bootstrap() {
   try {
     state.user = await api("/api/auth/me");
+    await refreshSalesContext();
+    ensureScannerService();
     const directRoute = routeFromLocation();
     if (directRoute) {
       window.history.replaceState({ coreRoute: directRoute }, "", routeUrl(directRoute));
@@ -366,6 +565,20 @@ function integrationStatusLabel(aqsi) {
   return "Не подключено";
 }
 
+function aqsiTaxSystemOptions(selected) {
+  const values = [[1, "ОСН"], [2, "УСН доход"], [4, "УСН доходы минус расходы"], [16, "Патент"], [32, "НПД"]];
+  return '<option value="">Выберите систему</option>' + values.map(([value, label]) => `<option value="${value}" ${Number(selected) === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function aqsiAcquiringModeOptions(selected = "sbp_with_card") {
+  const values = [
+    ["sbp_with_card", "Карта / QR"],
+    ["card_only", "Только карта"],
+    ["sbp_only", "Только QR"],
+  ];
+  return values.map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
 function renderSettings(aqsi) {
   const integration = aqsi.integration;
   const configuration = integration?.configuration || {};
@@ -395,6 +608,16 @@ function renderSettings(aqsi) {
       <div class="field"><label for="aqsi-shop">Магазин AQSI</label><select id="aqsi-shop"><option value="${escapeHtml(configuration.shop_id || "")}">${configuration.shop_id ? `AQSI ${escapeHtml(configuration.shop_id)}` : "Определять автоматически, если магазин один"}</option></select></div>
       <button class="button ghost" id="discover-aqsi-shops" type="button" ${savedAt ? "" : "disabled"}>Обновить список магазинов</button>
       <div class="divider"></div>
+      <form id="aqsi-checkout-form" class="settings-secret-form">
+        <strong>Оплата на кассе</strong>
+        <p class="muted small">Необходима для запуска банковского терминала и печати фискального чека из Core.</p>
+        <div class="field"><label for="aqsi-device-id">ID устройства AQSI</label><input id="aqsi-device-id" name="device_id" inputmode="numeric" value="${escapeHtml(configuration.device_id || "")}" required></div>
+        <div class="field"><label for="aqsi-acquiring-mode">Режим безналичной оплаты</label><select id="aqsi-acquiring-mode" name="acquiring_mode">${aqsiAcquiringModeOptions(configuration.acquiring_mode || "sbp_with_card")}</select></div>
+        <div class="field"><label for="aqsi-tax-system">Система налогообложения</label><select id="aqsi-tax-system" name="tax_system_code" required>${aqsiTaxSystemOptions(configuration.tax_system_code)}</select></div>
+        <div class="field"><label for="aqsi-tax-code">Код ставки НДС AQSI</label><input id="aqsi-tax-code" name="tax_code" type="number" min="1" max="10" value="${escapeHtml(configuration.tax_code || "")}" required></div>
+        <button class="button secondary" type="submit">Сохранить настройки оплаты</button>
+      </form>
+      <div class="divider"></div>
       <div class="settings-sync-control">
         <label class="settings-toggle"><input id="aqsi-auto-sync" type="checkbox" ${configuration.catalog_sync_enabled ? "checked" : ""} ${integration.enabled && savedAt ? "" : "disabled"}> <span>Автоматическая синхронизация каталога</span></label>
         <p class="muted small">Каждые 5 минут Core отправляет новые и изменившиеся готовые варианты. Архивирование в AQSI пока выполняется отдельно.</p>
@@ -416,6 +639,7 @@ function renderSettings(aqsi) {
   document.querySelector("#test-aqsi")?.addEventListener("click", () => testAqsiConnection(integration.id));
   document.querySelector("#discover-aqsi-shops")?.addEventListener("click", () => discoverAqsiShops(integration));
   document.querySelector("#aqsi-shop")?.addEventListener("change", () => saveAqsiShop(integration));
+  document.querySelector("#aqsi-checkout-form")?.addEventListener("submit", (event) => saveAqsiCheckout(event, integration));
   document.querySelector("#aqsi-auto-sync")?.addEventListener("change", (event) => updateAqsiAutoSync(event, integration));
   document.querySelector("#sync-aqsi-now")?.addEventListener("click", () => synchronizeAqsiNow(integration));
 }
@@ -502,6 +726,27 @@ async function saveAqsiShop(integration) {
   } catch (error) { showToast(error.message, true); }
 }
 
+async function saveAqsiCheckout(event, integration) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const deviceId = String(data.get("device_id") || "").trim();
+  const taxSystemCode = Number(data.get("tax_system_code"));
+  const taxCode = Number(data.get("tax_code"));
+  const acquiringMode = String(data.get("acquiring_mode") || "");
+  if (!/^\d+$/.test(deviceId) || ![1, 2, 4, 16, 32].includes(taxSystemCode) || !Number.isInteger(taxCode) || taxCode < 1 || taxCode > 10 || !["card_only", "sbp_with_card", "sbp_only"].includes(acquiringMode)) {
+    showToast("Проверьте ID устройства, систему налогообложения и ставку НДС", true);
+    return;
+  }
+  try {
+    await api(`/api/settings/integrations/${integration.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ configuration: { ...integration.configuration, device_id: deviceId, tax_system_code: taxSystemCode, tax_code: taxCode, acquiring_mode: acquiringMode } }),
+    });
+    showToast("Настройки оплаты сохранены");
+    await openSettings();
+  } catch (error) { showToast(error.message, true); }
+}
+
 async function updateAqsiAutoSync(event, integration) {
   const enabled = event.currentTarget.checked;
   try {
@@ -530,6 +775,7 @@ async function synchronizeAqsiNow(integration) {
 function topbar(back = false) {
   return `<header class="topbar">
     <div class="brand"><span class="brand-mark">C</span> Core</div>
+    ${renderSalesIndicator()}
     <div class="topbar-actions">
       ${back ? '<button class="button ghost" id="back-home">← Назад</button>' : ""}
       <button class="button ghost" id="logout">Выйти</button>
@@ -538,6 +784,7 @@ function topbar(back = false) {
 }
 
 function bindTopbar() {
+  bindSalesIndicator();
   document.querySelector("#logout")?.addEventListener("click", logout);
   document.querySelector("#back-home")?.addEventListener("click", async () => {
     try {
@@ -545,6 +792,409 @@ function bindTopbar() {
       await logicalParent();
     } catch (error) { showToast(error.message, true); }
   });
+}
+
+async function openSalesWorkspace(requestedSaleId = undefined) {
+  try {
+    const candidate = requestedSaleId === undefined ? state.sales.activeId : requestedSaleId;
+    await refreshSalesContext(candidate || null);
+    let sale = state.sales.active;
+    if (!sale && requestedSaleId) sale = await api(`/api/sales/${requestedSaleId}`);
+    recordRoute("sale", { saleId: sale?.id });
+    logicalParent = () => loadHome();
+    renderSalesWorkspace(sale);
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function renderSalesWorkspace(sale = state.sales.active) {
+  const editable = sale?.status === "draft";
+  const items = sale?.items.length
+    ? sale.items.map((item) => `<article class="sale-item">
+        <div class="sale-item-copy">
+          <strong>${escapeHtml(item.display_label_snapshot)}${item.source === "manual" ? ' <span class="sale-item-source">Свободная</span>' : ""}</strong>
+          <span class="muted small">${item.sku_snapshot ? `${escapeHtml(item.sku_snapshot)} · ` : ""}${formatMoney(item.unit_price)} × ${item.quantity}</span>
+        </div>
+        <strong class="sale-line-total">${formatMoney(item.line_total)}</strong>
+        ${editable ? `<div class="sale-quantity" aria-label="Количество ${escapeHtml(item.display_label_snapshot)}">
+          <button class="quantity-button" data-sale-quantity="-1" data-sale-item="${item.id}" type="button" aria-label="Уменьшить количество">−</button>
+          <strong>${item.quantity}</strong>
+          <button class="quantity-button" data-sale-quantity="1" data-sale-item="${item.id}" type="button" aria-label="Увеличить количество">＋</button>
+          <button class="button ghost compact danger-text" data-remove-sale-item="${item.id}" type="button">Удалить</button>
+        </div>` : ""}
+      </article>`).join("")
+    : '<div class="empty">В продаже пока нет товаров</div>';
+  root.innerHTML = `<div class="shell sale-shell">
+    ${topbar(true)}
+    <div class="sale-heading">
+      <div><p class="eyebrow">Продажа</p><h1>${sale ? `Продажа #${sale.sale_number}` : "Продажи"}</h1></div>
+      <button class="button secondary" id="new-sale" type="button">＋ Новая продажа</button>
+    </div>
+    ${renderSaleSwitcher(sale)}
+    <form class="sale-barcode-form" id="sale-barcode-form">
+      <label for="sale-barcode-input"><strong>Сканер</strong><span class="muted small">Нажмите на поле и отсканируйте товар</span></label>
+      <div class="sale-barcode-controls">
+        <input id="sale-barcode-input" name="barcode" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Штрихкод" aria-label="Штрихкод товара">
+        <button class="button secondary" type="submit">Добавить</button>
+      </div>
+    </form>
+    ${sale ? `<section class="sale-cart ${sale.status === "cancelled" ? "cancelled" : ""}">
+      ${sale.status === "cancelled" ? '<p class="sale-cancelled-note">Продажа отменена. История сохранена только для просмотра.</p>' : ""}
+      ${renderCheckoutState(sale)}
+      <div class="sale-items">${items}</div>
+      ${editable ? '<div class="sale-add-actions"><button class="button secondary" id="sale-add-catalog" type="button">＋ Добавить из каталога</button><button class="button secondary" id="sale-add-manual" type="button">＋ Свободная позиция</button></div>' : ""}
+      ${editable && sale.items.length ? renderSaleDiscount(sale) : ""}
+      <div class="sale-totals"><div><span>Подытог</span><strong>${formatMoney(sale.subtotal_amount)}</strong></div>${Number(sale.discount_amount) > 0 ? `<div class="sale-discount-total"><span>Скидка ${Number(sale.discount_value)}%</span><strong>−${formatMoney(sale.discount_amount)}</strong></div>` : ""}<div class="sale-total"><span>К оплате</span><strong>${formatMoney(sale.total_amount)}</strong></div></div>
+      ${editable && sale.items.length ? '<button class="button full sale-checkout-button" id="sale-checkout" type="button" disabled>Проверяем настройку оплаты…</button>' : ""}
+      ${editable ? `<div class="sale-actions"><button class="button secondary" id="defer-sale" type="button">Отложить</button><button class="button danger" id="cancel-sale" type="button">Отменить продажу</button></div>` : ""}
+    </section>` : '<section class="empty sale-empty"><strong>Активной продажи нет</strong><p>Выберите отложенную или начните новую продажу.</p></section>'}
+  </div>`;
+  bindTopbar();
+  document.querySelector("#new-sale").addEventListener("click", createAndOpenSale);
+  document.querySelector("#sale-barcode-form").addEventListener("submit", submitSaleBarcode);
+  document.querySelectorAll("[data-switch-sale]").forEach((button) => {
+    button.addEventListener("click", () => switchSale(button.dataset.switchSale));
+  });
+  document.querySelectorAll("[data-sale-quantity]").forEach((button) => {
+    button.addEventListener("click", () => changeSaleItemQuantity(
+      sale.id,
+      button.dataset.saleItem,
+      Number(button.dataset.saleQuantity),
+    ));
+  });
+  document.querySelectorAll("[data-remove-sale-item]").forEach((button) => {
+    button.addEventListener("click", () => removeSaleItem(sale.id, button.dataset.removeSaleItem));
+  });
+  document.querySelector("#sale-add-catalog")?.addEventListener("click", () => openOperationsCatalog({ mode: "sale" }));
+  document.querySelector("#sale-add-manual")?.addEventListener("click", () => openManualSaleItemDialog(sale.id));
+  document.querySelectorAll("[data-sale-discount]").forEach((button) => {
+    button.addEventListener("click", () => updateSaleDiscount(sale.id, button.dataset.saleDiscount));
+  });
+  document.querySelector("#custom-sale-discount")?.addEventListener("click", () => openCustomDiscountDialog(sale));
+  document.querySelector("#sale-checkout")?.addEventListener("click", () => openCheckoutConfirmation(sale));
+  document.querySelector("#retry-payment")?.addEventListener("click", () => openCheckoutConfirmation(sale));
+  document.querySelector("#retry-draft-payment")?.addEventListener("click", () => openCheckoutConfirmation(sale));
+  document.querySelector("#return-to-sale")?.addEventListener("click", () => document.querySelector(".sale-items")?.scrollIntoView({ behavior: "smooth" }));
+  document.querySelector("#retry-fiscalization")?.addEventListener("click", () => executeCheckoutCommand(sale.id, "retry-fiscalization"));
+  document.querySelector("#defer-sale")?.addEventListener("click", deferActiveSale);
+  document.querySelector("#cancel-sale")?.addEventListener("click", () => cancelSale(sale.id));
+  if (editable && sale.items.length) void hydrateCheckoutButton(sale.id);
+  scheduleCheckoutProgress(sale);
+}
+
+function renderSaleDiscount(sale) {
+  const selected = String(Number(sale.discount_value));
+  const preset = (value, label) => `<button class="discount-choice ${selected === value ? "active" : ""}" data-sale-discount="${value}" type="button">${label}</button>`;
+  const custom = !["0", "5", "10"].includes(selected);
+  return `<section class="sale-discount"><strong>Скидка</strong><div class="discount-choices">${preset("0", "Нет")}${preset("5", "5%")}${preset("10", "10%")}<button class="discount-choice ${custom ? "active" : ""}" id="custom-sale-discount" type="button">${custom ? `${selected}%` : "Своя"}</button></div></section>`;
+}
+
+function renderCheckoutState(sale) {
+  const payment = sale.payments?.[sale.payments.length - 1];
+  const fiscal = sale.fiscalization;
+  if (sale.status === "cancelled") return "";
+  if (sale.status === "draft" && !["canceled", "failed"].includes(payment?.status)) return "";
+  const messages = {
+    payment_pending: payment?.status === "unknown"
+      ? ["⚠ Результат оплаты пока неизвестен", "Проверяем состояние AQSI. Не запускайте новую оплату."]
+      : ["Ожидаем оплату на кассе…", "Следуйте подсказкам на устройстве AQSI."],
+    paid: ["✓ Оплата прошла", "Фиксируем продажу в учёте…"],
+    fiscalization_pending: fiscal?.status === "unknown"
+      ? ["⚠ Оплата прошла, статус чека пока неизвестен", "Проверяем AQSI. Повторная оплата запрещена."]
+      : ["✓ Оплата прошла", "Формируем фискальный чек…"],
+    completed: ["✓ Продажа завершена", "Оплата подтверждена, товар списан, чек фискализирован."],
+    payment_failed: ["⚠ Оплата не выполнена", "Можно явно создать новую попытку оплаты."],
+    fiscalization_failed: ["⚠ Оплата прошла, но чек не сформирован", "Повторяйте только формирование чека, не оплату."],
+  };
+  const draftOutcome = payment?.status === "canceled"
+    ? ["Оплата отменена на терминале", "Деньги не списаны. Продажу можно изменить и оплатить снова."]
+    : ["Оплата не выполнена", "Деньги не списаны. Продажу можно изменить и оплатить снова."];
+  const [title, detail] = sale.status === "draft" ? draftOutcome : messages[sale.status] || ["Состояние продажи", sale.status];
+  const paymentLabels = { succeeded: "✓ Оплачено", canceled: "Отменено на терминале", failed: "Не выполнено", unknown: "Результат неизвестен", pending: "Ожидается" };
+  const paymentMethodLabel = payment?.payment_method === "cash" ? "Наличные" : "Карта / QR";
+  const paymentSummary = payment ? `<div><span>Оплата</span><strong>${paymentMethodLabel} · ${formatMoney(payment.requested_amount)}</strong><small>${escapeHtml(paymentLabels[payment.status] || payment.status)}${payment.external_id ? ` · ${escapeHtml(payment.external_id)}` : ""}</small></div>` : "";
+  const fiscalSummary = fiscal ? `<div><span>Чек</span><strong>${fiscal.status === "succeeded" ? "✓ Фискализирован" : escapeHtml(fiscal.status)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}</div>` : "";
+  const action = sale.status === "draft" && ["canceled", "failed"].includes(payment?.status)
+    ? '<div class="checkout-recovery-actions"><button class="button" id="retry-draft-payment" type="button">Повторить оплату</button><button class="button secondary" id="return-to-sale" type="button">Вернуться к продаже</button></div>'
+    : sale.status === "payment_failed"
+    ? '<button class="button" id="retry-payment" type="button">Повторить оплату</button>'
+    : sale.status === "fiscalization_failed"
+      ? '<button class="button" id="retry-fiscalization" type="button">Повторить формирование чека</button>'
+      : "";
+  return `<section class="checkout-state checkout-${sale.status}"><strong>${title}</strong><p>${detail}</p>${paymentSummary || fiscalSummary ? `<div class="transaction-summary">${paymentSummary}${fiscalSummary}</div>` : ""}${action}</section>`;
+}
+
+async function hydrateCheckoutButton(saleId) {
+  const button = document.querySelector("#sale-checkout");
+  if (!button) return;
+  try {
+    const context = await api(`/api/sales/${saleId}/checkout/context`);
+    const current = document.querySelector("#sale-checkout");
+    if (!current) return;
+    current.disabled = !context.available;
+    const sale = state.sales.drafts.find((item) => item.id === saleId) || state.sales.active;
+    current.textContent = context.available ? `Оплатить ${formatMoney(sale?.total_amount || 0)}` : "Оплата не настроена";
+    current.title = context.message;
+  } catch (error) {
+    button.textContent = "Не удалось проверить оплату";
+    button.title = error.message;
+  }
+}
+
+async function openCheckoutConfirmation(sale) {
+  try {
+    const context = await api(`/api/sales/${sale.id}/checkout/context`);
+    if (!context.available) throw new Error(context.message);
+    const warnings = context.stock_warnings.length
+      ? `<div class="checkout-warnings"><strong>Остаток не блокирует продажу</strong>${context.stock_warnings.map((warning) => `<p>${escapeHtml(warning.label)}: на учёте ${warning.on_hand}, будет ${warning.after_sale}</p>`).join("")}</div>`
+      : "";
+    const dialog = document.createElement("dialog");
+    dialog.className = "label-dialog checkout-dialog";
+    const acquiringLabel = context.acquiring_label || "Карта / QR";
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">Подтверждение оплаты</p><h2>Продажа #${sale.sale_number}</h2><div class="checkout-facts"><span>${sale.item_quantity} поз.</span><span>Подытог: ${formatMoney(sale.subtotal_amount)}</span>${Number(sale.discount_amount) > 0 ? `<span>Скидка: −${formatMoney(sale.discount_amount)}</span>` : ""}<strong>К оплате: ${formatMoney(sale.total_amount)}</strong></div><fieldset class="checkout-method-options"><legend>Способ оплаты</legend><label><input type="radio" name="payment_method" value="cash"> <span><strong>Наличными</strong><small>Эквайринг не запускается</small></span></label><label><input type="radio" name="payment_method" value="card" checked> <span><strong>${escapeHtml(acquiringLabel)}</strong><small>Оплата на устройстве AQSI</small></span></label></fieldset><div class="checkout-method"><span class="muted small">Касса для фискального чека</span><strong>${escapeHtml(context.integration_name)}</strong><span class="muted small" id="checkout-method-note">На устройстве откроется экран ${escapeHtml(acquiringLabel.toLowerCase())}</span></div>${warnings}<div class="sale-actions"><button class="button secondary" value="cancel">Отмена</button><button class="button" id="confirm-checkout" value="default">Оплатить ${formatMoney(sale.total_amount)}</button></div></form>`;
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove());
+    const confirm = dialog.querySelector("#confirm-checkout");
+    const updateMethod = () => {
+      const method = dialog.querySelector('input[name="payment_method"]:checked').value;
+      confirm.textContent = method === "cash" ? "Получено наличными" : `Оплатить ${formatMoney(sale.total_amount)}`;
+      dialog.querySelector("#checkout-method-note").textContent = method === "cash"
+        ? "AQSI acquiring не запускается; фискальный чек формируется отдельно"
+        : `На устройстве откроется экран ${acquiringLabel.toLowerCase()}`;
+    };
+    dialog.querySelectorAll('input[name="payment_method"]').forEach((input) => input.addEventListener("change", updateMethod));
+    confirm.addEventListener("click", (event) => {
+      event.preventDefault();
+      const paymentMethod = dialog.querySelector('input[name="payment_method"]:checked').value;
+      dialog.close();
+      const latest = sale.payments?.[sale.payments.length - 1];
+      const retry = ["canceled", "failed"].includes(latest?.status);
+      void executeCheckoutCommand(sale.id, retry ? "retry-payment" : "", paymentMethod);
+    });
+    dialog.showModal();
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function executeCheckoutCommand(saleId, suffix, paymentMethod = null) {
+  try {
+    const path = `/api/sales/${saleId}/checkout${suffix ? `/${suffix}` : ""}`;
+    const options = { method: "POST" };
+    if (paymentMethod) options.body = JSON.stringify({ payment_method: paymentMethod });
+    const sale = await api(path, options);
+    rememberSale(sale);
+    renderSalesWorkspace(sale);
+  } catch (error) { showToast(error.message, true); }
+}
+
+function scheduleCheckoutProgress(sale) {
+  clearTimeout(salesProgressTimer);
+  if (!sale || !["payment_pending", "paid", "fiscalization_pending"].includes(sale.status)) return;
+  salesProgressTimer = setTimeout(async () => {
+    if (!window.location.hash.startsWith(`#sale/${sale.id}`)) return;
+    try {
+      const current = await api(`/api/sales/${sale.id}/checkout/progress`, { method: "POST" });
+      rememberSale(current);
+      renderSalesWorkspace(current);
+    } catch (error) {
+      showToast(error.message, true);
+      salesProgressTimer = setTimeout(() => scheduleCheckoutProgress(sale), 3000);
+    }
+  }, 1200);
+}
+
+function renderSaleSwitcher(current) {
+  const drafts = state.sales.drafts;
+  const active = current?.status === "draft" && current.id === state.sales.activeId ? current : null;
+  const deferred = drafts.filter((sale) => sale.id !== active?.id);
+  const row = (sale, selected) => `<button class="sale-switch-row ${selected ? "active" : ""}" data-switch-sale="${sale.id}" type="button">
+    <span>${selected ? "✓ " : ""}#${sale.sale_number}</span>
+    <span>${sale.item_quantity} поз.</span>
+    <strong>${formatMoney(sale.total_amount)}</strong>
+  </button>`;
+  return `<details class="sale-switcher" ${current ? "" : "open"}>
+    <summary>Корзины · ${drafts.length}</summary>
+    <div class="sale-switcher-content">
+      <span class="muted small">Текущая</span>
+      ${active ? row(active, true) : '<span class="muted small sale-switcher-empty">Не выбрана</span>'}
+      <span class="muted small">Отложенные</span>
+      ${deferred.length ? deferred.map((sale) => row(sale, false)).join("") : '<span class="muted small sale-switcher-empty">Нет отложенных продаж</span>'}
+    </div>
+  </details>`;
+}
+
+async function createAndOpenSale() {
+  try {
+    const sale = await api("/api/sales", { method: "POST" });
+    rememberSale(sale);
+    await openSalesWorkspace(sale.id);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function switchSale(saleId) {
+  selectActiveSale(saleId);
+  await openSalesWorkspace(saleId);
+}
+
+function deferActiveSale() {
+  selectActiveSale(null);
+  recordRoute("sale");
+  renderSalesWorkspace(null);
+  showToast("Продажа отложена");
+}
+
+async function changeSaleItemQuantity(saleId, itemId, delta) {
+  try {
+    const sale = await api(`/api/sales/${saleId}/items/${itemId}/quantity`, {
+      method: "POST",
+      body: JSON.stringify({ delta }),
+    });
+    rememberSale(sale);
+    renderSalesWorkspace(sale);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function removeSaleItem(saleId, itemId) {
+  try {
+    const sale = await api(`/api/sales/${saleId}/items/${itemId}`, { method: "DELETE" });
+    rememberSale(sale);
+    renderSalesWorkspace(sale);
+    showToast("Позиция удалена");
+  } catch (error) { showToast(error.message, true); }
+}
+
+function openManualSaleItemDialog(saleId) {
+  const dialog = document.createElement("dialog");
+  dialog.className = "label-dialog manual-sale-dialog";
+  dialog.innerHTML = `<form id="manual-sale-item-form"><p class="eyebrow">Свободная позиция</p><h2>Добавить без каталога</h2><label>Название<input name="name" maxlength="511" required autofocus placeholder="Игрушка антистресс"></label><label>Цена<input name="unit_price" type="number" inputmode="decimal" min="0.01" step="0.01" required placeholder="350.00"></label><label>Количество<input name="quantity" type="number" inputmode="numeric" min="1" max="9999" step="1" value="1" required></label><p class="muted small">Свободная позиция попадёт в чек, но не изменит складской остаток.</p><div class="sale-actions"><button class="button secondary" id="cancel-manual-sale-item" type="button">Отмена</button><button class="button" type="submit">Добавить</button></div></form>`;
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.querySelector("#cancel-manual-sale-item").addEventListener("click", () => dialog.close());
+  dialog.querySelector("#manual-sale-item-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    try {
+      const sale = await api(`/api/sales/${saleId}/items/manual`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: String(data.get("name") || "").trim(),
+          unit_price: String(data.get("unit_price") || ""),
+          quantity: Number(data.get("quantity") || 1),
+        }),
+      });
+      dialog.close();
+      rememberSale(sale);
+      renderSalesWorkspace(sale);
+      showToast("Свободная позиция добавлена");
+    } catch (error) { showToast(error.message, true); }
+  });
+  dialog.showModal();
+}
+
+async function updateSaleDiscount(saleId, discountValue) {
+  try {
+    const sale = await api(`/api/sales/${saleId}/discount`, {
+      method: "PATCH",
+      body: JSON.stringify({ discount_value: String(discountValue) }),
+    });
+    rememberSale(sale);
+    renderSalesWorkspace(sale);
+  } catch (error) { showToast(error.message, true); }
+}
+
+function openCustomDiscountDialog(sale) {
+  const dialog = document.createElement("dialog");
+  dialog.className = "label-dialog custom-discount-dialog";
+  dialog.innerHTML = `<form id="custom-discount-form"><p class="eyebrow">Скидка</p><h2>Своя скидка</h2><label>Процент<input name="discount_value" type="number" inputmode="decimal" min="0" max="99.99" step="0.01" value="${escapeHtml(sale.discount_value)}" required></label><p class="muted small">Максимум 99,99%. Итог и строки чека рассчитывает сервер.</p><div class="sale-actions"><button class="button secondary" id="cancel-custom-discount" type="button">Отмена</button><button class="button" type="submit">Применить</button></div></form>`;
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.querySelector("#cancel-custom-discount").addEventListener("click", () => dialog.close());
+  dialog.querySelector("#custom-discount-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    dialog.close();
+    await updateSaleDiscount(sale.id, data.get("discount_value"));
+  });
+  dialog.showModal();
+}
+
+async function cancelSale(saleId) {
+  if (!window.confirm("Отменить продажу? Товары и сумма сохранятся в истории.")) return;
+  try {
+    const sale = await api(`/api/sales/${saleId}/cancel`, { method: "POST" });
+    state.sales.drafts = state.sales.drafts.filter((item) => item.id !== sale.id);
+    if (state.sales.activeId === sale.id) selectActiveSale(null);
+    renderSalesWorkspace(sale);
+    showToast(`Продажа #${sale.sale_number} отменена`);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addVariantToActiveSale(variantId) {
+  const activeId = state.sales.activeId;
+  const path = activeId
+    ? `/api/sales/${activeId}/items/by-variant`
+    : "/api/sales/auto/items/by-variant";
+  try {
+    const sale = await api(path, {
+      method: "POST",
+      body: JSON.stringify({ variant_id: variantId }),
+    });
+    const added = sale.items.find((item) => item.variant_id === variantId);
+    rememberSale(sale);
+    showToast(`✓ ${added?.display_label_snapshot || "Товар"} добавлен · Продажа #${sale.sale_number}`);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addBarcodeToActiveSale(barcode) {
+  const activeId = state.sales.activeId;
+  const path = activeId
+    ? `/api/sales/${activeId}/items/by-barcode`
+    : "/api/sales/auto/items/by-barcode";
+  try {
+    const sale = await api(path, {
+      method: "POST",
+      body: JSON.stringify({ barcode }),
+    });
+    const added = sale.items.find((item) => item.barcode_snapshot === barcode.trim());
+    rememberSale(sale);
+    showToast(`✓ ${added?.display_label_snapshot || "Товар"} добавлен · Продажа #${sale.sale_number}`);
+    if (window.location.hash.startsWith("#sale")) {
+      recordRoute("sale", { saleId: sale.id });
+      renderSalesWorkspace(sale);
+    }
+    return true;
+  } catch (error) {
+    showToast(error.message, true);
+    return false;
+  }
+}
+
+async function submitSaleBarcode(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const input = form.querySelector("#sale-barcode-input");
+  const barcode = input.value.trim();
+  if (!barcode) return;
+  const button = form.querySelector("button");
+  input.disabled = true;
+  button.disabled = true;
+  const added = await addBarcodeToActiveSale(barcode);
+  const currentInput = document.querySelector("#sale-barcode-input");
+  const currentButton = document.querySelector("#sale-barcode-form button");
+  if (!currentInput || !currentButton) return;
+  currentInput.disabled = false;
+  currentButton.disabled = false;
+  if (added) currentInput.value = "";
+  else currentInput.value = barcode;
+  currentInput.focus();
+}
+
+async function handleIntakeScanner(value) {
+  if (state.mode !== "known") {
+    state.mode = "known";
+    renderWorkspace();
+  }
+  await acceptScannedBarcode("intake-variant-query", value);
 }
 
 async function startSession() {
@@ -694,6 +1344,10 @@ function renderWorkspace() {
   document.querySelector("#complete-session")?.addEventListener("click", completeSession);
   document.querySelector("#delete-intake-draft")?.addEventListener("click", deleteIntakeDraft);
   hydrateImages();
+  ensureScannerService().setLocalHandler("intake", (value) => {
+    void handleIntakeScanner(value);
+    return true;
+  });
 }
 
 function bindCatalogSearch(kind) {
@@ -810,7 +1464,10 @@ function groupIntakeItems(items) {
 function renderProductGroup(group) {
   const rootItem = group.root;
   const title = rootItem?.product_title || group.product?.title || "Новый товар";
-  const categoryOptions = state.categories.map((category) => `<option value="${category.id}" ${rootItem?.category_id === category.id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
+  const categoryOptions = renderCategoryOptions(state.categories, {
+    selectedId: rootItem?.category_id,
+    includeRoot: false,
+  });
   const productForm = rootItem ? `<form class="drawer" data-product-form="${rootItem.id}">
     <div class="field"><label>Общее фото товара</label><input type="file" accept="image/*" capture="environment" data-replace-item-image="${rootItem.id}"></div>
     <div class="field"><label>Категория</label><select name="category_id" required><option value="">Выберите категорию</option>${categoryOptions}</select></div>
@@ -1518,8 +2175,8 @@ function normalizeCatalogState(value = {}) {
   const statuses = ["active", "archived", "all"];
   const filters = ["missing_price", "missing_photo", "aqsi_problem", "out_of_stock"];
   const rentalFilters = ["all", "available", "needs_price", "never_rented", "paid_back", "high_expenses", "long_idle"];
-  const sorts = ["title", "revenue", "rental_count", "profit", "last_rental"];
   const mode = modes.includes(value.mode) ? value.mode : "sale";
+  const sorts = catalogSortOptions(mode).map(([sort]) => sort);
   return {
     mode,
     status: statuses.includes(value.status) ? value.status : "active",
@@ -1528,8 +2185,31 @@ function normalizeCatalogState(value = {}) {
     supplierId: value.supplierId || "",
     attention: [...new Set(Array.isArray(value.attention) ? value.attention.filter((item) => filters.includes(item)) : [])],
     productFilter: mode === "rental" && rentalFilters.includes(value.productFilter) ? value.productFilter : "all",
-    sort: sorts.includes(value.sort) ? value.sort : "title",
+    sort: sorts.includes(value.sort) ? value.sort : catalogDefaultSort(mode),
   };
+}
+
+function catalogDefaultSort(mode) {
+  return mode === "rental" ? "title" : "newest";
+}
+
+function catalogSortOptions(mode) {
+  if (mode === "rental") return [
+    ["title", "По названию"],
+    ["revenue", "По доходу от аренды"],
+    ["rental_count", "По количеству аренд"],
+    ["profit", "По результату аренды"],
+    ["last_rental", "По последней аренде"],
+  ];
+  return [
+    ["newest", "Сначала новые"],
+    ["oldest", "Сначала старые"],
+    ["title", "По названию"],
+    ["price_asc", "Цена: сначала дешевле"],
+    ["price_desc", "Цена: сначала дороже"],
+    ["stock_asc", "Остаток: сначала меньше"],
+    ["stock_desc", "Остаток: сначала больше"],
+  ];
 }
 
 function catalogUrlParams(value, includeDefaults = true) {
@@ -1542,7 +2222,7 @@ function catalogUrlParams(value, includeDefaults = true) {
   if (catalog.supplierId) params.set("supplier_id", catalog.supplierId);
   catalog.attention.forEach((filter) => params.append("attention", filter));
   if (includeDefaults || catalog.productFilter !== "all") params.set("product_filter", catalog.productFilter);
-  if (includeDefaults || catalog.sort !== "title") params.set("sort", catalog.sort);
+  if (includeDefaults || catalog.sort !== catalogDefaultSort(catalog.mode)) params.set("sort", catalog.sort);
   return params;
 }
 
@@ -1572,10 +2252,12 @@ function renderOperationsCatalog(catalog) {
   root.innerHTML = `<div class="shell catalog-shell">
     ${topbar(true)}
     <div class="catalog-heading"><div><p class="eyebrow">Каталог</p><h1>Товары</h1></div><button class="button" id="catalog-new-product" type="button">＋ Новый товар</button></div>
+    ${renderCatalogSalesContext(catalog)}
     <div class="catalog-workspace">
       <aside class="catalog-sidebar" aria-label="Навигация и фильтры каталога">
         ${renderCatalogCategoryNavigation(catalog)}
         <button class="button secondary full catalog-category-entry" data-open-category-create type="button">＋ Категория</button>
+        <button class="button ghost full category-management-entry" data-open-category-management type="button">Управление категориями</button>
         <div class="divider"></div>
         ${renderCatalogFilters(catalog, false)}
       </aside>
@@ -1604,6 +2286,7 @@ function renderOperationsCatalog(catalog) {
       <div class="catalog-drawer-head"><h2 id="category-dialog-title">Категории</h2><button class="drawer-close" type="button" aria-label="Закрыть">×</button></div>
       ${renderCatalogCategoryNavigation(catalog)}
       <button class="button secondary full catalog-category-entry" data-open-category-create type="button">＋ Категория</button>
+      <button class="button ghost full category-management-entry" data-open-category-management type="button">Управление категориями</button>
     </dialog>
     <dialog class="catalog-drawer" id="catalog-filter-dialog" aria-labelledby="filter-dialog-title">
       <form id="catalog-mobile-filter-form">
@@ -1625,7 +2308,11 @@ function renderCatalogProductCard(product, catalog) {
   const mode = catalog.mode;
   const visibleVariants = catalogVariantsForMode(product.card_variants, mode);
   const variants = visibleVariants.length
-    ? visibleVariants.map((variant) => renderCatalogVariantRow(variant, mode)).join("")
+    ? visibleVariants.map((variant) => renderCatalogVariantRow(
+      variant,
+      mode,
+      product.is_active && !product.is_archived,
+    )).join("")
     : `<span class="catalog-card-empty muted">${catalog.status === "archived" ? "Нет архивных вариантов" : "Нет активных вариантов"}</span>`;
   const category = product.is_archived
     ? `<span class="chip category-chip">${escapeHtml(product.category_label)}</span>`
@@ -1636,6 +2323,7 @@ function renderCatalogProductCard(product, catalog) {
       <span class="catalog-card-heading"><button class="catalog-card-open" data-open-product="${product.id}" type="button"><strong class="catalog-card-title">${escapeHtml(product.title)}</strong>${product.is_test ? '<span class="chip test-chip">ТЕСТ</span>' : ""}${product.is_archived ? '<span class="chip archive-chip">АРХИВ</span>' : ""}</button>${category}</span>
       <span class="catalog-variant-list">${variants}</span>
       ${renderCatalogEconomicsSummary(product, mode)}
+      ${product.is_archived ? `<span class="catalog-card-lifecycle-actions"><button class="button secondary compact" data-restore-product="${product.id}" data-restore-title="${escapeHtml(product.title)}" data-restore-context="catalog" type="button">Восстановить товар</button></span>` : ""}
     </span>
     <button class="catalog-card-chevron" data-open-product="${product.id}" type="button" aria-label="Открыть товар ${escapeHtml(product.title)}">›</button>
   </article>`;
@@ -1650,24 +2338,33 @@ function catalogVariantsForMode(variants, mode) {
   return variants;
 }
 
-function renderCatalogVariantRow(variant, mode) {
+function renderCatalogVariantRow(variant, mode, productIsOperational = true) {
   const commercialRows = [];
-  if (mode !== "rental" && variant.sale_row_visible) commercialRows.push(renderCatalogSaleRow(variant));
+  if (mode !== "rental" && variant.sale_row_visible) {
+    commercialRows.push(renderCatalogSaleRow(
+      variant,
+      productIsOperational && !variant.is_archived,
+    ));
+  }
   if (mode !== "sale" && variant.rental_row_visible) commercialRows.push(renderCatalogRentalRow(variant));
   if (mode === "sale" && !variant.sale_row_visible && variant.rental_row_visible) commercialRows.push(renderCatalogRentalRow(variant));
   return `<span class="catalog-variant-row ${variant.is_archived ? "archived" : ""}">
     <span class="catalog-variant-identity">${variant.title ? `<strong>${escapeHtml(variant.title)}</strong>` : ""}${variant.is_archived ? '<span class="chip archive-chip">АРХИВНЫЙ ВАРИАНТ</span>' : ""}<span class="catalog-sku">${escapeHtml(variant.sku)}</span></span>
     <span class="catalog-commercial-rows">${commercialRows.join("")}</span>
+    ${variant.is_archived ? `<span class="catalog-variant-lifecycle-actions"><button class="button secondary compact" data-restore-variant="${variant.id}" data-restore-context="catalog" type="button">Восстановить вариант</button></span>` : ""}
   </span>`;
 }
 
-function renderCatalogSaleRow(variant) {
+function renderCatalogSaleRow(variant, sellable = true) {
   const quantity = Number(variant.sale_quantity);
   const quantityClass = quantity < 0 ? "negative" : quantity === 0 ? "zero" : "positive";
   const price = variant.current_retail_price === null
     ? '<strong class="catalog-price missing">Цена не указана</strong>'
     : `<strong class="catalog-price">${formatMoney(variant.current_retail_price)}</strong>`;
-  return `<span class="catalog-commercial-row sale"><span class="catalog-channel-label">Продажа</span>${price}<span class="catalog-quantity ${quantityClass}">${formatQuantity(variant.sale_quantity)}</span>${renderCatalogCardAqsiStatus(variant)}</span>`;
+  const add = sellable
+    ? `<button class="catalog-sale-add" data-add-sale-variant="${variant.id}" type="button" ${variant.current_retail_price === null ? 'disabled title="У товара не указана цена"' : 'title="Добавить в продажу"'} aria-label="Добавить вариант в продажу">＋</button>`
+    : "";
+  return `<span class="catalog-commercial-row sale"><span class="catalog-channel-label">Продажа</span>${price}<span class="catalog-quantity ${quantityClass}">${formatQuantity(variant.sale_quantity)}</span>${renderCatalogCardAqsiStatus(variant)}${add}</span>`;
 }
 
 function renderCatalogRentalRow(variant) {
@@ -1706,7 +2403,7 @@ function catalogFilterCount(catalog) {
 }
 
 function renderCatalogCategoryNavigation(catalog) {
-  const categories = state.categories.filter((category) => category.is_active);
+  const categories = state.categories.filter((category) => category.is_active && !category.is_archived);
   const children = new Map();
   categories.forEach((category) => {
     const parent = categories.some((item) => item.id === category.parent_id) ? category.parent_id : null;
@@ -1720,23 +2417,84 @@ function renderCatalogCategoryNavigation(catalog) {
   return `<div class="catalog-category-nav"><h2>Категории</h2><ul><li><button class="category-link ${catalog.categoryId ? "" : "active"}" data-category-id="" type="button" aria-pressed="${!catalog.categoryId}">Все товары</button></li>${branch(null)}</ul></div>`;
 }
 
-function renderCategoryCreateDialog() {
-  const categories = state.categories.filter((category) => category.is_active);
-  const byParent = new Map();
-  categories.forEach((category) => {
-    const parent = categories.some((item) => item.id === category.parent_id) ? category.parent_id : null;
-    byParent.set(parent, [...(byParent.get(parent) || []), category]);
+function categoryPathLabel(category, categories) {
+  const byId = new Map(categories.map((item) => [item.id, item]));
+  const parts = [];
+  const visited = new Set();
+  let cursor = category;
+  while (cursor && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
+    parts.unshift(cursor.title);
+    cursor = cursor.parent_id ? byId.get(cursor.parent_id) : null;
+  }
+  return parts.join(" › ");
+}
+
+function categoryDescendantIds(categoryId, categories) {
+  const descendants = new Set();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    categories.forEach((category) => {
+      if (category.parent_id === categoryId || descendants.has(category.parent_id)) {
+        if (!descendants.has(category.id)) {
+          descendants.add(category.id);
+          changed = true;
+        }
+      }
+    });
+  }
+  return descendants;
+}
+
+function flattenCategoryTree(categories) {
+  const availableIds = new Set(categories.map((category) => category.id));
+  const children = new Map();
+  const ordered = [...categories].sort((left, right) => (
+    Number(left.sort_order || 0) - Number(right.sort_order || 0)
+    || left.title.localeCompare(right.title, "ru")
+  ));
+  ordered.forEach((category) => {
+    const parentId = availableIds.has(category.parent_id) ? category.parent_id : null;
+    children.set(parentId, [...(children.get(parentId) || []), category]);
   });
-  const options = (parentId, depth = 0, visited = new Set()) => (byParent.get(parentId) || []).map((category) => {
-    if (visited.has(category.id)) return "";
-    const nextVisited = new Set(visited).add(category.id);
-    return `<option value="${category.id}">${escapeHtml(`${"— ".repeat(Math.min(depth, 3))}${category.title}`)}</option>${options(category.id, depth + 1, nextVisited)}`;
-  }).join("");
+  const result = [];
+  const emitted = new Set();
+  const append = (parentId, depth = 0, branch = new Set()) => {
+    (children.get(parentId) || []).forEach((category) => {
+      if (branch.has(category.id) || emitted.has(category.id)) return;
+      emitted.add(category.id);
+      result.push({ category, depth });
+      append(category.id, depth + 1, new Set(branch).add(category.id));
+    });
+  };
+  append(null);
+  ordered.filter((category) => !emitted.has(category.id)).forEach((category) => {
+    result.push({ category, depth: 0 });
+  });
+  return result;
+}
+
+function renderCategoryOptions(categories, options = {}) {
+  const selectedId = options.selectedId || "";
+  const excludedIds = options.excludedIds || new Set();
+  const activeCategories = categories.filter((category) => (
+    category.is_active && !category.is_archived && !excludedIds.has(category.id)
+  ));
+  const active = flattenCategoryTree(activeCategories)
+    .map(({ category }) => ({ category, label: categoryPathLabel(category, categories) }));
+  const root = options.includeRoot === false
+    ? ""
+    : `<option value="" ${selectedId ? "" : "selected"}>Без родительской категории</option>`;
+  return root + active.map(({ category, label }) => `<option value="${category.id}" ${category.id === selectedId ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+}
+
+function renderCategoryCreateDialog() {
   return `<dialog class="catalog-drawer catalog-category-create" id="catalog-category-create-dialog" aria-labelledby="category-create-title">
     <form id="catalog-category-create-form">
       <div class="catalog-drawer-head"><h2 id="category-create-title">Новая категория</h2><button class="drawer-close" type="button" aria-label="Закрыть">×</button></div>
       <div class="field"><label for="catalog-category-title">Название</label><input id="catalog-category-title" name="title" maxlength="255" autocomplete="off" required autofocus></div>
-      <div class="field"><label for="catalog-category-parent">Родительская категория <span class="muted">(необязательно)</span></label><select id="catalog-category-parent" name="parent_id"><option value="">Без родительской категории</option>${options(null)}</select></div>
+      <div class="field"><label for="catalog-category-parent">Родительская категория <span class="muted">(необязательно)</span></label><select id="catalog-category-parent" name="parent_id">${renderCategoryOptions(state.categories)}</select></div>
       <div class="catalog-drawer-actions"><button class="button secondary" data-category-create-cancel type="button">Отмена</button><button class="button" type="submit">Создать</button></div>
     </form>
   </dialog>`;
@@ -1777,13 +2535,8 @@ function catalogRentalFilter(value, label, active, prefix) {
 }
 
 function renderCatalogSort(catalog) {
-  return `<div class="field sort-field"><label for="operations-product-sort">Сортировка</label><select id="operations-product-sort">
-    <option value="title" ${catalog.sort === "title" ? "selected" : ""}>По названию</option>
-    <option value="revenue" ${catalog.sort === "revenue" ? "selected" : ""}>По доходу от аренды</option>
-    <option value="rental_count" ${catalog.sort === "rental_count" ? "selected" : ""}>По количеству аренд</option>
-    <option value="profit" ${catalog.sort === "profit" ? "selected" : ""}>По результату аренды</option>
-    <option value="last_rental" ${catalog.sort === "last_rental" ? "selected" : ""}>По последней аренде</option>
-  </select></div>`;
+  const options = catalogSortOptions(catalog.mode).map(([value, label]) => `<option value="${value}" ${catalog.sort === value ? "selected" : ""}>${label}</option>`).join("");
+  return `<div class="field sort-field"><label for="operations-product-sort">Сортировка</label><select id="operations-product-sort">${options}</select></div>`;
 }
 
 function openCatalogDrawer(id) {
@@ -1794,6 +2547,7 @@ function openCatalogDrawer(id) {
 }
 
 function bindCatalogShell(catalog) {
+  bindCatalogSalesContext();
   document.querySelector("#catalog-new-product").addEventListener("click", () => startSession());
   document.querySelectorAll("[data-catalog-mode]").forEach((button) => {
     button.addEventListener("click", () => openOperationsCatalog({ ...catalog, mode: button.dataset.catalogMode, productFilter: "all" }));
@@ -1822,7 +2576,12 @@ function bindCatalogShell(catalog) {
   document.querySelectorAll("[data-open-product]").forEach((button) => {
     button.addEventListener("click", () => openOperationsProduct(button.dataset.openProduct));
   });
+  document.querySelectorAll("[data-add-sale-variant]").forEach((button) => {
+    button.addEventListener("click", () => addVariantToActiveSale(button.dataset.addSaleVariant));
+  });
   document.querySelectorAll("[data-change-product-category]").forEach((button) => button.addEventListener("click", () => openCatalogCategoryPicker(button.dataset.changeProductCategory)));
+  document.querySelectorAll("[data-restore-product]").forEach((button) => button.addEventListener("click", () => openCatalogRestoreConfirmation(button.dataset.restoreProduct, button.dataset.restoreTitle, button.dataset.restoreContext)));
+  document.querySelectorAll("[data-restore-variant]").forEach((button) => button.addEventListener("click", () => executeCatalogRestore("variant", button.dataset.restoreVariant, button, button.dataset.restoreContext)));
   document.querySelector("#open-category-drawer").addEventListener("click", () => openCatalogDrawer("#catalog-category-dialog"));
   document.querySelector("#open-filter-drawer").addEventListener("click", () => openCatalogDrawer("#catalog-filter-dialog"));
   document.querySelectorAll(".catalog-drawer").forEach((dialog) => {
@@ -1832,6 +2591,7 @@ function bindCatalogShell(catalog) {
   });
   document.querySelectorAll("[data-open-category-create]").forEach((button) => {
     button.addEventListener("click", () => {
+      state.operations.categoryManagement = null;
       const categoryDrawer = document.querySelector("#catalog-category-dialog");
       if (categoryDrawer.open) {
         categoryDrawer.addEventListener("close", () => openCatalogDrawer("#catalog-category-create-dialog"), { once: true });
@@ -1839,6 +2599,12 @@ function bindCatalogShell(catalog) {
       } else {
         openCatalogDrawer("#catalog-category-create-dialog");
       }
+    });
+  });
+  document.querySelectorAll("[data-open-category-management]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelector("#catalog-category-dialog")?.close();
+      openCategoryManagement();
     });
   });
   document.querySelector("[data-category-create-cancel]").addEventListener("click", () => document.querySelector("#catalog-category-create-dialog").close());
@@ -1860,13 +2626,45 @@ function openCatalogActionDialog(content) {
   return dialog;
 }
 
+function openCatalogRestoreConfirmation(productId, title, context = "catalog") {
+  const dialog = openCatalogActionDialog(`<div class="catalog-restore-dialog">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Восстановление из архива</p><h2>Восстановить «${escapeHtml(title)}»?</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <p>Товар снова появится в рабочем каталоге.</p>
+    <p class="muted small">Состояние каждого варианта, остатки, цены и история останутся без изменений.</p>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button" data-confirm-restore-product type="button">Восстановить</button></div>
+  </div>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector("[data-confirm-restore-product]").addEventListener("click", (event) => executeCatalogRestore("product", productId, event.currentTarget, context));
+}
+
+async function executeCatalogRestore(entityType, entityId, button, context = "catalog") {
+  button.disabled = true;
+  const collection = entityType === "product" ? "products" : "variants";
+  try {
+    await api(`/api/catalog/${collection}/${entityId}/restore`, { method: "POST" });
+    document.querySelector("#catalog-action-dialog")?.close();
+    if (entityType === "variant" && context === "product") {
+      await openOperationsProduct(state.operations.product.id);
+    } else {
+      await openOperationsCatalog(state.operations.catalog || {});
+    }
+    showToast(entityType === "product" ? "Товар восстановлен" : "Вариант восстановлен");
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
+}
+
 function openCatalogCategoryPicker(productId) {
   const product = state.operations.products.find((item) => item.id === productId);
   if (!product) return;
-  const activeCategories = state.categories.filter((category) => category.is_active);
+  const activeCategories = state.categories.filter((category) => category.is_active && !category.is_archived);
   const currentIsActive = activeCategories.some((category) => category.id === product.category_id);
   const currentOption = currentIsActive ? "" : `<option value="" selected disabled>${escapeHtml(product.category_label)} · недоступна</option>`;
-  const options = currentOption + activeCategories.map((category) => `<option value="${category.id}" ${category.id === product.category_id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
+  const options = currentOption + renderCategoryOptions(activeCategories, {
+    selectedId: product.category_id,
+    includeRoot: false,
+  });
   const dialog = openCatalogActionDialog(`<form id="catalog-category-picker-form">
     <div class="catalog-dialog-head"><div><p class="eyebrow">${escapeHtml(product.title)}</p><h2>Категория товара</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
     <div class="field"><label for="catalog-card-category">Активная категория</label><select id="catalog-card-category" name="category_id" required autofocus>${options}</select></div>
@@ -2004,6 +2802,143 @@ async function executeCatalogTestData(preflight, action, button) {
   }
 }
 
+async function openCategoryManagement(status = "active") {
+  try {
+    const categories = await api("/api/catalog/categories?status=all");
+    state.operations.categoryManagement = { status, categories };
+    renderCategoryManagement();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+function renderCategoryManagement() {
+  const management = state.operations.categoryManagement;
+  if (!management) return;
+  const visible = flattenCategoryTree(management.categories)
+    .filter(({ category }) => management.status === "archived" ? category.is_archived : !category.is_archived)
+    .map(({ category }) => ({ category, label: categoryPathLabel(category, management.categories) }));
+  const rows = visible.length
+    ? visible.map(({ category, label }) => `<article class="category-management-row ${category.is_archived ? "archived" : ""}">
+        <div class="category-management-copy"><strong>${escapeHtml(category.title)}</strong><span class="muted small">${escapeHtml(label)}</span>${!category.is_active ? '<span class="chip warn">Недоступна для товаров</span>' : ""}</div>
+        <div class="category-management-actions">
+          ${category.is_archived
+            ? `<button class="button secondary compact" data-restore-category="${category.id}" type="button">Восстановить</button>`
+            : `<button class="button ghost compact" data-edit-category="${category.id}" type="button">Изменить</button><button class="button danger compact" data-archive-category="${category.id}" type="button">Архивировать</button>`}
+        </div>
+      </article>`).join("")
+    : `<div class="empty">${management.status === "archived" ? "Архивных категорий нет" : "Активных категорий нет"}</div>`;
+  const dialog = openCatalogActionDialog(`<section class="category-management">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Справочник</p><h2>Управление категориями</h2></div><button class="drawer-close" data-category-management-close type="button" aria-label="Закрыть">×</button></div>
+    <div class="category-management-tabs" role="tablist" aria-label="Статус категорий">
+      <button class="filter-chip ${management.status === "active" ? "active" : ""}" data-category-management-status="active" type="button">Активные</button>
+      <button class="filter-chip ${management.status === "archived" ? "active" : ""}" data-category-management-status="archived" type="button">Архивные</button>
+    </div>
+    <div class="category-management-list">${rows}</div>
+    <button class="button secondary full" data-category-management-create type="button">＋ Категория</button>
+  </section>`);
+  dialog.querySelector("[data-category-management-close]").addEventListener("click", () => {
+    state.operations.categoryManagement = null;
+    dialog.close();
+  });
+  dialog.querySelectorAll("[data-category-management-status]").forEach((button) => {
+    button.addEventListener("click", () => openCategoryManagement(button.dataset.categoryManagementStatus));
+  });
+  dialog.querySelector("[data-category-management-create]").addEventListener("click", () => {
+    dialog.close();
+    openCatalogDrawer("#catalog-category-create-dialog");
+  });
+  dialog.querySelectorAll("[data-edit-category]").forEach((button) => {
+    button.addEventListener("click", () => openCategoryEdit(button.dataset.editCategory));
+  });
+  dialog.querySelectorAll("[data-archive-category]").forEach((button) => {
+    button.addEventListener("click", () => openCategoryArchiveConfirmation(button.dataset.archiveCategory));
+  });
+  dialog.querySelectorAll("[data-restore-category]").forEach((button) => {
+    button.addEventListener("click", () => executeCategoryRestore(button.dataset.restoreCategory, button));
+  });
+}
+
+function openCategoryEdit(categoryId) {
+  const management = state.operations.categoryManagement;
+  const category = management?.categories.find((item) => item.id === categoryId);
+  if (!category) return;
+  const excludedIds = categoryDescendantIds(category.id, management.categories);
+  excludedIds.add(category.id);
+  const dialog = openCatalogActionDialog(`<form id="category-edit-form">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Категория</p><h2>Изменить категорию</h2></div><button class="drawer-close" data-category-edit-cancel type="button" aria-label="Закрыть">×</button></div>
+    <div class="field"><label for="category-edit-title">Название</label><input id="category-edit-title" name="title" value="${escapeHtml(category.title)}" maxlength="255" required autofocus></div>
+    <div class="field"><label for="category-edit-parent">Родительская категория <span class="muted">(необязательно)</span></label><select id="category-edit-parent" name="parent_id">${renderCategoryOptions(management.categories, { selectedId: category.parent_id, excludedIds })}</select></div>
+    <p class="muted small">Служебный адрес категории управляется Core автоматически.</p>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-category-edit-cancel type="button">Отмена</button><button class="button" type="submit">Сохранить</button></div>
+  </form>`);
+  dialog.querySelectorAll("[data-category-edit-cancel]").forEach((button) => {
+    button.addEventListener("click", () => renderCategoryManagement());
+  });
+  dialog.querySelector("#category-edit-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    const data = new FormData(event.currentTarget);
+    button.disabled = true;
+    try {
+      await api(`/api/catalog/categories/${category.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          title: String(data.get("title") || "").trim(),
+          parent_id: data.get("parent_id") || null,
+        }),
+      });
+      state.categories = await api("/api/catalog/categories");
+      await openCategoryManagement(management.status);
+      showToast("Категория обновлена");
+    } catch (error) {
+      showToast(error.message, true);
+      button.disabled = false;
+    }
+  });
+}
+
+function openCategoryArchiveConfirmation(categoryId) {
+  const management = state.operations.categoryManagement;
+  const category = management?.categories.find((item) => item.id === categoryId);
+  if (!category) return;
+  const dialog = openCatalogActionDialog(`<div>
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Архив категории</p><h2>Архивировать «${escapeHtml(category.title)}»?</h2></div><button class="drawer-close" data-category-archive-cancel type="button" aria-label="Закрыть">×</button></div>
+    <p>Категория исчезнет из дерева и выбора для товаров, но сохранится в истории.</p>
+    <p class="muted small">Категорию с активными товарами или дочерними категориями архивировать нельзя.</p>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-category-archive-cancel type="button">Отмена</button><button class="button danger" data-confirm-category-archive type="button">Архивировать</button></div>
+  </div>`);
+  dialog.querySelectorAll("[data-category-archive-cancel]").forEach((button) => {
+    button.addEventListener("click", () => renderCategoryManagement());
+  });
+  dialog.querySelector("[data-confirm-category-archive]").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await api(`/api/catalog/categories/${category.id}`, { method: "DELETE" });
+      state.categories = await api("/api/catalog/categories");
+      await openCategoryManagement("active");
+      showToast("Категория перемещена в архив");
+    } catch (error) {
+      showToast(error.message, true);
+      button.disabled = false;
+    }
+  });
+}
+
+async function executeCategoryRestore(categoryId, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/catalog/categories/${categoryId}/restore`, { method: "POST" });
+    state.categories = await api("/api/catalog/categories");
+    await openCategoryManagement("archived");
+    showToast("Категория восстановлена");
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
+}
+
 async function createCatalogCategory(event, catalog) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -2015,6 +2950,7 @@ async function createCatalogCategory(event, catalog) {
     return;
   }
   button.disabled = true;
+  const returnToManagement = Boolean(state.operations.categoryManagement);
   try {
     await api("/api/catalog/categories/quick", {
       method: "POST",
@@ -2023,6 +2959,7 @@ async function createCatalogCategory(event, catalog) {
     state.categories = await api("/api/catalog/categories");
     document.querySelector("#catalog-category-create-dialog").close();
     renderOperationsCatalog(catalog);
+    if (returnToManagement) await openCategoryManagement("active");
     showToast("Категория создана");
   } catch (error) {
     showToast(error.message, true);
@@ -2044,41 +2981,75 @@ async function openOperationsProduct(productId) {
   } catch (error) { showToast(error.message, true); }
 }
 
+function renderVariantCharacteristics(variant, readOnly = false) {
+  const rows = Object.entries(variant.attributes || {}).map(([name, value]) => `<div class="characteristic-row">
+    <span class="characteristic-name">${escapeHtml(name)}</span>
+    <span class="characteristic-value">${escapeHtml(String(value))}</span>
+    ${readOnly ? "" : `<span class="characteristic-actions"><button class="link-button" data-edit-characteristic="${variant.id}" data-characteristic-name="${escapeHtml(name)}" type="button">Изменить</button><button class="link-button danger-text" data-delete-characteristic="${variant.id}" data-characteristic-name="${escapeHtml(name)}" type="button">Удалить</button></span>`}
+  </div>`).join("");
+  return `<section class="variant-characteristics">
+    <div class="variant-section-heading"><strong>Характеристики</strong>${readOnly ? "" : `<button class="link-button" data-add-characteristic="${variant.id}" type="button">+ Добавить характеристику</button>`}</div>
+    ${rows ? `<div class="characteristic-list">${rows}</div>` : '<p class="muted small characteristic-empty">Не указаны</p>'}
+  </section>`;
+}
+
+function renderVariantRentalBlock(variant, readOnly = false) {
+  if (variant.rental_asset_count === 0) {
+    return readOnly ? "" : `<div class="rental-entry-action"><button class="button secondary compact" data-allocate-rental="${variant.id}" type="button">Выделить в аренду</button></div>`;
+  }
+  return `<section class="commercial-block rental-commercial-block variant-info-section">
+    <span class="variant-info-content"><strong>Аренда</strong>
+      <span>Цена: ${variant.current_rental_price === null ? "не настроена" : formatMoney(variant.current_rental_price)}</span>
+      <span>Залог: ${variant.current_recommended_deposit === null ? "не указан" : formatMoney(variant.current_recommended_deposit)}</span>
+      <span class="rental-variant-counts"><span>Экземпляров: ${variant.rental_asset_count}</span><span class="available-text">Доступно: ${variant.available_asset_count}</span><span>Выдано: ${variant.rented_asset_count}</span></span>
+    </span>
+    ${readOnly ? "" : `<span class="variant-info-action"><button class="link-button" data-set-rental-prices="${variant.id}" type="button">Изменить условия</button>${Number(variant.ordinary_quantity) > 0 ? `<button class="link-button" data-allocate-rental="${variant.id}" type="button">Выделить ещё</button>` : ""}</span>`}
+  </section>`;
+}
+
+function renderOperationsVariant(variant, product, canDeleteCatalog) {
+  const readOnly = product.is_archived || variant.is_archived;
+  return `<article class="variant-commercial-card card ${variant.is_archived ? "archived" : ""}">
+    ${renderCatalogMedia("catalog_variant", variant.id, product, readOnly)}
+    <span class="variant-commercial-main">
+      <span class="variant-identity"><span class="variant-info-section"><span class="variant-info-content"><span class="muted small">Название варианта</span><strong>${escapeHtml(visibleVariantTitle(variant.title, "Единственный вариант"))}</strong></span>${readOnly ? "" : `<span class="variant-info-action"><button class="link-button" data-rename-variant="${variant.id}" type="button">Изменить</button></span>`}</span>${variant.is_archived ? '<span class="chip archive-chip">АРХИВНЫЙ ВАРИАНТ</span>' : ""}<span class="muted small">SKU · ${escapeHtml(variant.sku)}</span></span>
+      ${renderVariantCharacteristics(variant, readOnly)}
+      ${renderVariantBarcodes(variant, readOnly)}
+      <span class="commercial-block variant-info-section"><span class="variant-info-content"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span></span>${readOnly ? "" : `<span class="variant-info-action"><button class="link-button" data-set-sale-price="${variant.id}" type="button">Изменить</button></span>`}</span>
+      ${renderVariantRentalBlock(variant, readOnly)}
+      ${readOnly ? "" : renderAqsiState(variant)}
+    </span>
+    <span class="catalog-counts"><strong>На учёте ${formatQuantity(variant.physical_quantity)}</strong><span>Для продажи ${formatQuantity(variant.ordinary_quantity)}</span></span>
+    ${variant.is_archived ? `<span class="variant-restore-actions"><button class="button secondary compact" data-restore-variant="${variant.id}" data-restore-context="product" type="button">Восстановить вариант</button></span>` : ""}
+    ${readOnly ? "" : `<span class="variant-actions">
+      ${state.user?.is_admin ? `<button class="button ghost compact" data-adjust-inventory="${variant.id}" type="button">Корректировка остатка</button>` : ""}
+      <button class="button ghost compact" data-open-label="${variant.id}" type="button">Открыть PDF</button>
+      <button class="button compact" data-print-label="${variant.id}" type="button">Системная печать</button>
+      ${renderAqsiAction(variant)}
+      ${canDeleteCatalog ? `<button class="button danger compact" data-delete-variant="${variant.id}" type="button">Удалить вариант</button>` : ""}
+    </span>`}
+  </article>`;
+}
+
 function renderOperationsProduct() {
   const product = state.operations.product;
   const canDeleteCatalog = !product.is_archived && (state.user?.is_admin || state.user?.is_superuser);
   const canManageTestData = state.user?.is_admin || state.user?.is_superuser;
-  const categoryOptions = state.categories.map((category) => `<option value="${category.id}" ${category.id === product.category_id ? "selected" : ""}>${escapeHtml(category.title)}</option>`).join("");
+  const categoryOptions = renderCategoryOptions(state.categories, {
+    selectedId: product.category_id,
+    includeRoot: false,
+  });
   const variants = product.variants.length
-    ? product.variants.map((variant) => `<article class="variant-commercial-card card ${variant.is_archived ? "archived" : ""}">
-        ${renderCatalogMedia("catalog_variant", variant.id, product, product.is_archived || variant.is_archived)}
-        <span class="variant-commercial-main"><strong>${escapeHtml(visibleVariantTitle(variant.title, "Единственный вариант"))}</strong>${variant.is_archived ? '<span class="chip archive-chip">АРХИВНЫЙ ВАРИАНТ</span>' : ""}<span class="muted small">${escapeHtml(variant.sku)}</span>${renderVariantBarcodes(variant, product.is_archived || variant.is_archived)}
-          <span class="commercial-block"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span>${product.is_archived || variant.is_archived ? "" : `<button class="link-button" data-set-sale-price="${variant.id}">Изменить</button>`}</span>
-          <span class="commercial-block"><strong>Аренда</strong><span>Цена: ${variant.current_rental_price === null ? "не настроена" : formatMoney(variant.current_rental_price)}</span><span>Залог: ${variant.current_recommended_deposit === null ? "не указан" : formatMoney(variant.current_recommended_deposit)}</span>${product.is_archived || variant.is_archived ? "" : `<button class="link-button" data-set-rental-prices="${variant.id}">Изменить условия</button>`}</span>
-          ${product.is_archived || variant.is_archived ? "" : renderAqsiState(variant)}
-        </span>
-        <span class="catalog-counts"><strong>На учёте ${formatQuantity(variant.physical_quantity)}</strong><span>Для продажи ${formatQuantity(variant.ordinary_quantity)}</span><span>Арендных экземпляров ${variant.rental_asset_count}</span><span class="available-text">Доступно сейчас ${variant.available_asset_count}</span><span>Выдано ${variant.rented_asset_count}</span></span>
-        ${product.is_archived || variant.is_archived ? "" : `<span class="variant-actions">
-          <button class="button secondary compact" data-edit-variant="${variant.id}">Редактировать</button>
-          ${Number(variant.ordinary_quantity) > 0 ? `<button class="button secondary compact" data-allocate-rental="${variant.id}">Выделить в аренду</button>` : ""}
-          ${state.user?.is_admin ? `<button class="button ghost compact" data-adjust-inventory="${variant.id}">Корректировка остатка</button>` : ""}
-          <button class="button ghost compact" data-open-label="${variant.id}">Открыть PDF</button>
-          <button class="button compact" data-print-label="${variant.id}">Системная печать</button>
-          ${renderAqsiAction(variant)}
-          ${canDeleteCatalog ? `<button class="button danger compact" data-delete-variant="${variant.id}" type="button">Удалить вариант</button>` : ""}
-        </span>`}
-      </article>`).join("")
+    ? product.variants.map((variant) => renderOperationsVariant(variant, product, canDeleteCatalog)).join("")
     : '<div class="empty">У товара пока нет вариантов</div>';
-  const assets = product.rental_assets.length
-    ? product.rental_assets.map(renderOperationsAssetRow).join("")
-    : '<div class="empty">У товара нет предметов аренды</div>';
+  const rentalAssets = product.rental_assets.length ? `<div class="section-heading"><h2>Предметы аренды</h2></div><div class="session-list">${product.rental_assets.map(renderOperationsAssetRow).join("")}</div>` : "";
   root.innerHTML = `<div class="shell">
     ${topbar(true)}
     <p class="eyebrow">Карточка товара</p>
     <h1>${escapeHtml(product.title)} ${product.is_test ? '<span class="chip test-chip">ТЕСТ</span>' : ""} ${product.is_archived ? '<span class="chip archive-chip">АРХИВ</span>' : ""}</h1>
     ${renderCatalogMedia("catalog_product", product.id, product, product.is_archived)}
     ${product.description ? `<p>${escapeHtml(product.description)}</p>` : '<p class="muted">Описание не заполнено.</p>'}
-    ${product.is_archived ? '<p class="muted">Архивная карточка доступна только для просмотра.</p>' : `<details class="card"><summary><strong>Управление товаром</strong></summary>
+    ${product.is_archived ? `<p class="muted">Архивная карточка доступна только для просмотра.</p><div class="catalog-restore-actions"><button class="button secondary compact" data-restore-product="${product.id}" data-restore-title="${escapeHtml(product.title)}" data-restore-context="product" type="button">Восстановить товар</button></div>` : `<details class="card"><summary><strong>Управление товаром</strong></summary>
       <form id="catalog-product-form">
         <div class="field"><label>Название</label><input name="title" value="${escapeHtml(product.title)}" required></div>
         <div class="field"><label>Описание</label><textarea name="description">${escapeHtml(product.description || "")}</textarea></div>
@@ -2091,26 +3062,15 @@ function renderOperationsProduct() {
       <form id="catalog-variant-create-form">
         <div class="field"><label>Название варианта</label><input name="title" required></div>
         <div class="field"><label>Штрихкод производителя <span class="muted">(необязательно)</span></label><input name="manufacturer_barcode" autocomplete="off"></div>
-        <div class="field"><label>Атрибуты JSON <span class="muted">(необязательно)</span></label><textarea name="attributes" placeholder='{"color":"blue"}'></textarea></div>
+        <fieldset class="characteristics-builder"><legend>Характеристики <span class="muted">(необязательно)</span></legend><div data-characteristics-builder></div><button class="button secondary compact" data-add-create-characteristic type="button">+ Добавить характеристику</button></fieldset>
         <button class="button full" type="submit">Создать вариант</button>
       </form>
     </details>`}
-    <section class="card order-facts">
-      <div><span class="muted small">SKU</span><strong>${escapeHtml(product.skus.join(", ") || "—")}</strong></div>
-      <div><span class="muted small">Варианты</span><strong>${product.variant_count}</strong></div>
-      <div><span class="muted small">Арендные единицы</span><strong>${product.rental_asset_count}</strong></div>
-      <div><span class="muted small">Доступно</span><strong>${product.available_asset_count}</strong></div>
-      <div><span class="muted small">Доход</span><strong>${formatMoney(product.economics.revenue)}</strong></div>
-      <div><span class="muted small">Расходы</span><strong>${formatMoney(product.economics.expenses)}</strong></div>
-      <div><span class="muted small">Результат аренды</span><strong>${formatMoney(product.economics.profit)}</strong></div>
-      <div><span class="muted small">Аренд</span><strong>${product.economics.rental_count}</strong></div>
-    </section>
     <div class="section-heading"><h2>Варианты</h2><span class="muted small">${product.variant_count}</span></div>
     <div class="session-list">${variants}</div>
     ${canDeleteCatalog ? `<div class="catalog-detail-product-actions"><button class="button danger compact" data-delete-product="${product.id}" type="button">Удалить товар</button></div>` : ""}
     ${canManageTestData ? `<section class="card catalog-test-data-actions"><p class="eyebrow">Тестовые данные</p><p class="muted small">Отдельная административная операция с полной серверной проверкой зависимостей.</p>${product.is_test ? `<button class="button danger compact" data-purge-test-product="${product.id}" type="button">Удалить тестовые данные</button>` : `<button class="button secondary compact" data-classify-test-product="${product.id}" type="button">Пометить как тестовые данные</button>`}</section>` : ""}
-    <div class="section-heading"><h2>Предметы аренды</h2></div>
-    <div class="session-list">${assets}</div>
+    ${rentalAssets}
     <dialog class="catalog-action-dialog" id="catalog-action-dialog"><div id="catalog-action-content"></div></dialog>
   </div>`;
   bindTopbar();
@@ -2119,8 +3079,12 @@ function renderOperationsProduct() {
   bindImagePreviews();
   document.querySelector("#catalog-product-form")?.addEventListener("submit", saveCatalogProduct);
   document.querySelector("#catalog-variant-create-form")?.addEventListener("submit", createCatalogVariant);
+  document.querySelector("[data-add-create-characteristic]")?.addEventListener("click", addCreateCharacteristicRow);
   document.querySelectorAll("[data-media-upload]").forEach((input) => input.addEventListener("change", () => uploadCatalogImage(input)));
-  document.querySelectorAll("[data-edit-variant]").forEach((button) => button.addEventListener("click", () => editCatalogVariant(button.dataset.editVariant)));
+  document.querySelectorAll("[data-rename-variant]").forEach((button) => button.addEventListener("click", () => openVariantNameEditor(button.dataset.renameVariant)));
+  document.querySelectorAll("[data-add-characteristic]").forEach((button) => button.addEventListener("click", () => openCharacteristicEditor(button.dataset.addCharacteristic)));
+  document.querySelectorAll("[data-edit-characteristic]").forEach((button) => button.addEventListener("click", () => openCharacteristicEditor(button.dataset.editCharacteristic, button.dataset.characteristicName)));
+  document.querySelectorAll("[data-delete-characteristic]").forEach((button) => button.addEventListener("click", () => deleteVariantCharacteristic(button.dataset.deleteCharacteristic, button.dataset.characteristicName)));
   document.querySelectorAll("[data-replace-barcode]").forEach((button) => button.addEventListener("click", () => replaceVariantBarcode(button.dataset.replaceBarcode)));
   document.querySelectorAll("[data-delete-external-barcode]").forEach((button) => button.addEventListener("click", () => deleteExternalBarcode(button.dataset.deleteExternalBarcode)));
   document.querySelectorAll("[data-set-sale-price]").forEach((button) => button.addEventListener("click", () => editCatalogSalePrice(button.dataset.setSalePrice)));
@@ -2131,10 +3095,14 @@ function renderOperationsProduct() {
   document.querySelectorAll("[data-verify-aqsi]").forEach((button) => button.addEventListener("click", () => verifyCatalogVariant(button.dataset.verifyAqsi)));
   document.querySelectorAll("[data-primary-link]").forEach((button) => button.addEventListener("click", () => selectCatalogPrimary(button.dataset.primaryLink)));
   document.querySelectorAll("[data-delete-link]").forEach((button) => button.addEventListener("click", () => deleteCatalogImageLink(button.dataset.deleteLink)));
+  document.querySelectorAll("[data-choose-variant-photo]").forEach((button) => button.addEventListener("click", () => openVariantPhotoSelector(button.dataset.chooseVariantPhoto)));
+  document.querySelectorAll("[data-use-variant-photo]").forEach((button) => button.addEventListener("click", () => useVariantImageAsProductPrimary(button.dataset.useVariantPhoto, null, button)));
   document.querySelectorAll("[data-open-label]").forEach((button) => button.addEventListener("click", () => openVariantLabel(button.dataset.openLabel)));
   document.querySelectorAll("[data-print-label]").forEach((button) => button.addEventListener("click", () => printVariantLabels(button.dataset.printLabel, 1)));
   document.querySelectorAll("[data-delete-product]").forEach((button) => button.addEventListener("click", () => openCatalogDeletePreflight("product", button.dataset.deleteProduct)));
   document.querySelectorAll("[data-delete-variant]").forEach((button) => button.addEventListener("click", () => openCatalogDeletePreflight("variant", button.dataset.deleteVariant)));
+  document.querySelectorAll("[data-restore-product]").forEach((button) => button.addEventListener("click", () => openCatalogRestoreConfirmation(button.dataset.restoreProduct, button.dataset.restoreTitle, button.dataset.restoreContext)));
+  document.querySelectorAll("[data-restore-variant]").forEach((button) => button.addEventListener("click", () => executeCatalogRestore("variant", button.dataset.restoreVariant, button, button.dataset.restoreContext)));
   document.querySelectorAll("[data-classify-test-product]").forEach((button) => button.addEventListener("click", () => openCatalogTestDataPreflight(button.dataset.classifyTestProduct, "classify")));
   document.querySelectorAll("[data-purge-test-product]").forEach((button) => button.addEventListener("click", () => openCatalogTestDataPreflight(button.dataset.purgeTestProduct, "purge")));
 }
@@ -2240,7 +3208,7 @@ function aqsiBarcode(variant) {
 
 function renderVariantBarcodes(variant, readOnly = false) {
   const external = variant.barcode_source === "manufacturer";
-  return `<span class="commercial-block"><strong>Штрихкод</strong><span><span class="barcode-value">${escapeHtml(variant.barcode)}</span> <span class="muted small">${external ? "Внешний" : "Системный"}</span></span>${readOnly ? "" : `<span class="barcode-actions"><button class="link-button" data-replace-barcode="${variant.id}">Заменить</button>${external ? `<button class="link-button danger-text" data-delete-external-barcode="${variant.id}">Удалить</button>` : ""}</span>`}</span>`;
+  return `<span class="commercial-block variant-info-section"><span class="variant-info-content"><strong>Штрихкод</strong><span><span class="barcode-value">${escapeHtml(variant.barcode)}</span> <span class="muted small">${external ? "Внешний" : "Системный"}</span></span></span>${readOnly ? "" : `<span class="variant-info-action barcode-actions"><button class="link-button" data-replace-barcode="${variant.id}">Заменить</button>${external ? `<button class="link-button danger-text" data-delete-external-barcode="${variant.id}">Удалить</button>` : ""}</span>`}</span>`;
 }
 
 async function replaceVariantBarcode(variantId) {
@@ -2278,13 +3246,42 @@ function renderAqsiAction(variant) {
   return `<button class="button ghost compact" data-publish-aqsi="${variant.id}">Синхронизировать повторно</button>`;
 }
 
+function variantPhotoChoices(product) {
+  return (product.variants || []).flatMap((variant) => {
+    const links = state.operations.imageLinks.filter((link) => link.entity_type === "catalog_variant" && link.entity_id === variant.id);
+    const link = links.find((item) => item.role === "primary") || links[0];
+    return link ? [{ variant, link }] : [];
+  });
+}
+
+function renderVariantPhotoSelector(product, choices = variantPhotoChoices(product)) {
+  const productPrimary = state.operations.imageLinks.find((link) => link.entity_type === "catalog_product" && link.entity_id === product.id && link.role === "primary");
+  return `<div class="catalog-dialog-head"><div><p class="eyebrow">${escapeHtml(product.title)}</p><h2>Выбрать фото из вариантов</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <div class="variant-photo-options">${choices.map(({ variant, link }) => {
+      const current = productPrimary?.image_id === link.image_id;
+      return `<button class="variant-photo-option" data-select-variant-photo="${link.id}" type="button" ${current ? "disabled" : ""}>
+        <img data-image-id="${link.image_id}" alt="Фото варианта ${escapeHtml(visibleVariantTitle(variant.title, variant.sku))}">
+        <span class="variant-photo-copy"><strong>${escapeHtml(visibleVariantTitle(variant.title, "Без названия"))}</strong><span class="muted small">${escapeHtml(variant.sku)}</span>${current ? '<span class="available-text small">Основное фото товара</span>' : ""}</span>
+      </button>`;
+    }).join("")}</div>`;
+}
+
 function renderCatalogMedia(entityType, entityId, product, readOnly = false) {
   const links = state.operations.imageLinks.filter((link) => link.entity_type === entityType && link.entity_id === entityId);
-  const primary = links.find((link) => link.role === "primary") || links[0];
-  const fallback = !links.length && entityType === "catalog_variant"
+  const ownPrimary = links.find((link) => link.role === "primary");
+  const variantFallback = !links.length && entityType === "catalog_variant"
     ? state.operations.imageLinks.find((link) => link.entity_type === "catalog_product" && link.entity_id === product.id && link.role === "primary")
     : null;
-  const image = primary || fallback;
+  const variantIds = new Set((product.variants || []).map((variant) => variant.id));
+  const productVariantPrimaries = entityType === "catalog_product" && !ownPrimary
+    ? state.operations.imageLinks.filter((link) => link.entity_type === "catalog_variant" && variantIds.has(link.entity_id) && link.role === "primary")
+    : [];
+  const productFallback = (product.variants || []).length === 1 && productVariantPrimaries.length === 1 ? productVariantPrimaries[0] : null;
+  const photoChoices = variantPhotoChoices(product);
+  const displayedVariantLink = entityType === "catalog_variant" ? (ownPrimary || links[0]) : null;
+  const productPrimary = state.operations.imageLinks.find((link) => link.entity_type === "catalog_product" && link.entity_id === product.id && link.role === "primary");
+  const fallback = variantFallback || productFallback;
+  const image = ownPrimary || fallback || links[0];
   const gallery = links.length ? links.map((link) => `<figure class="catalog-media-item">
     <img class="image-preview-trigger" data-image-id="${link.image_id}" data-image-preview="${link.image_id}" tabindex="0" role="button" aria-label="Открыть фото крупно" alt="Фото товара">
     <figcaption><span class="chip ${link.role === "primary" ? "good" : ""}">${link.role === "primary" ? "Основное" : "Галерея"}</span>
@@ -2292,13 +3289,49 @@ function renderCatalogMedia(entityType, entityId, product, readOnly = false) {
   </figure>`).join("") : '<div class="empty">Фотографий пока нет</div>';
   return `<section class="contextual-media" aria-label="${entityType === "catalog_product" ? "Фото товара" : "Фото варианта"}">
     ${image ? `<img class="catalog-photo image-preview-trigger" data-image-id="${image.image_id}" data-image-preview="${image.image_id}" tabindex="0" role="button" aria-label="Открыть фото крупно" alt="${entityType === "catalog_product" ? "Фото товара" : "Фото варианта"}">` : '<span class="catalog-photo photo-placeholder">◎</span>'}
-    ${fallback ? '<p class="muted small">Используется общее фото товара</p>' : ""}
+    ${variantFallback ? '<p class="muted small">Используется общее фото товара</p>' : ""}
+    ${productFallback ? '<p class="muted small">Используется фото единственного варианта</p>' : ""}
     ${readOnly ? "" : `<div class="media-actions">
       <label class="button secondary compact">Сфотографировать<input class="media-file-input" type="file" accept="image/*" capture="environment" data-media-upload="${entityType}" data-media-entity="${entityId}" aria-label="Сфотографировать"></label>
       <label class="button secondary compact">Выбрать фото<input class="media-file-input" type="file" accept="image/*" data-media-upload="${entityType}" data-media-entity="${entityId}" aria-label="Выбрать фото"></label>
+      ${entityType === "catalog_product" && photoChoices.length ? `<button class="button secondary compact" data-choose-variant-photo="${entityId}" type="button">Выбрать из вариантов</button>` : ""}
+      ${displayedVariantLink && productPrimary?.image_id !== displayedVariantLink.image_id ? `<button class="button secondary compact" data-use-variant-photo="${displayedVariantLink.id}" type="button">Сделать основным фото товара</button>` : ""}
+      ${displayedVariantLink && productPrimary?.image_id === displayedVariantLink.image_id ? '<span class="chip good">Основное фото товара</span>' : ""}
     </div>`}
     ${links.length ? `<details><summary>Фото: ${links.length}${readOnly ? "" : " · Управление"}</summary><div class="catalog-media-grid">${gallery}</div></details>` : ""}
   </section>`;
+}
+
+function openVariantPhotoSelector(productId) {
+  const product = state.operations.product;
+  const choices = product?.id === productId ? variantPhotoChoices(product) : [];
+  if (!choices.length) { showToast("У вариантов пока нет фотографий", true); return; }
+  const dialog = openCatalogActionDialog(renderVariantPhotoSelector(product, choices));
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelectorAll("[data-select-variant-photo]").forEach((button) => button.addEventListener("click", () => useVariantImageAsProductPrimary(button.dataset.selectVariantPhoto, dialog, button)));
+  hydrateImages();
+}
+
+async function useVariantImageAsProductPrimary(variantLinkId, dialog = null, button = null) {
+  const source = state.operations.imageLinks.find((link) => link.id === variantLinkId && link.entity_type === "catalog_variant");
+  const product = state.operations.product;
+  if (!source || !product) { showToast("Фото варианта недоступно", true); return; }
+  if (button) button.disabled = true;
+  try {
+    const productLinks = state.operations.imageLinks.filter((link) => link.entity_type === "catalog_product" && link.entity_id === product.id);
+    const currentPrimary = productLinks.find((link) => link.role === "primary");
+    let target = productLinks.find((link) => link.image_id === source.image_id);
+    if (!target) {
+      target = await api("/api/media/image-links", { method: "POST", body: JSON.stringify({ image_id: source.image_id, entity_type: "catalog_product", entity_id: product.id, role: currentPrimary ? "gallery" : "primary", sort_order: productLinks.length }) });
+    }
+    if (target.role !== "primary") await api(`/api/media/image-links/${target.id}/primary`, { method: "POST" });
+    dialog?.close();
+    await openOperationsProduct(product.id);
+    showToast("Основное фото товара изменено");
+  } catch (error) {
+    showToast(error.message, true);
+    if (button?.isConnected) button.disabled = false;
+  }
 }
 
 async function saveCatalogProduct(event) {
@@ -2311,34 +3344,130 @@ async function saveCatalogProduct(event) {
   } catch (error) { showToast(error.message, true); }
 }
 
-function parseAttributes(value) {
-  const normalized = String(value || "").trim();
-  if (!normalized) return {};
-  const parsed = JSON.parse(normalized);
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("Атрибуты должны быть JSON-объектом");
-  return parsed;
+function normalizeCharacteristic(name, value) {
+  const normalizedName = String(name || "").trim();
+  const normalizedValue = String(value || "").trim();
+  if (!normalizedName) throw new Error("Укажите название характеристики");
+  if (!normalizedValue) throw new Error("Укажите значение характеристики");
+  return [normalizedName, normalizedValue];
+}
+
+function setVariantCharacteristic(attributes, rawName, rawValue, previousName = null) {
+  const [name, value] = normalizeCharacteristic(rawName, rawValue);
+  const next = { ...attributes };
+  if (previousName !== null) delete next[previousName];
+  if (Object.prototype.hasOwnProperty.call(next, name)) throw new Error(`Характеристика «${name}» уже существует`);
+  next[name] = value;
+  return next;
+}
+
+function removeVariantCharacteristic(attributes, name) {
+  const next = { ...attributes };
+  delete next[name];
+  return next;
+}
+
+function collectCharacteristicRows(form) {
+  const attributes = {};
+  form.querySelectorAll("[data-characteristic-row]").forEach((row) => {
+    const [name, value] = normalizeCharacteristic(
+      row.querySelector('[name="characteristic_name"]').value,
+      row.querySelector('[name="characteristic_value"]').value,
+    );
+    if (Object.prototype.hasOwnProperty.call(attributes, name)) throw new Error(`Характеристика «${name}» уже добавлена`);
+    attributes[name] = value;
+  });
+  return attributes;
+}
+
+function addCreateCharacteristicRow() {
+  const container = document.querySelector("[data-characteristics-builder]");
+  if (!container) return;
+  const row = document.createElement("div");
+  row.className = "characteristic-builder-row";
+  row.dataset.characteristicRow = "";
+  row.innerHTML = `<label><span>Название</span><input name="characteristic_name" autocomplete="off" required></label><label><span>Значение</span><input name="characteristic_value" autocomplete="off" required></label><button class="button ghost compact" type="button" aria-label="Удалить характеристику">Удалить</button>`;
+  row.querySelector("button").addEventListener("click", () => row.remove());
+  container.append(row);
+  row.querySelector("input").focus();
 }
 
 async function createCatalogVariant(event) {
   event.preventDefault();
   const data = new FormData(event.currentTarget);
   try {
-    await api("/api/catalog/variants", { method: "POST", body: JSON.stringify({ product_id: state.operations.product.id, title: data.get("title"), manufacturer_barcode: nullableText(data.get("manufacturer_barcode")), attributes: parseAttributes(data.get("attributes")), is_active: true }) });
+    const attributes = collectCharacteristicRows(event.currentTarget);
+    await api("/api/catalog/variants", { method: "POST", body: JSON.stringify({ product_id: state.operations.product.id, title: String(data.get("title") || "").trim(), manufacturer_barcode: nullableText(data.get("manufacturer_barcode")), attributes, is_active: true }) });
     await openOperationsProduct(state.operations.product.id);
     showToast("Вариант создан");
   } catch (error) { showToast(error.message, true); }
 }
 
-async function editCatalogVariant(variantId) {
+function openVariantNameEditor(variantId) {
   const variant = state.operations.product.variants.find((item) => item.id === variantId);
-  const title = window.prompt("Название варианта", variant.title);
-  if (title === null) return;
-  const attributes = window.prompt("Атрибуты JSON", JSON.stringify(variant.attributes));
-  if (attributes === null) return;
+  if (!variant) return;
+  const dialog = openCatalogActionDialog(`<form id="variant-name-form">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Вариант · ${escapeHtml(variant.sku)}</p><h2>Изменить название</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <div class="field"><label for="variant-title-input">Название варианта</label><input id="variant-title-input" name="title" value="${escapeHtml(variant.title)}" required autofocus></div>
+    <p class="muted small">SKU остаётся неизменным.</p>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button" type="submit">Сохранить</button></div>
+  </form>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector("#variant-name-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const title = String(new FormData(event.currentTarget).get("title") || "").trim();
+    if (!title) return;
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      await api(`/api/catalog/variants/${variantId}`, { method: "PATCH", body: JSON.stringify({ title }) });
+      dialog.close();
+      await openOperationsProduct(state.operations.product.id);
+      showToast("Название варианта сохранено");
+    } catch (error) { showToast(error.message, true); button.disabled = false; }
+  });
+}
+
+function openCharacteristicEditor(variantId, previousName = null) {
+  const variant = state.operations.product.variants.find((item) => item.id === variantId);
+  if (!variant) return;
+  const editing = previousName !== null;
+  const previousValue = editing ? variant.attributes[previousName] : "";
+  const dialog = openCatalogActionDialog(`<form id="variant-characteristic-form">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">${escapeHtml(visibleVariantTitle(variant.title, variant.sku))}</p><h2>${editing ? "Изменить характеристику" : "Добавить характеристику"}</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <div class="field"><label for="characteristic-name-input">Название</label><input id="characteristic-name-input" name="name" value="${escapeHtml(previousName || "")}" required autofocus></div>
+    <div class="field"><label for="characteristic-value-input">Значение</label><input id="characteristic-value-input" name="value" value="${escapeHtml(String(previousValue))}" required></div>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button" type="submit">${editing ? "Сохранить" : "Добавить"}</button></div>
+  </form>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector("#variant-characteristic-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    try {
+      const attributes = setVariantCharacteristic(
+        variant.attributes,
+        data.get("name"),
+        data.get("value"),
+        editing ? previousName : null,
+      );
+      button.disabled = true;
+      await api(`/api/catalog/variants/${variantId}`, { method: "PATCH", body: JSON.stringify({ attributes }) });
+      dialog.close();
+      await openOperationsProduct(state.operations.product.id);
+      showToast(editing ? "Характеристика сохранена" : "Характеристика добавлена");
+    } catch (error) { showToast(error.message, true); button.disabled = false; }
+  });
+}
+
+async function deleteVariantCharacteristic(variantId, name) {
+  const variant = state.operations.product.variants.find((item) => item.id === variantId);
+  if (!variant || !window.confirm(`Удалить характеристику «${name}»?`)) return;
+  const attributes = removeVariantCharacteristic(variant.attributes, name);
   try {
-    await api(`/api/catalog/variants/${variantId}`, { method: "PATCH", body: JSON.stringify({ title, attributes: parseAttributes(attributes) }) });
+    await api(`/api/catalog/variants/${variantId}`, { method: "PATCH", body: JSON.stringify({ attributes }) });
     await openOperationsProduct(state.operations.product.id);
-    showToast("Вариант сохранён");
+    showToast("Характеристика удалена");
   } catch (error) { showToast(error.message, true); }
 }
 
@@ -2377,18 +3506,61 @@ async function allocateRental(variantId) {
   } catch (error) { showToast(error.message, true); }
 }
 
-async function adjustInventory(variantId) {
-  const quantityDelta = window.prompt("Изменение остатка (например, -1 или 2)", "-1");
-  if (quantityDelta === null) return;
-  const reason = window.prompt("Причина: shortage, damage, gift, personal_use, stocktake, other", "stocktake");
-  if (reason === null) return;
-  const comment = window.prompt("Комментарий", "");
-  if (comment === null) return;
-  try {
-    await api(`/api/operations/catalog/variants/${variantId}/inventory-adjustments`, { method: "POST", body: JSON.stringify({ quantity_delta: quantityDelta, reason, comment: nullableText(comment) }) });
-    await openOperationsProduct(state.operations.product.id);
-    showToast("Корректировка записана в складской ledger");
-  } catch (error) { showToast(error.message, true); }
+const inventoryAdjustmentReasons = [
+  ["stocktake", "Пересчёт остатков"],
+  ["shortage", "Недостача"],
+  ["damage", "Повреждение / брак"],
+  ["gift", "Подарок"],
+  ["personal_use", "Личное использование"],
+  ["other", "Другое"],
+];
+
+function adjustInventory(variantId) {
+  const variant = state.operations.product.variants.find((item) => item.id === variantId);
+  if (!variant) return;
+  const current = Number(variant.physical_quantity);
+  const reasonOptions = inventoryAdjustmentReasons.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+  const dialog = openCatalogActionDialog(`<form id="inventory-adjustment-form">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">${escapeHtml(visibleVariantTitle(variant.title, variant.sku))}</p><h2>Корректировка остатка</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <p>Сейчас на учёте: <strong>${formatQuantity(variant.physical_quantity)}</strong></p>
+    <div class="field"><label for="inventory-actual-quantity">Новый фактический остаток</label><input id="inventory-actual-quantity" name="actual_quantity" type="number" step="1" value="${escapeHtml(String(variant.physical_quantity))}" required autofocus></div>
+    <div class="field"><label for="inventory-adjustment-reason">Причина</label><select id="inventory-adjustment-reason" name="reason">${reasonOptions}</select></div>
+    <div class="field"><label for="inventory-adjustment-comment">Комментарий <span class="muted" data-comment-hint>(необязательно)</span></label><textarea id="inventory-adjustment-comment" name="comment" maxlength="1000"></textarea></div>
+    <p class="inventory-change-preview" role="status">Изменение: <strong data-adjustment-delta>0 шт.</strong></p>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button" type="submit">Записать корректировку</button></div>
+  </form>`);
+  const form = dialog.querySelector("#inventory-adjustment-form");
+  const quantityInput = form.querySelector('[name="actual_quantity"]');
+  const reasonSelect = form.querySelector('[name="reason"]');
+  const commentInput = form.querySelector('[name="comment"]');
+  const updatePreview = () => {
+    const value = Number(quantityInput.value);
+    const delta = value - current;
+    form.querySelector("[data-adjustment-delta]").textContent = Number.isFinite(delta) ? `${delta > 0 ? "+" : ""}${delta} шт.` : "—";
+  };
+  const updateCommentRequirement = () => {
+    const required = reasonSelect.value === "other";
+    commentInput.required = required;
+    form.querySelector("[data-comment-hint]").textContent = required ? "(обязательно для «Другое»)" : "(необязательно)";
+  };
+  quantityInput.addEventListener("input", updatePreview);
+  reasonSelect.addEventListener("change", updateCommentRequirement);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const actual = Number(quantityInput.value);
+    const quantityDelta = actual - current;
+    if (!Number.isFinite(actual)) return;
+    if (quantityDelta === 0) { showToast("Фактический остаток не изменился", true); return; }
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      await api(`/api/operations/catalog/variants/${variantId}/inventory-adjustments`, { method: "POST", body: JSON.stringify({ quantity_delta: String(quantityDelta), reason: reasonSelect.value, comment: nullableText(commentInput.value) }) });
+      dialog.close();
+      await openOperationsProduct(state.operations.product.id);
+      showToast("Корректировка записана в складской ledger");
+    } catch (error) { showToast(error.message, true); button.disabled = false; }
+  });
 }
 
 async function uploadCatalogImage(input) {

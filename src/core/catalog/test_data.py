@@ -24,6 +24,7 @@ from core.rental.models import (
     RentalMaintenanceRecord,
     RentalOrderItemRecord,
 )
+from core.sales.models import SaleItem
 from core.shared.db import UUIDv7
 
 
@@ -63,6 +64,7 @@ class _TestGraph:
     rental_maintenance_count: int
     rental_damage_count: int
     rental_condition_photo_count: int
+    sale_item_count: int
 
     @property
     def intake_session_ids(self) -> tuple[UUIDv7, ...]:
@@ -257,6 +259,11 @@ class CatalogTestDataService:
                 RentalConditionPhotoRecord.rental_asset_id,
                 rental_asset_ids,
             ),
+            sale_item_count=self._count_for_ids(
+                SaleItem,
+                SaleItem.variant_id,
+                variant_ids,
+            ),
         )
 
     def _build_preflight(self, graph: _TestGraph) -> CatalogTestDataPreflight:
@@ -361,6 +368,11 @@ class CatalogTestDataService:
                 "rental_condition_photos",
                 "фото состояния аренды",
                 graph.rental_condition_photo_count,
+            ),
+            self._dependency(
+                "sale_items",
+                "позиция продажи",
+                graph.sale_item_count,
             ),
         ]
         if graph.product.is_test:

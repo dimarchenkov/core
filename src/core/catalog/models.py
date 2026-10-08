@@ -41,6 +41,11 @@ class Category(BaseModel):
         back_populates="parent",
     )
 
+    @property
+    def is_archived(self) -> bool:
+        """Expose the Category lifecycle state in operator-facing API responses."""
+        return self.deleted_at is not None
+
 
 class CatalogProduct(BaseModel):
     """Catalog product family without sellable variant, price, or stock data."""

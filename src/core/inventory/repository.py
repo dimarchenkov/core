@@ -49,6 +49,19 @@ class StockMovementRepository:
         )
         return self._session.scalars(statement).all()
 
+    def list_sale_movements(self, sale_id: UUIDv7) -> Sequence[StockMovement]:
+        """Return authoritative SALE movements for one completed commercial Sale."""
+        statement = (
+            select(StockMovement)
+            .where(
+                StockMovement.source_type == SourceType.SALE,
+                StockMovement.source_id == sale_id,
+                StockMovement.movement_type == MovementType.SALE,
+            )
+            .order_by(StockMovement.created_at, StockMovement.id)
+        )
+        return self._session.scalars(statement).all()
+
     def get_balance(self, variant_id: UUIDv7) -> Decimal:
         """Calculate one variant balance in SQL without loading movement rows."""
         statement = select(func.sum(StockMovement.quantity_delta)).where(

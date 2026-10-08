@@ -583,6 +583,55 @@ def test_variant_media_ownership_and_unlink_are_isolated(
     assert links.get_link(created[2].id).image_id == image.id
 
 
+def test_product_reuses_variant_image_as_primary_without_copy_or_variant_unlink(
+    session: Session,
+    product: CatalogProduct,
+) -> None:
+    """Product replacement adds its own link to the same Image and preserves Variant ownership."""
+    variant = CatalogVariant(
+        product_id=product.id,
+        title="Red",
+        sku="SKU-RED",
+        barcode="2000000000084",
+        attributes={},
+    )
+    session.add(variant)
+    session.flush()
+    images = ImageService(session)
+    old_product_image = images.create_image(ImageCreate(**image_payload()))
+    variant_payload = image_payload()
+    variant_payload["source_key"] = "images/source/variant-red.jpg"
+    variant_image = images.create_image(ImageCreate(**variant_payload))
+    links = ImageLinkService(session)
+    old_product_link = links.create_link(ImageLinkCreate(
+        image_id=old_product_image.id,
+        entity_type=ImageLinkEntityType.CATALOG_PRODUCT,
+        entity_id=product.id,
+        role=ImageLinkRole.PRIMARY,
+    ))
+    variant_link = links.create_link(ImageLinkCreate(
+        image_id=variant_image.id,
+        entity_type=ImageLinkEntityType.CATALOG_VARIANT,
+        entity_id=variant.id,
+        role=ImageLinkRole.PRIMARY,
+    ))
+    reused_product_link = links.create_link(ImageLinkCreate(
+        image_id=variant_link.image_id,
+        entity_type=ImageLinkEntityType.CATALOG_PRODUCT,
+        entity_id=product.id,
+        role=ImageLinkRole.GALLERY,
+    ))
+
+    links.set_primary(reused_product_link.id)
+
+    assert reused_product_link.image_id == variant_link.image_id
+    assert reused_product_link.role is ImageLinkRole.PRIMARY
+    assert old_product_link.role is ImageLinkRole.GALLERY
+    assert variant_link.role is ImageLinkRole.PRIMARY
+    assert variant_link.deleted_at is None
+    assert session.query(Image).count() == 2
+
+
 def test_set_primary_demotes_previous_link_atomically(
     session: Session,
     product: CatalogProduct,

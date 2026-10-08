@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from core.catalog.models import (
@@ -34,6 +34,12 @@ class CategoryRepository:
         )
         return self._session.scalar(statement)
 
+    def get_any_for_update(self, category_id: UUIDv7) -> Category | None:
+        """Return and lock a Category regardless of archive state."""
+        return self._session.scalar(
+            select(Category).where(Category.id == category_id).with_for_update()
+        )
+
     def get_by_slug(self, slug: str) -> Category | None:
         """Return an active category by slug, excluding soft-deleted rows."""
         statement = select(Category).where(
@@ -42,14 +48,32 @@ class CategoryRepository:
         )
         return self._session.scalar(statement)
 
-    def list(self) -> Sequence[Category]:
-        """Return categories ordered for catalog navigation."""
-        statement = (
-            select(Category)
-            .where(Category.deleted_at.is_(None))
-            .order_by(Category.sort_order, Category.title)
-        )
+    def list(self, archive_status: str = "active") -> Sequence[Category]:
+        """Return the requested Category lifecycle slice in stable tree order."""
+        statement = select(Category)
+        if archive_status == "active":
+            statement = statement.where(Category.deleted_at.is_(None))
+        elif archive_status == "archived":
+            statement = statement.where(Category.deleted_at.is_not(None))
+        statement = statement.order_by(Category.sort_order, Category.title)
         return self._session.scalars(statement).all()
+
+    def count_active_products(self, category_id: UUIDv7) -> int:
+        """Count operational Products that prevent Category archive."""
+        statement = select(func.count(CatalogProduct.id)).where(
+            CatalogProduct.category_id == category_id,
+            CatalogProduct.deleted_at.is_(None),
+            CatalogProduct.is_active.is_(True),
+        )
+        return self._session.scalar(statement) or 0
+
+    def count_live_children(self, category_id: UUIDv7) -> int:
+        """Count non-archived children that must not be silently orphaned."""
+        statement = select(func.count(Category.id)).where(
+            Category.parent_id == category_id,
+            Category.deleted_at.is_(None),
+        )
+        return self._session.scalar(statement) or 0
 
 
 class CatalogProductRepository:
@@ -72,6 +96,12 @@ class CatalogProductRepository:
         )
         return self._session.scalar(statement)
 
+    def get_any_for_update(self, product_id: UUIDv7) -> CatalogProduct | None:
+        """Return and lock a Product regardless of archive state."""
+        return self._session.scalar(
+            select(CatalogProduct).where(CatalogProduct.id == product_id).with_for_update()
+        )
+
     def get_for_reference(self, product_id: UUIDv7) -> CatalogProduct | None:
         """Return a Product under a shared lock while a polymorphic reference is added."""
         statement = (
@@ -91,6 +121,17 @@ class CatalogProductRepository:
             CatalogProduct.deleted_at.is_(None),
         )
         return self._session.scalar(statement)
+
+    def get_by_slug_for_update(self, slug: str) -> CatalogProduct | None:
+        """Return and lock the active Product owning a slug, when present."""
+        return self._session.scalar(
+            select(CatalogProduct)
+            .where(
+                CatalogProduct.slug == slug,
+                CatalogProduct.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
 
     def list(self) -> Sequence[CatalogProduct]:
         """Return non-deleted catalog products ordered for display."""
@@ -133,6 +174,12 @@ class CatalogVariantRepository:
             .with_for_update()
         )
         return self._session.scalar(statement)
+
+    def get_any_for_update(self, variant_id: UUIDv7) -> CatalogVariant | None:
+        """Return and lock a Variant regardless of archive state."""
+        return self._session.scalar(
+            select(CatalogVariant).where(CatalogVariant.id == variant_id).with_for_update()
+        )
 
     def get_for_reference(self, variant_id: UUIDv7) -> CatalogVariant | None:
         """Return a Variant under a shared lock while a polymorphic reference is added."""
@@ -182,6 +229,17 @@ class CatalogVariantRepository:
             CatalogVariant.deleted_at.is_(None),
         )
         return self._session.scalar(statement)
+
+    def get_active_by_sku(self, sku: str) -> CatalogVariant | None:
+        """Return the active Variant currently owning a stable SKU."""
+        return self._session.scalar(
+            select(CatalogVariant)
+            .where(
+                CatalogVariant.sku == sku,
+                CatalogVariant.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
 
     def next_sku_number(self) -> int:
         """Reserve the next SKU number from PostgreSQL or the test database."""

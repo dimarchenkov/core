@@ -41,9 +41,12 @@ def mpo_bytes() -> bytes:
     exif[274] = 6
     output = BytesIO()
     image.save(
-        output, format="MPO", save_all=True,
+        output,
+        format="MPO",
+        save_all=True,
         append_images=[Image.new("RGB", (16, 16), "green")],
-        quality=95, exif=exif,
+        quality=95,
+        exif=exif,
         icc_profile=ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes(),
     )
     return output.getvalue()

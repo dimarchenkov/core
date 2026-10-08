@@ -70,7 +70,8 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Цена не указана" in script.text
     assert "/api/labels/variants/" in script.text
     assert "/api/labels/variants/print-capability" in script.text
-    assert 'data-print-label="${variant.id}">Системная печать' in script.text
+    assert 'data-print-label="${variant.id}"' in script.text
+    assert "Системная печать" in script.text
     assert "printVariantLabels(button.dataset.printLabel, 1)" in script.text
     assert "openVariantLabel(button.dataset.printLabel, true)" not in script.text
     assert "data-direct-print-label" not in script.text

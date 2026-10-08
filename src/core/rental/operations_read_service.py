@@ -63,7 +63,7 @@ class RentalOperationsReadService:
         supplier_id: UUIDv7 | None = None,
         attention_filters: frozenset[CatalogAttentionFilter] = frozenset(),
         product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
-        sort: CatalogOperationsSort = CatalogOperationsSort.TITLE,
+        sort: CatalogOperationsSort | None = None,
     ) -> list[CatalogProductOperationsRead]:
         """Return shared Catalog products using server-side workspace filters."""
         statement = select(CatalogProduct)
@@ -197,13 +197,10 @@ class RentalOperationsReadService:
                     asset.availability is RentalAvailability.AVAILABLE
                     for asset in assets_by_product[product.id]
                 ),
-                primary_image_id=next(
-                    (
-                        image_ids.get((ImageLinkEntityType.CATALOG_VARIANT, variant.id))
-                        for variant in variants_by_product[product.id]
-                        if image_ids.get((ImageLinkEntityType.CATALOG_VARIANT, variant.id))
-                    ),
-                    image_ids.get((ImageLinkEntityType.CATALOG_PRODUCT, product.id)),
+                primary_image_id=self._product_display_image_id(
+                    product.id,
+                    variants_by_product[product.id],
+                    image_ids,
                 ),
                 needs_initial_price=any(
                     variant.id not in priced_variant_ids
@@ -284,19 +281,97 @@ class RentalOperationsReadService:
         }
         if flag := efficiency_filters.get(product_filter):
             rows = [row for row in rows if flag in row.efficiency_flags]
-        if sort is CatalogOperationsSort.REVENUE:
+        resolved_sort = self._catalog_sort_for_mode(mode, sort)
+        rows = sorted(rows, key=lambda row: (row.title.casefold(), str(row.id)))
+        if resolved_sort is CatalogOperationsSort.NEWEST:
+            return sorted(rows, key=lambda row: products_by_id[row.id].created_at, reverse=True)
+        if resolved_sort is CatalogOperationsSort.OLDEST:
+            return sorted(rows, key=lambda row: products_by_id[row.id].created_at)
+        if resolved_sort in {
+            CatalogOperationsSort.PRICE_ASC,
+            CatalogOperationsSort.PRICE_DESC,
+        }:
+            prices = {row.id: self._product_sale_sort_price(row) for row in rows}
+            priced = [row for row in rows if prices[row.id] is not None]
+            missing = [row for row in rows if prices[row.id] is None]
+            return (
+                sorted(
+                    priced,
+                    key=lambda row: prices[row.id],
+                    reverse=resolved_sort is CatalogOperationsSort.PRICE_DESC,
+                )
+                + missing
+            )
+        if resolved_sort in {
+            CatalogOperationsSort.STOCK_ASC,
+            CatalogOperationsSort.STOCK_DESC,
+        }:
+            return sorted(
+                rows,
+                key=self._product_sale_sort_stock,
+                reverse=resolved_sort is CatalogOperationsSort.STOCK_DESC,
+            )
+        if resolved_sort is CatalogOperationsSort.REVENUE:
             return sorted(rows, key=lambda row: row.economics.revenue, reverse=True)
-        if sort is CatalogOperationsSort.RENTAL_COUNT:
+        if resolved_sort is CatalogOperationsSort.RENTAL_COUNT:
             return sorted(rows, key=lambda row: row.economics.rental_count, reverse=True)
-        if sort is CatalogOperationsSort.PROFIT:
+        if resolved_sort is CatalogOperationsSort.PROFIT:
             return sorted(rows, key=lambda row: row.economics.profit, reverse=True)
-        if sort is CatalogOperationsSort.LAST_RENTAL:
+        if resolved_sort is CatalogOperationsSort.LAST_RENTAL:
             return sorted(
                 rows,
                 key=lambda row: row.last_rental_at or datetime.min.replace(tzinfo=UTC),
                 reverse=True,
             )
-        return sorted(rows, key=lambda row: row.title)
+        return rows
+
+    @staticmethod
+    def _catalog_sort_for_mode(
+        mode: CatalogMode,
+        sort: CatalogOperationsSort | None,
+    ) -> CatalogOperationsSort:
+        """Return a supported sort, falling back to the visible mode's default."""
+        general = {
+            CatalogOperationsSort.NEWEST,
+            CatalogOperationsSort.OLDEST,
+            CatalogOperationsSort.TITLE,
+            CatalogOperationsSort.PRICE_ASC,
+            CatalogOperationsSort.PRICE_DESC,
+            CatalogOperationsSort.STOCK_ASC,
+            CatalogOperationsSort.STOCK_DESC,
+        }
+        rental = {
+            CatalogOperationsSort.TITLE,
+            CatalogOperationsSort.REVENUE,
+            CatalogOperationsSort.RENTAL_COUNT,
+            CatalogOperationsSort.PROFIT,
+            CatalogOperationsSort.LAST_RENTAL,
+        }
+        allowed = rental if mode is CatalogMode.RENTAL else general
+        default = (
+            CatalogOperationsSort.TITLE
+            if mode is CatalogMode.RENTAL
+            else CatalogOperationsSort.NEWEST
+        )
+        return sort if sort in allowed else default
+
+    @staticmethod
+    def _product_sale_sort_price(row: CatalogProductOperationsRead) -> Decimal | None:
+        """Use the minimum current retail price among sale-visible Variants."""
+        prices = [
+            variant.current_retail_price
+            for variant in row.card_variants
+            if variant.sale_row_visible and variant.current_retail_price is not None
+        ]
+        return min(prices) if prices else None
+
+    @staticmethod
+    def _product_sale_sort_stock(row: CatalogProductOperationsRead) -> Decimal:
+        """Sum sale quantities, which already exclude ledger units reserved for RentalAssets."""
+        return sum(
+            (variant.sale_quantity for variant in row.card_variants if variant.sale_row_visible),
+            start=Decimal("0"),
+        )
 
     def _category_with_descendants(self, category_id: UUIDv7) -> set[UUIDv7]:
         """Return one live Category and its live descendants without assuming tree depth."""
@@ -534,13 +609,10 @@ class RentalOperationsReadService:
             available_asset_count=sum(
                 asset.availability is RentalAvailability.AVAILABLE for asset in assets
             ),
-            primary_image_id=next(
-                (
-                    image_ids.get((ImageLinkEntityType.CATALOG_VARIANT, variant.id))
-                    for variant in variants
-                    if image_ids.get((ImageLinkEntityType.CATALOG_VARIANT, variant.id))
-                ),
-                image_ids.get((ImageLinkEntityType.CATALOG_PRODUCT, product.id)),
+            primary_image_id=self._product_display_image_id(
+                product.id,
+                variants,
+                image_ids,
             ),
             needs_initial_price=any(variant.id not in priced_variant_ids for variant in variants),
             economics=economics_service.get_product(product.id),
@@ -794,3 +866,20 @@ class RentalOperationsReadService:
             )
         ).all()
         return {(link.entity_type, link.entity_id): link.image_id for link in links}
+
+    @staticmethod
+    def _product_display_image_id(
+        product_id: UUIDv7,
+        variants: list[CatalogVariant],
+        image_ids: dict[tuple[ImageLinkEntityType, UUIDv7], UUIDv7],
+    ) -> UUIDv7 | None:
+        """Prefer Product media and use one unambiguous Variant primary as fallback."""
+        product_image_id = image_ids.get((ImageLinkEntityType.CATALOG_PRODUCT, product_id))
+        if product_image_id is not None:
+            return product_image_id
+        variant_image_ids = [
+            image_ids[(ImageLinkEntityType.CATALOG_VARIANT, variant.id)]
+            for variant in variants
+            if (ImageLinkEntityType.CATALOG_VARIANT, variant.id) in image_ids
+        ]
+        return variant_image_ids[0] if len(variant_image_ids) == 1 else None

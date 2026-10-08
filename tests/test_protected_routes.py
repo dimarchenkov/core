@@ -109,6 +109,18 @@ def test_business_routes_reject_anonymous_requests(
     }
 
     assert client.get("/api/catalog/categories").status_code == 401
+    product_restore = client.post(
+        "/api/catalog/products/00000000-0000-0000-0000-000000000001/restore"
+    )
+    variant_restore = client.post(
+        "/api/catalog/variants/00000000-0000-0000-0000-000000000001/restore"
+    )
+    category_restore = client.post(
+        "/api/catalog/categories/00000000-0000-0000-0000-000000000001/restore"
+    )
+    assert product_restore.status_code == 401
+    assert variant_restore.status_code == 401
+    assert category_restore.status_code == 401
     assert client.get("/api/media/images").status_code == 401
     assert client.get(f"/api/media/images/{image.id}/source").status_code == 401
     assert client.post("/api/intake", json=intake_payload).status_code == 401

@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.shared.db import UUIDv7
 
@@ -40,6 +40,14 @@ class InventoryAdjustmentCreate(BaseModel):
     quantity_delta: Decimal
     reason: InventoryAdjustmentReason
     comment: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_comment(self) -> InventoryAdjustmentCreate:
+        """Normalize comments and require context for the catch-all reason."""
+        self.comment = self.comment.strip() if self.comment else None
+        if self.reason is InventoryAdjustmentReason.OTHER and not self.comment:
+            raise ValueError("A comment is required when adjustment reason is other.")
+        return self
 
 
 class InventoryAdjustmentRead(BaseModel):

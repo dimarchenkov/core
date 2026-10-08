@@ -49,7 +49,7 @@ def list_operational_products(
     supplier_id: Annotated[UUIDv7 | None, Query()] = None,
     attention: Annotated[list[CatalogAttentionFilter] | None, Query()] = None,
     product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
-    sort: CatalogOperationsSort = CatalogOperationsSort.TITLE,
+    sort: CatalogOperationsSort | None = None,
 ) -> list[CatalogProductOperationsRead]:
     """List products for the URL-backed operational Catalog workspace."""
     return service.list_products(

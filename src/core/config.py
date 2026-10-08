@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     aqsi_sale_spike_device_id: str | None = Field(default=None, min_length=1)
     aqsi_sale_spike_tax_system_code: int | None = Field(default=None)
     aqsi_sale_spike_operation_ttl_ms: int = Field(default=120_000, ge=30_000, le=300_000)
+    aqsi_acquiring_mode: Literal["card_only", "sbp_with_card", "sbp_only"] = "sbp_with_card"
     printing_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("PRINTING_ENABLED", "CORE_PRINTING_ENABLED"),

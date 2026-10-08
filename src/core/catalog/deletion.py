@@ -17,6 +17,7 @@ from core.pricing.models import Price
 from core.receipt.enums import ReceiptStatus
 from core.receipt.models import Receipt, ReceiptItem
 from core.rental.models import RentalAssetRecord
+from core.sales.models import SaleItem
 from core.shared.db import UUIDv7
 
 
@@ -134,6 +135,7 @@ class CatalogHardDeleteService:
         protected_receipt_count = len(receipt_rows) - draft_receipt_count
         stock_count = self._stock_count(scope)
         rental_count = self._rental_count(scope)
+        sale_item_count = self._sale_item_count(scope)
         publication_count, attempt_count = self._publication_counts(scope)
 
         will_delete = [
@@ -164,6 +166,7 @@ class CatalogHardDeleteService:
             ),
             self._dependency("stock_movements", "складское движение", stock_count),
             self._dependency("rental_assets", "предмет аренды RentalAsset", rental_count),
+            self._dependency("sale_items", "позиция продажи", sale_item_count),
         ]
         warnings = []
         if publication_count:
@@ -365,6 +368,12 @@ class CatalogHardDeleteService:
             select(func.count(RentalAssetRecord.id)).where(
                 RentalAssetRecord.variant_id.in_(scope.variant_ids)
             )
+        )
+
+    def _sale_item_count(self, scope: _DeleteScope) -> int:
+        """Count persistent Sale snapshots that protect Catalog history."""
+        return self._count(
+            select(func.count(SaleItem.id)).where(SaleItem.variant_id.in_(scope.variant_ids))
         )
 
     def _publication_counts(self, scope: _DeleteScope) -> tuple[int, int]:

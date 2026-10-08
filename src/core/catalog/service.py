@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core.catalog.barcode import InternalBarcodeGenerator
@@ -38,6 +39,25 @@ class CategoryParentError(Exception):
     """Raised when a category parent is invalid."""
 
 
+class CategoryArchiveBlockedError(Exception):
+    """Raised when a Category still owns live Products or child Categories."""
+
+    def __init__(self, *, product_count: int, child_count: int) -> None:
+        """Retain real dependency counts for clear operator feedback."""
+        super().__init__("Category archive is blocked by live dependencies.")
+        self.product_count = product_count
+        self.child_count = child_count
+
+
+class CategoryRestoreParentError(Exception):
+    """Raised when an archived Category's former parent is unavailable."""
+
+    def __init__(self, parent_title: str | None) -> None:
+        """Retain the former parent title for operator feedback."""
+        super().__init__("Category parent is unavailable for restore.")
+        self.parent_title = parent_title
+
+
 class CatalogProductNotFoundError(Exception):
     """Raised when a catalog product cannot be found."""
 
@@ -66,6 +86,45 @@ class CatalogVariantBarcodeDeleteError(Exception):
     """Raised when deletion is requested for a current INTERNAL barcode."""
 
 
+class CatalogRestoreNotFoundError(Exception):
+    """Raised when a restore target no longer exists."""
+
+
+class CatalogProductRestoreCategoryError(Exception):
+    """Raised when an archived Product's Category cannot accept a restored Product."""
+
+    def __init__(self, category_title: str | None) -> None:
+        """Retain the unavailable Category title for operator feedback."""
+        super().__init__("Product category is unavailable.")
+        self.category_title = category_title
+
+
+class CatalogProductRestoreSlugConflictError(Exception):
+    """Raised when another active Product owns the archived Product's slug."""
+
+
+class CatalogVariantRestoreProductError(Exception):
+    """Raised when an archived Variant's parent Product is unavailable."""
+
+
+class CatalogVariantRestoreSkuConflictError(Exception):
+    """Raised when another active Variant owns the archived Variant's SKU."""
+
+    def __init__(self, sku: str) -> None:
+        """Retain the conflicting SKU for operator feedback."""
+        super().__init__("Variant SKU is already active.")
+        self.sku = sku
+
+
+class CatalogVariantRestoreBarcodeConflictError(Exception):
+    """Raised when another active Variant owns the archived Variant's barcode."""
+
+    def __init__(self, barcode: str) -> None:
+        """Retain the conflicting barcode for operator feedback."""
+        super().__init__("Variant barcode is already active.")
+        self.barcode = barcode
+
+
 class CategoryService:
     """Business operations for catalog categories."""
 
@@ -74,9 +133,9 @@ class CategoryService:
         self._session = session
         self._repository = CategoryRepository(session)
 
-    def list_categories(self) -> Sequence[Category]:
-        """Return all non-deleted categories ordered for display."""
-        return self._repository.list()
+    def list_categories(self, archive_status: str = "active") -> Sequence[Category]:
+        """Return active, archived, or all Categories for the requested UI context."""
+        return self._repository.list(archive_status)
 
     def get_category(self, category_id: UUIDv7) -> Category:
         """Return one category or raise when it does not exist."""
@@ -126,7 +185,9 @@ class CategoryService:
         actor_id: UUIDv7 | None = None,
     ) -> Category:
         """Update a category after validating changed fields."""
-        category = self.get_category(category_id)
+        category = self._repository.get_any_for_update(category_id)
+        if category is None or category.deleted_at is not None:
+            raise CategoryNotFoundError
         changes = data.model_dump(exclude_unset=True)
 
         if "slug" in changes:
@@ -150,10 +211,42 @@ class CategoryService:
         return category
 
     def delete_category(self, category_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> None:
-        """Soft-delete a category while preserving catalog history."""
-        category = self.get_category(category_id)
+        """Archive an empty leaf Category while preserving historical identity."""
+        category = self._repository.get_any_for_update(category_id)
+        if category is None or category.deleted_at is not None:
+            raise CategoryNotFoundError
+        product_count = self._repository.count_active_products(category_id)
+        child_count = self._repository.count_live_children(category_id)
+        if product_count or child_count:
+            raise CategoryArchiveBlockedError(
+                product_count=product_count,
+                child_count=child_count,
+            )
         category.soft_delete(actor_id)
         self._session.flush()
+
+    def restore_category(
+        self,
+        category_id: UUIDv7,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> Category:
+        """Restore one Category without silently changing its former parent."""
+        category = self._repository.get_any_for_update(category_id)
+        if category is None:
+            raise CategoryNotFoundError
+        if category.deleted_at is None:
+            return category
+        if category.parent_id is not None:
+            parent = self._repository.get_any_for_update(category.parent_id)
+            if parent is None or parent.deleted_at is not None or not parent.is_active:
+                raise CategoryRestoreParentError(parent.title if parent else None)
+            self._ensure_parent_exists(parent.id, current_category_id=category.id)
+        category.restore()
+        if actor_id is not None:
+            category.updated_by_id = actor_id
+        self._session.flush()
+        return category
 
     def _ensure_slug_available(
         self,
@@ -173,13 +266,19 @@ class CategoryService:
         parent_id: UUIDv7 | None,
         current_category_id: UUIDv7 | None = None,
     ) -> None:
-        """Raise when a parent category is missing or points to itself."""
+        """Reject missing, unavailable, self, descendant, or already-cyclic parents."""
         if parent_id is None:
             return
-        if parent_id == current_category_id:
-            raise CategoryParentError
-        if self._repository.get(parent_id) is None:
-            raise CategoryParentError
+        visited: set[UUIDv7] = set()
+        cursor_id: UUIDv7 | None = parent_id
+        while cursor_id is not None:
+            if cursor_id == current_category_id or cursor_id in visited:
+                raise CategoryParentError
+            visited.add(cursor_id)
+            parent = self._repository.get_any_for_update(cursor_id)
+            if parent is None or parent.deleted_at is not None or not parent.is_active:
+                raise CategoryParentError
+            cursor_id = parent.parent_id
 
 
 class CatalogProductService:
@@ -393,9 +492,7 @@ class CatalogVariantService:
         variant.barcode = normalized
         variant.barcode_source = BarcodeSource.MANUFACTURER
         variant.updated_by_id = actor_id
-        self._register_barcode(
-            variant, normalized, BarcodeSource.MANUFACTURER, actor_id=actor_id
-        )
+        self._register_barcode(variant, normalized, BarcodeSource.MANUFACTURER, actor_id=actor_id)
         self._session.flush()
         return variant
 
@@ -422,9 +519,7 @@ class CatalogVariantService:
         variant.barcode = barcode
         variant.barcode_source = BarcodeSource.INTERNAL
         variant.updated_by_id = actor_id
-        self._register_barcode(
-            variant, barcode, BarcodeSource.INTERNAL, actor_id=actor_id
-        )
+        self._register_barcode(variant, barcode, BarcodeSource.INTERNAL, actor_id=actor_id)
         self._session.flush()
         return variant
 
@@ -485,3 +580,78 @@ class CatalogVariantService:
         self._barcode_repository.add(barcode)
         variant.barcodes.append(barcode)
         return barcode
+
+
+class CatalogRestoreService:
+    """Restore archived Catalog entities after locking and revalidating live invariants."""
+
+    def __init__(self, session: Session) -> None:
+        """Bind restore validation to the route-owned transaction."""
+        self._session = session
+        self._categories = CategoryRepository(session)
+        self._products = CatalogProductRepository(session)
+        self._variants = CatalogVariantRepository(session)
+
+    def restore_product(
+        self,
+        product_id: UUIDv7,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> CatalogProduct:
+        """Restore only the Product while preserving every child Variant lifecycle state."""
+        product = self._products.get_any_for_update(product_id)
+        if product is None:
+            raise CatalogRestoreNotFoundError
+        if product.deleted_at is None:
+            return product
+        category = self._categories.get_any_for_update(product.category_id)
+        if category is None or category.deleted_at is not None or not category.is_active:
+            raise CatalogProductRestoreCategoryError(category.title if category else None)
+        slug_owner = self._products.get_by_slug_for_update(product.slug)
+        if slug_owner is not None and slug_owner.id != product.id:
+            raise CatalogProductRestoreSlugConflictError
+        product.restore()
+        if actor_id is not None:
+            product.updated_by_id = actor_id
+        self._session.flush()
+        return product
+
+    def restore_variant(
+        self,
+        variant_id: UUIDv7,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> CatalogVariant:
+        """Restore one Variant only under an active Product with unchanged identifiers."""
+        variant = self._variants.get_any_for_update(variant_id)
+        if variant is None:
+            raise CatalogRestoreNotFoundError
+        if variant.deleted_at is None:
+            return variant
+        product = self._products.get_any_for_update(variant.product_id)
+        if product is None or product.deleted_at is not None or not product.is_active:
+            raise CatalogVariantRestoreProductError
+        sku_owner = self._variants.get_active_by_sku(variant.sku)
+        if sku_owner is not None and sku_owner.id != variant.id:
+            raise CatalogVariantRestoreSkuConflictError(variant.sku)
+        barcode_owner = self._variants.get_active_by_barcode(variant.barcode)
+        if barcode_owner is not None and barcode_owner.id != variant.id:
+            raise CatalogVariantRestoreBarcodeConflictError(variant.barcode)
+        barcode_history_owner = self._session.scalar(
+            select(CatalogVariantBarcode)
+            .join(CatalogVariant, CatalogVariant.id == CatalogVariantBarcode.variant_id)
+            .where(
+                CatalogVariantBarcode.value == variant.barcode,
+                CatalogVariantBarcode.variant_id != variant.id,
+                CatalogVariantBarcode.deleted_at.is_(None),
+                CatalogVariant.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if barcode_history_owner is not None:
+            raise CatalogVariantRestoreBarcodeConflictError(variant.barcode)
+        variant.restore()
+        if actor_id is not None:
+            variant.updated_by_id = actor_id
+        self._session.flush()
+        return variant

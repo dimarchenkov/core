@@ -21,6 +21,7 @@ AQSI_CONFIGURATION_KEYS = frozenset(
         "default_group_id",
         "default_group_name",
         "catalog_sync_enabled",
+        "acquiring_mode",
     }
 )
 
@@ -180,7 +181,26 @@ class IntegrationService:
                 )
             catalog_sync_enabled = configuration.get("catalog_sync_enabled")
             if catalog_sync_enabled is not None and not isinstance(catalog_sync_enabled, bool):
+                raise IntegrationConfigurationError("AQSI catalog_sync_enabled must be a boolean.")
+            tax_code = configuration.get("tax_code")
+            if tax_code is not None and (
+                not isinstance(tax_code, int) or not 1 <= tax_code <= 10
+            ):
                 raise IntegrationConfigurationError(
-                    "AQSI catalog_sync_enabled must be a boolean."
+                    "AQSI tax_code must be an integer from 1 to 10."
+                )
+            tax_system_code = configuration.get("tax_system_code")
+            if tax_system_code is not None and tax_system_code not in {1, 2, 4, 16, 32}:
+                raise IntegrationConfigurationError(
+                    "AQSI tax_system_code must be one of 1, 2, 4, 16, or 32."
+                )
+            acquiring_mode = configuration.get("acquiring_mode")
+            if acquiring_mode is not None and acquiring_mode not in {
+                "card_only",
+                "sbp_with_card",
+                "sbp_only",
+            }:
+                raise IntegrationConfigurationError(
+                    "AQSI acquiring_mode must be card_only, sbp_with_card, or sbp_only."
                 )
         return dict(configuration)

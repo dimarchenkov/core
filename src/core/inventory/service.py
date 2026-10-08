@@ -117,6 +117,35 @@ class InventoryService:
         """Return immutable movement history for one catalog variant."""
         return self._repository.list_for_variant(variant_id)
 
+    def create_sale_movements_once(
+        self,
+        sale_id: UUIDv7,
+        lines: Collection[tuple[UUIDv7, int]],
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> Sequence[StockMovement]:
+        """Append one negative SALE movement per frozen line, or return the prior set."""
+        existing = self._repository.list_sale_movements(sale_id)
+        if existing:
+            expected = {variant_id: Decimal(-quantity) for variant_id, quantity in lines}
+            actual = {movement.variant_id: movement.quantity_delta for movement in existing}
+            if actual != expected:
+                raise RuntimeError("Existing SALE movements do not match the frozen Sale snapshot.")
+            return existing
+        created = [
+            self.create_movement(
+                variant_id,
+                MovementType.SALE,
+                -quantity,
+                SourceType.SALE,
+                sale_id,
+                notes="Продажа подтверждена оплатой",
+                actor_id=actor_id,
+            )
+            for variant_id, quantity in lines
+        ]
+        return created
+
     def _ensure_variant_is_active(self, variant_id: UUIDv7) -> None:
         """Require a non-deleted active variant before adding a movement."""
         variant = self._variant_repository.get(variant_id)

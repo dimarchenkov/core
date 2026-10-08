@@ -11,7 +11,10 @@ from sqlalchemy.pool import StaticPool
 from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.inventory.enums import MovementType, SourceType
 from core.inventory.models import StockMovement
-from core.rental.allocation_schemas import InventoryAdjustmentReason
+from core.rental.allocation_schemas import (
+    InventoryAdjustmentCreate,
+    InventoryAdjustmentReason,
+)
 from core.rental.allocation_workflow import (
     InventoryAdjustmentForbiddenError,
     InventoryRentalWorkflow,
@@ -169,3 +172,20 @@ def test_adjustment_is_append_only_and_requires_administrator(
     assert movement.movement_type is MovementType.ADJUSTMENT
     assert movement.notes == "gift: Gifted"
     assert balance == Decimal("4")
+
+
+def test_other_adjustment_reason_requires_a_meaningful_comment() -> None:
+    """The catch-all reason cannot hide an unexplained stock correction."""
+    with pytest.raises(ValueError, match="comment"):
+        InventoryAdjustmentCreate(
+            quantity_delta=Decimal("-1"),
+            reason=InventoryAdjustmentReason.OTHER,
+            comment="   ",
+        )
+
+    command = InventoryAdjustmentCreate(
+        quantity_delta=Decimal("-1"),
+        reason=InventoryAdjustmentReason.OTHER,
+        comment="  Повреждена упаковка  ",
+    )
+    assert command.comment == "Повреждена упаковка"

@@ -246,6 +246,64 @@ def test_variant_routes_update_without_changing_identifiers(
     assert barcode_change.status_code == 422
 
 
+def test_variant_characteristics_are_normalized_without_changing_storage_shape(
+    client: TestClient,
+    active_product: CatalogProduct,
+) -> None:
+    """Human-entered pairs remain a Variant-owned scalar JSON mapping."""
+    created = client.post(
+        "/api/catalog/variants",
+        json={
+            "product_id": str(active_product.id),
+            "title": "Camera body",
+            "attributes": {
+                " Цвет ": " Синий ",
+                "Размер": 4,
+                "Водостойкий": True,
+            },
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["attributes"] == {
+        "Цвет": "Синий",
+        "Размер": 4,
+        "Водостойкий": True,
+    }
+    renamed = client.patch(
+        f"/api/catalog/variants/{created.json()['id']}",
+        json={"attributes": {" Материал ": " Картон "}},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["attributes"] == {"Материал": "Картон"}
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"   ": "Синий"},
+        {"Цвет": "   "},
+        {"Цвет": "Синий", " Цвет ": "Красный"},
+    ],
+)
+def test_variant_characteristics_reject_blank_or_duplicate_names(
+    client: TestClient,
+    active_product: CatalogProduct,
+    attributes: dict[str, str],
+) -> None:
+    """The API rejects ambiguous pairs even when the UI validation is bypassed."""
+    response = client.post(
+        "/api/catalog/variants",
+        json={
+            "product_id": str(active_product.id),
+            "title": "Camera body",
+            "attributes": attributes,
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_variant_routes_soft_delete(client: TestClient, active_product: CatalogProduct) -> None:
     """Deleting a variant hides it from normal variant endpoints."""
     created = client.post(

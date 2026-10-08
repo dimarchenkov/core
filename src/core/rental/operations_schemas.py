@@ -59,9 +59,15 @@ class CatalogAttentionFilter(StrEnum):
 
 
 class CatalogOperationsSort(StrEnum):
-    """Computed economic sorting for the operational catalog."""
+    """Mode-aware sorting for the shared operational Catalog."""
 
+    NEWEST = "newest"
+    OLDEST = "oldest"
     TITLE = "title"
+    PRICE_ASC = "price_asc"
+    PRICE_DESC = "price_desc"
+    STOCK_ASC = "stock_asc"
+    STOCK_DESC = "stock_desc"
     REVENUE = "revenue"
     RENTAL_COUNT = "rental_count"
     PROFIT = "profit"

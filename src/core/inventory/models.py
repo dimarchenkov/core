@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Enum, ForeignKey, Numeric, Text, Uuid
+from sqlalchemy import CheckConstraint, Enum, ForeignKey, Index, Numeric, Text, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.inventory.enums import MovementType, SourceType
@@ -25,6 +25,14 @@ class StockMovement(BaseModel):
     __tablename__ = "stock_movements"
     __table_args__ = (
         CheckConstraint("quantity_delta <> 0", name="ck_stock_movements_quantity_delta_nonzero"),
+        Index(
+            "uq_stock_movements_sale_source_variant",
+            "source_id",
+            "variant_id",
+            unique=True,
+            postgresql_where=text("source_type = 'sale' AND movement_type = 'sale'"),
+            sqlite_where=text("source_type = 'sale' AND movement_type = 'sale'"),
+        ),
     )
 
     variant_id: Mapped[UUIDv7] = mapped_column(

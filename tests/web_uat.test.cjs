@@ -134,6 +134,88 @@ test('Contextual Media targets, camera/gallery, fallback and own photo', () => {
   assert.doesNotMatch(own, /Используется общее фото/);
   assert.match(s.context.renderCatalogMedia('catalog_variant', 'b', product), /Используется общее фото/);
   assert.match(own, /data-delete-link="a-link"/);
+
+  vm.runInContext('state.operations.imageLinks = [{id:"a-link", entity_type:"catalog_variant", entity_id:"a", image_id:"photo-a", role:"primary"}];', s.context);
+  const productFallback = s.context.renderCatalogMedia('catalog_product', 'p', {id:'p', variants:[{id:'a'}]});
+  assert.match(productFallback, /Используется фото единственного варианта/);
+  assert.match(productFallback, /data-image-id="photo-a"/);
+  vm.runInContext('state.operations.imageLinks.push({id:"b-link", entity_type:"catalog_variant", entity_id:"b", image_id:"photo-b", role:"primary"});', s.context);
+  const multiProduct = {id:'p', title:'Мозаика', variants:[{id:'a', title:'Медведь', sku:'SKU-A'}, {id:'b', title:'Красный', sku:'SKU-B'}, {id:'c', title:'Без фото', sku:'SKU-C'}]};
+  const ambiguous = s.context.renderCatalogMedia('catalog_product', 'p', multiProduct);
+  assert.doesNotMatch(ambiguous, /Используется фото единственного варианта|data-image-id="photo-a"|data-image-id="photo-b"/);
+  assert.match(ambiguous, /Выбрать из вариантов/);
+  const selector = s.context.renderVariantPhotoSelector(multiProduct);
+  assert.match(selector, /photo-a[\s\S]*Медведь[\s\S]*SKU-A/);
+  assert.match(selector, /photo-b[\s\S]*Красный[\s\S]*SKU-B/);
+  assert.doesNotMatch(selector, /Без фото|SKU-C/);
+
+  vm.runInContext('state.operations.imageLinks.push({id:"p-link", entity_type:"catalog_product", entity_id:"p", image_id:"photo-p", role:"primary"});', s.context);
+  const existingProductPhoto = s.context.renderCatalogMedia('catalog_product', 'p', multiProduct);
+  assert.match(existingProductPhoto, /data-image-id="photo-p"[\s\S]*Выбрать из вариантов/);
+  const variantAction = s.context.renderCatalogMedia('catalog_variant', 'a', multiProduct);
+  assert.match(variantAction, /Сделать основным фото товара/);
+  vm.runInContext('state.operations.imageLinks.find(link => link.id === "p-link").image_id = "photo-a";', s.context);
+  const currentVariant = s.context.renderCatalogMedia('catalog_variant', 'a', multiProduct);
+  assert.doesNotMatch(currentVariant, /Сделать основным фото товара/);
+  assert.match(currentVariant, /Основное фото товара/);
+
+  vm.runInContext('state.operations.imageLinks = [];', s.context);
+  const empty = s.context.renderCatalogMedia('catalog_product', 'p', multiProduct);
+  assert.doesNotMatch(empty, /Выбрать из вариантов/);
+});
+
+test('Variant photo becomes Product primary by reusing ImageLink image id', async () => {
+  const s = setup();
+  vm.runInContext(`state.operations.product = {id:'p', title:'Мозаика', variants:[{id:'a', title:'Медведь', sku:'SKU-A'}]};
+    state.operations.imageLinks = [{id:'a-link', entity_type:'catalog_variant', entity_id:'a', image_id:'photo-a', role:'primary'}];`, s.context);
+  const calls = [];
+  s.context.showToast = () => {};
+  s.context.openOperationsProduct = async () => {};
+  s.context.api = async (url, options) => {
+    calls.push({url, method:options?.method, body:options?.body ? JSON.parse(options.body) : null});
+    return {id:'p-reused', ...JSON.parse(options.body)};
+  };
+
+  await s.context.useVariantImageAsProductPrimary('a-link');
+
+  assert.deepEqual(calls, [{
+    url:'/api/media/image-links', method:'POST',
+    body:{image_id:'photo-a', entity_type:'catalog_product', entity_id:'p', role:'primary', sort_order:0},
+  }]);
+  assert.doesNotMatch(calls.map(call => call.url).join(' '), /\/api\/media\/images|DELETE/);
+  assert.equal(vm.runInContext('state.operations.imageLinks[0].entity_type', s.context), 'catalog_variant');
+});
+
+test('Existing Product primary can be replaced without unlinking Variant image', async () => {
+  const s = setup();
+  vm.runInContext(`state.operations.product = {id:'p', title:'Мозаика', variants:[{id:'a', title:'Медведь', sku:'SKU-A'}]};
+    state.operations.imageLinks = [
+      {id:'p-old', entity_type:'catalog_product', entity_id:'p', image_id:'photo-old', role:'primary'},
+      {id:'a-link', entity_type:'catalog_variant', entity_id:'a', image_id:'photo-a', role:'primary'}
+    ];`, s.context);
+  const calls = [];
+  s.context.showToast = () => {};
+  s.context.openOperationsProduct = async () => {};
+  s.context.api = async (url, options) => {
+    const body = options?.body ? JSON.parse(options.body) : null;
+    calls.push({url, method:options?.method, body});
+    return url === '/api/media/image-links' ? {id:'p-reused', ...body} : {id:'p-reused', role:'primary'};
+  };
+
+  await s.context.useVariantImageAsProductPrimary('a-link');
+
+  assert.equal(calls[0].body.image_id, 'photo-a');
+  assert.equal(calls[0].body.role, 'gallery');
+  assert.equal(calls[1].url, '/api/media/image-links/p-reused/primary');
+  assert.equal(calls[1].method, 'POST');
+  assert.equal(calls.some(call => call.method === 'DELETE'), false);
+  assert.equal(vm.runInContext('state.operations.imageLinks.find(link => link.id === "a-link").image_id', s.context), 'photo-a');
+});
+
+test('Variant photo selector stays single-column and touch-friendly on mobile', () => {
+  assert.match(styles, /\.variant-photo-options \{[^}]*display: grid/);
+  assert.match(styles, /\.variant-photo-option \{[^}]*grid-template-columns: 72px minmax\(0, 1fr\)[^}]*width: 100%[^}]*min-height: 84px/);
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.variant-photo-option \{[^}]*grid-template-columns: 64px minmax\(0, 1fr\)[^}]*min-height: 76px/);
 });
 
 test('Variant retains explicit save, Intake Product has no save button', () => {
@@ -200,7 +282,7 @@ test('Catalog shell defaults to Sale and serializes reproducible server query st
   const defaults = s.context.normalizeCatalogState({});
   assert.equal(defaults.mode, 'sale');
   assert.equal(defaults.status, 'active');
-  assert.equal(defaults.sort, 'title');
+  assert.equal(defaults.sort, 'newest');
   assert.equal(defaults.attention.length, 0);
 
   const params = s.context.catalogUrlParams({
@@ -215,6 +297,31 @@ test('Catalog shell defaults to Sale and serializes reproducible server query st
   assert.deepEqual(params.getAll('attention'), ['missing_photo', 'out_of_stock']);
   assert.equal(params.get('product_filter'), 'available');
   assert.equal(params.get('sort'), 'last_rental');
+
+  const incompatible = s.context.normalizeCatalogState({mode:'sale', sort:'profit'});
+  assert.equal(incompatible.sort, 'newest');
+  const rentalIncompatible = s.context.normalizeCatalogState({mode:'rental', sort:'price_desc'});
+  assert.equal(rentalIncompatible.sort, 'title');
+  const compact = s.context.catalogUrlParams({mode:'sale', sort:'newest'}, false);
+  assert.equal(compact.has('sort'), false);
+  const stable = s.context.catalogUrlParams({mode:'all', sort:'stock_desc'});
+  assert.equal(stable.get('mode'), 'all');
+  assert.equal(stable.get('sort'), 'stock_desc');
+});
+
+test('Catalog sort options are mode-aware and keep the native mobile control', () => {
+  const s = setup();
+  const sale = s.context.renderCatalogSort(s.context.normalizeCatalogState({mode:'sale'}));
+  const rental = s.context.renderCatalogSort(s.context.normalizeCatalogState({mode:'rental'}));
+  const all = s.context.renderCatalogSort(s.context.normalizeCatalogState({mode:'all'}));
+
+  assert.match(sale, /<select[^>]*>[\s\S]*Сначала новые[\s\S]*Сначала старые[\s\S]*Цена: сначала дешевле[\s\S]*Остаток: сначала больше/);
+  assert.doesNotMatch(sale, /доходу от аренды|количеству аренд|результату аренды|последней аренде/);
+  assert.match(rental, /По названию[\s\S]*По доходу от аренды[\s\S]*По количеству аренд[\s\S]*По результату аренды[\s\S]*По последней аренде/);
+  assert.doesNotMatch(rental, /Сначала новые|Цена:|Остаток:/);
+  assert.match(all, /Сначала новые[\s\S]*По названию[\s\S]*Цена: сначала дороже[\s\S]*Остаток: сначала меньше/);
+  assert.doesNotMatch(all, /доходу от аренды|результату аренды/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.sort-field \{ grid-template-columns: 1fr/);
 });
 
 test('Catalog category selector renders hierarchy and selected state', () => {
@@ -285,7 +392,11 @@ test('Archived Product and Variant reuse Catalog cards with visible markers', ()
   assert.match(html, />АРХИВ</);
   assert.match(html, /АРХИВНЫЙ ВАРИАНТ/);
   assert.doesNotMatch(html, /data-change-product-category/);
-  assert.doesNotMatch(source, /data-restore-(?:product|variant)/);
+  assert.match(html, /data-restore-product="archived-product"[^>]*>Восстановить товар/);
+  assert.match(html, /data-restore-variant="archived-variant"[^>]*>Восстановить вариант/);
+  assert.match(source, /\/api\/catalog\/\$\{collection\}\/\$\{entityId\}\/restore/);
+  assert.match(source, /Товар снова появится в рабочем каталоге/);
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-card-lifecycle-actions \.button[^}]*min-height: 44px/);
 });
 
 test('Explicit TEST Products are marked and expose a separate confirmed admin purge', () => {
@@ -333,9 +444,37 @@ test('Native Category create form exposes only title and optional parent', () =>
   assert.match(html, /name="title"/);
   assert.match(html, /name="parent_id"/);
   assert.match(html, /Фото/);
-  assert.match(html, /— Объективы/);
+  assert.match(html, /Фото › Объективы/);
   assert.doesNotMatch(html, /name="slug"/);
   assert.match(source, /\/api\/catalog\/categories\/quick/);
+});
+
+test('Category management exposes tree editing, archive and restore without SQLAdmin', () => {
+  const s = setup();
+  vm.runInContext(`state.categories = [
+    {id:'root', title:'Канцелярия', parent_id:null, is_active:true, is_archived:false},
+    {id:'child', title:'Ручки', parent_id:'root', is_active:true, is_archived:false},
+    {id:'archived', title:'Старое', parent_id:null, is_active:true, is_archived:true}
+  ];`, s.context);
+
+  const options = vm.runInContext('renderCategoryOptions(state.categories)', s.context);
+
+  assert.match(options, /Канцелярия › Ручки/);
+  assert.doesNotMatch(options, /Старое/);
+  assert.match(source, /data-open-category-management/);
+  assert.match(source, />Управление категориями</);
+  assert.match(source, /data-edit-category/);
+  assert.match(source, /data-archive-category/);
+  assert.match(source, /data-restore-category/);
+  assert.match(source, /\/api\/catalog\/categories\?status=all/);
+  assert.match(source, /\/api\/catalog\/categories\/\$\{categoryId\}\/restore/);
+  assert.doesNotMatch(source, /\/admin\/category\/list/);
+});
+
+test('Category management remains single-column and touch-friendly on mobile', () => {
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.category-management-row \{ grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.category-management-actions \.button \{ min-height: 44px/);
+  assert.match(styles, /\.category-management-list \{[^}]*overflow-y: auto/);
 });
 
 test('Catalog Product cards separate Sale and Rental facts without false warnings', () => {
@@ -454,6 +593,10 @@ test('Catalog delete actions live in the opened Product card, not the dense list
     source.indexOf('function renderOperationsProduct'),
     source.indexOf('async function openVariantLabel'),
   );
+  const deleteDialogSource = source.slice(
+    source.indexOf('function renderCatalogDeletePreflight'),
+    source.indexOf('async function executeCatalogDelete'),
+  );
 
   assert.match(source, /data-change-product-category/);
   assert.doesNotMatch(listCardSource, /data-delete-product/);
@@ -465,14 +608,158 @@ test('Catalog delete actions live in the opened Product card, not the dense list
   assert.match(source, /защищённая бизнес-история/);
   assert.match(source, /Архивировать вместо удаления/);
   assert.match(source, /Это последний вариант товара/);
-  assert.doesNotMatch(source, />Изменить категорию</);
+  assert.doesNotMatch(deleteDialogSource, />Изменить категорию</);
 });
 
 test('Catalog action dialog is scrollable and becomes a touch-friendly mobile sheet', () => {
   assert.match(styles, /\.catalog-action-dialog \{[^}]*overflow-y: auto/);
   assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-action-dialog \{[^}]*max-height: 88dvh/);
-  assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.variant-actions \.button\.danger \{ min-height: 44px/);
+  assert.match(
+    styles,
+    /@media \(max-width: 799px\)[\s\S]*\.variant-actions \.button\.danger[^{]*\{[^}]*min-height: 44px/,
+  );
   assert.match(styles, /@media \(max-width: 799px\)[\s\S]*\.catalog-dialog-actions, \.catalog-dialog-actions\.three \{ grid-template-columns: 1fr/);
+});
+
+test('Product detail removes the generic Info summary but keeps Product management', () => {
+  const detailSource = source.slice(
+    source.indexOf('function renderOperationsProduct'),
+    source.indexOf('async function openVariantLabel'),
+  );
+
+  assert.doesNotMatch(detailSource, /<section class="card order-facts">/);
+  assert.doesNotMatch(detailSource, /Арендные единицы|Результат аренды|product\.skus/);
+  assert.match(detailSource, /Управление товаром/);
+  assert.match(detailSource, /Название[\s\S]*Описание[\s\S]*Категория[\s\S]*Сохранить товар/);
+  assert.match(detailSource, /Добавить вариант/);
+});
+
+test('Variant detail uses readable characteristics and concise name editing', () => {
+  const s = setup();
+  vm.runInContext('state.operations.imageLinks = []; state.operations.aqsi = new Map(); state.user = {is_admin:true};', s.context);
+  const product = {id:'product', is_archived:false, variants:[]};
+  const variant = {
+    id:'variant', title:'С медвежонком', sku:'SKU-READONLY', barcode:'2000000000015',
+    barcode_source:'internal', attributes:{Цвет:'Синий', Размер:'A4', Материал:'Картон'},
+    is_archived:false, physical_quantity:'19', ordinary_quantity:'19', rental_asset_count:0,
+    available_asset_count:0, rented_asset_count:0, current_retail_price:'450.00',
+    current_rental_price:null, current_recommended_deposit:null,
+  };
+
+  const html = s.context.renderOperationsVariant(variant, product, true);
+
+  assert.match(html, /Название варианта[\s\S]*С медвежонком[\s\S]*data-rename-variant="variant"[^>]*>Изменить</);
+  assert.doesNotMatch(html, /Изменить название/);
+  assert.match(html, /SKU · SKU-READONLY/);
+  assert.match(html, /Характеристики[\s\S]*Цвет[\s\S]*Синий[\s\S]*Материал[\s\S]*Картон/);
+  assert.match(html, /Добавить характеристику/);
+  assert.match(html, /data-edit-characteristic/);
+  assert.match(html, /data-delete-characteristic/);
+  assert.doesNotMatch(html, />Редактировать</);
+  assert.doesNotMatch(source, /Атрибуты JSON|parseAttributes|data-edit-variant/);
+});
+
+test('Variant value editors share one desktop action column and collapse on mobile', () => {
+  const s = setup();
+  vm.runInContext('state.operations.imageLinks = []; state.operations.aqsi = new Map(); state.user = {is_admin:true};', s.context);
+  const product = {id:'product', is_archived:false, variants:[]};
+  const variant = {
+    id:'variant', title:'С медвежонком', sku:'SKU-ALIGN', barcode:'2000000000084',
+    barcode_source:'internal', attributes:{Цвет:'Синий'}, is_archived:false,
+    physical_quantity:'5', ordinary_quantity:'3', rental_asset_count:2,
+    available_asset_count:1, rented_asset_count:1, current_retail_price:'500.00',
+    current_rental_price:'100.00', current_recommended_deposit:'700.00',
+  };
+
+  const html = s.context.renderOperationsVariant(variant, product, true);
+
+  assert.equal((html.match(/class="variant-info-action/g) || []).length, 4);
+  assert.match(html, /variant-info-section[\s\S]*Название варианта[\s\S]*data-rename-variant/);
+  assert.match(html, /commercial-block variant-info-section[\s\S]*Штрихкод[\s\S]*data-replace-barcode/);
+  assert.match(html, /commercial-block variant-info-section[\s\S]*Продажа[\s\S]*data-set-sale-price/);
+  assert.match(html, /rental-commercial-block variant-info-section[\s\S]*Аренда[\s\S]*data-set-rental-prices/);
+  assert.match(html, /class="catalog-counts"[\s\S]*На учёте 5 шт\.[\s\S]*Для продажи 3 шт\./);
+  assert.doesNotMatch(html, /variant-info-action[^<]*[\s\S]{0,120}На учёте/);
+  assert.match(html, /class="variant-actions"[\s\S]*Корректировка остатка[\s\S]*Открыть PDF[\s\S]*Системная печать[\s\S]*Удалить вариант/);
+  assert.match(styles, /\.variant-info-section \{[^}]*display: grid;[^}]*grid-template-columns: minmax\(0, 1fr\) auto/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.variant-info-section \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.variant-info-action \{[^}]*justify-self: start/);
+});
+
+test('Characteristic builder allows zero pairs and rejects blank or duplicate pairs', () => {
+  const s = setup();
+  const row = (name, value) => ({querySelector: selector => ({value: selector.includes('characteristic_name') ? name : value})});
+  const form = rows => ({querySelectorAll: () => rows});
+
+  assert.deepEqual(JSON.parse(JSON.stringify(s.context.collectCharacteristicRows(form([])))), {});
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(s.context.collectCharacteristicRows(form([row(' Цвет ', ' Синий '), row('Размер', 'A4')])))),
+    {Цвет:'Синий', Размер:'A4'},
+  );
+  assert.throws(() => s.context.collectCharacteristicRows(form([row(' ', 'Синий')])), /название/);
+  assert.throws(() => s.context.collectCharacteristicRows(form([row('Цвет', ' ')])), /значение/);
+  assert.throws(() => s.context.collectCharacteristicRows(form([row('Цвет', 'Синий'), row(' Цвет ', 'Красный')])), /уже добавлена/);
+
+  const added = s.context.setVariantCharacteristic({Цвет:'Синий'}, ' Материал ', ' Картон ');
+  assert.deepEqual(JSON.parse(JSON.stringify(added)), {Цвет:'Синий', Материал:'Картон'});
+  const edited = s.context.setVariantCharacteristic(added, 'Оттенок', 'Голубой', 'Цвет');
+  assert.deepEqual(JSON.parse(JSON.stringify(edited)), {Материал:'Картон', Оттенок:'Голубой'});
+  const removed = s.context.removeVariantCharacteristic(edited, 'Материал');
+  assert.deepEqual(JSON.parse(JSON.stringify(removed)), {Оттенок:'Голубой'});
+  assert.throws(() => s.context.setVariantCharacteristic(added, 'Цвет', 'Красный'), /уже существует/);
+});
+
+test('Rental details are conditional and sale-only Variant keeps one rental entry action', () => {
+  const s = setup();
+  vm.runInContext('state.operations.imageLinks = []; state.operations.aqsi = new Map(); state.user = {is_admin:true};', s.context);
+  const product = {id:'product', is_archived:false, variants:[]};
+  const base = {
+    id:'variant', title:'Основной', sku:'SKU-1', barcode:'2000000000015', barcode_source:'internal',
+    attributes:{}, is_archived:false, physical_quantity:'3', ordinary_quantity:'3',
+    current_retail_price:'450.00', current_rental_price:null, current_recommended_deposit:null,
+    available_asset_count:0, rented_asset_count:0,
+  };
+
+  const saleOnly = s.context.renderOperationsVariant({...base, rental_asset_count:0}, product, true);
+  assert.doesNotMatch(saleOnly, /Аренда|Арендных экземпляров|Доступно сейчас|Выдано/);
+  assert.match(saleOnly, /Выделить в аренду/);
+
+  const rental = s.context.renderOperationsVariant({
+    ...base, rental_asset_count:3, available_asset_count:2, rented_asset_count:1,
+    current_rental_price:'350.00', current_recommended_deposit:'5000.00',
+  }, product, true);
+  assert.match(rental, /Аренда[\s\S]*350[\s\S]*5[^<]*000/);
+  assert.match(rental, /Экземпляров: 3[\s\S]*Доступно: 2[\s\S]*Выдано: 1/);
+  assert.match(rental, /Изменить условия/);
+});
+
+test('Inventory adjustment uses Russian reason labels and submits a ledger delta', () => {
+  const s = setup();
+  const reasons = vm.runInContext('inventoryAdjustmentReasons', s.context);
+  assert.deepEqual(JSON.parse(JSON.stringify(reasons)), [
+    ['stocktake', 'Пересчёт остатков'],
+    ['shortage', 'Недостача'],
+    ['damage', 'Повреждение / брак'],
+    ['gift', 'Подарок'],
+    ['personal_use', 'Личное использование'],
+    ['other', 'Другое'],
+  ]);
+  const adjustmentSource = source.slice(
+    source.indexOf('function adjustInventory'),
+    source.indexOf('async function uploadCatalogImage'),
+  );
+  assert.match(adjustmentSource, /Новый фактический остаток/);
+  assert.match(adjustmentSource, /quantityDelta = actual - current/);
+  assert.match(adjustmentSource, /quantity_delta: String\(quantityDelta\)/);
+  assert.match(adjustmentSource, /обязательно для «Другое»/);
+  assert.match(adjustmentSource, /inventory-adjustments/);
+});
+
+test('Characteristics and dialogs stay single-column on narrow mobile screens', () => {
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.characteristic-row \{ grid-template-columns: minmax\(92px, \.8fr\) minmax\(0, 1\.2fr\)/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.characteristic-builder-row \{ grid-template-columns: 1fr/);
+  assert.match(styles, /\.characteristic-name \{[^}]*overflow-wrap: anywhere/);
+  assert.match(styles, /\.characteristic-value \{[^}]*overflow-wrap: anywhere/);
 });
 
 test('Settings exposes safe AQSI controls without a secret reveal action', () => {
@@ -486,10 +773,154 @@ test('Settings exposes safe AQSI controls without a secret reveal action', () =>
   assert.match(source, /Автоматическая синхронизация каталога/);
   assert.match(source, /Синхронизировать сейчас/);
   assert.match(source, /catalog_sync_enabled/);
+  assert.match(source, /aqsi-checkout-form/);
+  assert.match(source, /device_id: deviceId/);
+  assert.match(source, /tax_system_code: taxSystemCode/);
+  assert.match(source, /tax_code: taxCode/);
   assert.match(source, /\/api\/settings\/integrations\/\$\{integration\.id\}\/sync/);
   assert.match(source, /Используются устаревшие настройки из окружения/);
   assert.match(source, /\/api\/settings\/integrations\/aqsi\/migrate/);
   assert.doesNotMatch(source, /Показать ключ/);
   assert.match(styles, /\.settings-facts \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/);
   assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.settings-facts \{ grid-template-columns: 1fr/);
+});
+
+function scannerHarness() {
+  let keydown;
+  const document = {
+    addEventListener(event, handler) { if (event === 'keydown') keydown = handler; },
+    querySelector() { return null; },
+  };
+  const context = vm.createContext({
+    document,
+    window: { addEventListener() {} },
+    sessionStorage: { getItem() {} },
+    URLSearchParams,
+    performance: { now: () => 1 },
+    setTimeout() {},
+    clearTimeout() {},
+  });
+  vm.runInContext(source, context);
+  const scanner = vm.runInContext('new ScannerService(document)', context);
+  const event = (key, timeStamp, editable = false) => ({
+    key, timeStamp, isComposing:false, ctrlKey:false, altKey:false, metaKey:false,
+    target:{closest: () => editable ? {} : null},
+    preventDefault() {}, stopPropagation() {},
+  });
+  return { scanner, keydown, event };
+}
+
+test('Global HID scanner routes local page context before Sales', () => {
+  const { scanner, keydown, event } = scannerHarness();
+  const routed = [];
+  scanner.setLocalHandler('intake', value => { routed.push(`intake:${value}`); return true; });
+  scanner.setGlobalHandler(value => { routed.push(`sale:${value}`); return true; });
+  [...'4601'].forEach((key, index) => keydown(event(key, 1 + index * 10)));
+  keydown(event('Enter', 45));
+  assert.deepEqual(routed, ['intake:4601']);
+
+  scanner.clearLocalHandler('intake');
+  [...'4602'].forEach((key, index) => keydown(event(key, 101 + index * 10)));
+  keydown(event('Enter', 145));
+  assert.deepEqual(routed, ['intake:4601', 'sale:4602']);
+});
+
+test('Scanner ignores editable fields and manually paced sequences', () => {
+  const { scanner, keydown, event } = scannerHarness();
+  const routed = [];
+  scanner.setGlobalHandler(value => { routed.push(value); return true; });
+  [...'FAST'].forEach((key, index) => keydown(event(key, 1 + index * 10, true)));
+  keydown(event('Enter', 45, true));
+  [...'SLOW'].forEach((key, index) => keydown(event(key, 100 + index * 80)));
+  keydown(event('Enter', 430));
+  [...'FAST'].forEach((key, index) => keydown(event(key, 500 + index * 10)));
+  keydown(event('Enter', 900));
+  assert.deepEqual(routed, []);
+});
+
+test('Scanner accepts slower Bluetooth HID input and Tab suffix used by Safari devices', () => {
+  const { scanner, keydown, event } = scannerHarness();
+  const routed = [];
+  scanner.setGlobalHandler(value => { routed.push(value); return true; });
+  [...'4601234567893'].forEach((key, index) => keydown(event(key, 1 + index * 70)));
+  keydown(event('Tab', 870));
+  assert.deepEqual(routed, ['4601234567893']);
+});
+
+test('Sales UI keeps browser-scoped active selection and touch-sized controls', () => {
+  assert.match(source, /core\.activeSale\.\$\{state\.user\.id\}/);
+  assert.match(source, /\/api\/sales\/auto\/items\/by-variant/);
+  assert.match(source, /\/api\/sales\/auto\/items\/by-barcode/);
+  assert.match(source, /Добавить из каталога/);
+  assert.match(source, /id="sale-barcode-form"/);
+  assert.match(source, /id="sale-barcode-input"/);
+  assert.match(source, /Отложенные/);
+  assert.match(source, /Продажа #\$\{sale\.sale_number\}/);
+  assert.match(styles, /\.quantity-button \{[^}]*width: 48px[^}]*min-height: 48px/);
+  assert.match(styles, /\.catalog-sale-add \{[^}]*width: 44px[^}]*min-height: 44px/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.sale-actions \{ grid-template-columns: 1fr/);
+});
+
+test('Checkout UI selects cash or card/QR and recovers persisted provider states', () => {
+  assert.match(source, /\/checkout\/context/);
+  assert.match(source, /＋ Свободная позиция/);
+  assert.match(source, /\/items\/manual/);
+  assert.match(source, /\/discount/);
+  assert.match(source, /data-sale-discount/);
+  assert.match(source, /Подытог/);
+  assert.match(source, /К оплате/);
+  assert.match(source, /Оплатить \$\{formatMoney\(sale\.total_amount\)\}/);
+  assert.match(source, /Получено наличными/);
+  assert.match(source, /name="payment_method" value="cash"/);
+  assert.match(source, /name="payment_method" value="card"/);
+  assert.match(source, /payment_method: paymentMethod/);
+  assert.match(source, /Карта \/ QR/);
+  assert.match(source, /Только карта/);
+  assert.match(source, /Только QR/);
+  assert.match(source, /acquiring_mode/);
+  assert.match(source, /Ожидаем оплату на кассе/);
+  assert.match(source, /Оплата отменена на терминале/);
+  assert.match(source, /Деньги не списаны/);
+  assert.match(source, /Результат оплаты пока неизвестен/);
+  assert.match(source, /Оплата прошла, но чек не сформирован/);
+  assert.match(source, /checkout\/progress/);
+  assert.match(source, /retry-payment/);
+  assert.match(source, /retry-fiscalization/);
+  assert.match(source, /stock_warnings/);
+  assert.match(source, /item\.source === "manual"/);
+  assert.match(source, /Не удалось проверить оплату/);
+  assert.match(styles, /\.discount-choices/);
+  assert.match(styles, /\.sale-item-source/);
+  assert.match(styles, /\.transaction-summary/);
+  assert.match(styles, /\.checkout-method-options/);
+});
+
+test('Switching active Sale changes the Catalog add target without sharing users', async () => {
+  const s = setup();
+  const stored = new Map();
+  s.context.window.localStorage = {
+    getItem(key) { return stored.get(key) || null; },
+    setItem(key, value) { stored.set(key, value); },
+    removeItem(key) { stored.delete(key); },
+  };
+  vm.runInContext(`state.user = {id:'operator-1'};
+    state.sales.drafts = [
+      {id:'sale-1', sale_number:1, status:'draft', item_quantity:0, total_amount:'0.00', items:[]},
+      {id:'sale-2', sale_number:2, status:'draft', item_quantity:0, total_amount:'0.00', items:[]}
+    ];`, s.context);
+  s.context.selectActiveSale('sale-2');
+  assert.equal(vm.runInContext('state.sales.activeId', s.context), 'sale-2');
+  assert.equal(stored.get('core.activeSale.operator-1'), 'sale-2');
+
+  const calls = [];
+  s.context.showToast = () => {};
+  s.context.api = async (url) => {
+    calls.push(url);
+    return {id:'sale-2', sale_number:2, status:'draft', item_quantity:1, total_amount:'100.00', items:[{variant_id:'variant', display_label_snapshot:'Ручка'}]};
+  };
+  await s.context.addVariantToActiveSale('variant');
+  assert.equal(calls[0], '/api/sales/sale-2/items/by-variant');
+
+  vm.runInContext("state.user = {id:'operator-2'};", s.context);
+  assert.equal(s.context.storedActiveSaleId(), null);
 });

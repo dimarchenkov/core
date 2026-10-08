@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.exc import IntegrityError
@@ -35,15 +35,24 @@ from core.catalog.schemas import (
 from core.catalog.service import (
     CatalogProductCategoryError,
     CatalogProductNotFoundError,
+    CatalogProductRestoreCategoryError,
+    CatalogProductRestoreSlugConflictError,
     CatalogProductService,
     CatalogProductSlugAlreadyExistsError,
+    CatalogRestoreNotFoundError,
+    CatalogRestoreService,
     CatalogVariantBarcodeConflictError,
     CatalogVariantBarcodeDeleteError,
     CatalogVariantNotFoundError,
     CatalogVariantProductError,
+    CatalogVariantRestoreBarcodeConflictError,
+    CatalogVariantRestoreProductError,
+    CatalogVariantRestoreSkuConflictError,
     CatalogVariantService,
+    CategoryArchiveBlockedError,
     CategoryNotFoundError,
     CategoryParentError,
+    CategoryRestoreParentError,
     CategoryService,
     CategorySlugAlreadyExistsError,
 )
@@ -105,6 +114,13 @@ def get_catalog_hard_delete_service(
     return CatalogHardDeleteService(session)
 
 
+def get_catalog_restore_service(
+    session: Annotated[Session, Depends(get_session)],
+) -> CatalogRestoreService:
+    """Provide transactional Catalog restore workflows."""
+    return CatalogRestoreService(session)
+
+
 def get_catalog_test_data_service(
     session: Annotated[Session, Depends(get_session)],
 ) -> CatalogTestDataService:
@@ -124,9 +140,13 @@ def _require_catalog_destructive_access(current_user: User) -> None:
 @router.get("", response_model=list[CategoryRead])
 def list_categories(
     service: Annotated[CategoryService, Depends(get_category_service)],
+    category_status: Annotated[
+        Literal["active", "archived", "all"],
+        Query(alias="status"),
+    ] = "active",
 ) -> Sequence[Category]:
-    """Return all active catalog categories."""
-    return service.list_categories()
+    """Return the requested Category archive slice for navigation or management."""
+    return service.list_categories(category_status)
 
 
 @router.post("", response_model=CategoryRead, status_code=status.HTTP_201_CREATED)
@@ -152,7 +172,7 @@ def create_category(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Parent category is invalid.",
+            detail="Родительская категория недоступна или создаёт цикл.",
         ) from exc
     except Exception:
         session.rollback()
@@ -176,7 +196,7 @@ def create_named_category(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Parent category is invalid.",
+            detail="Родительская категория недоступна или создаёт цикл.",
         ) from exc
     except Exception:
         session.rollback()
@@ -228,7 +248,7 @@ def update_category(
         session.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Parent category is invalid.",
+            detail="Родительская категория недоступна или создаёт цикл.",
         ) from exc
     except Exception:
         session.rollback()
@@ -252,10 +272,53 @@ def delete_category(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Category not found.",
         ) from exc
+    except CategoryArchiveBlockedError as exc:
+        session.rollback()
+        reasons: list[str] = []
+        if exc.product_count:
+            reasons.append(f"В ней находится товаров: {exc.product_count}.")
+        if exc.child_count:
+            reasons.append(f"Дочерних категорий: {exc.child_count}.")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Нельзя архивировать категорию. "
+                + " ".join(reasons)
+                + " Сначала перенесите товары и дочерние категории."
+            ),
+        ) from exc
     except Exception:
         session.rollback()
         raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{category_id}/restore", response_model=CategoryRead)
+def restore_category(
+    category_id: UUIDv7,
+    service: Annotated[CategoryService, Depends(get_category_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Category:
+    """Restore an archived Category when its former hierarchy is available."""
+    try:
+        category = service.restore_category(category_id, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(category)
+        return category
+    except CategoryNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Категория не найдена.") from exc
+    except CategoryRestoreParentError as exc:
+        session.rollback()
+        parent = f" «{exc.parent_title}»" if exc.parent_title else ""
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Нельзя восстановить категорию: родительская категория{parent} недоступна.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @product_router.get("", response_model=list[CatalogProductRead])
@@ -494,6 +557,40 @@ def delete_product(
         session.rollback()
         raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@product_router.post("/{product_id}/restore", response_model=CatalogProductRead)
+def restore_product(
+    product_id: UUIDv7,
+    service: Annotated[CatalogRestoreService, Depends(get_catalog_restore_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogProduct:
+    """Restore one archived Product without changing child Variant states."""
+    try:
+        product = service.restore_product(product_id, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(product)
+        return product
+    except CatalogRestoreNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Товар не найден.") from exc
+    except CatalogProductRestoreCategoryError as exc:
+        session.rollback()
+        category = f" «{exc.category_title}»" if exc.category_title else ""
+        raise HTTPException(
+            status_code=409,
+            detail=f"Нельзя восстановить товар: категория{category} недоступна.",
+        ) from exc
+    except CatalogProductRestoreSlugConflictError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя восстановить товар: служебный адрес уже используется.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @variant_router.get("", response_model=list[CatalogVariantRead])
@@ -772,3 +869,45 @@ def delete_variant(
         session.rollback()
         raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@variant_router.post("/{variant_id}/restore", response_model=CatalogVariantRead)
+def restore_variant(
+    variant_id: UUIDv7,
+    service: Annotated[CatalogRestoreService, Depends(get_catalog_restore_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> CatalogVariant:
+    """Restore one archived Variant under its already-active Product."""
+    try:
+        variant = service.restore_variant(variant_id, actor_id=_actor_id(current_user))
+        session.commit()
+        session.refresh(variant)
+        return variant
+    except CatalogRestoreNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Вариант не найден.") from exc
+    except CatalogVariantRestoreProductError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя восстановить вариант: сначала восстановите товар.",
+        ) from exc
+    except CatalogVariantRestoreSkuConflictError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Нельзя восстановить вариант: SKU {exc.sku} уже используется.",
+        ) from exc
+    except CatalogVariantRestoreBarcodeConflictError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Нельзя восстановить вариант. "
+                f"Штрихкод {exc.barcode} уже используется другим вариантом."
+            ),
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise

@@ -36,6 +36,7 @@ from core.rental.economics_routes import router as rental_economics_router
 from core.rental.lifecycle_routes import router as rental_lifecycle_router
 from core.rental.operations_routes import router as rental_operations_router
 from core.rental.order_routes import router as rental_order_router
+from core.sales.routes import router as sales_router
 from core.supplier.routes import router as supplier_router
 from core.web.routes import router as web_router
 from core.web.routes import static_root as web_static_root
@@ -99,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(rental_operations_router)
     app.include_router(rental_lifecycle_router)
     app.include_router(rental_order_router)
+    app.include_router(sales_router)
     app.include_router(identity_router)
     app.include_router(activity_router)
     app.include_router(web_router)

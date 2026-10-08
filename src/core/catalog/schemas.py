@@ -16,6 +16,24 @@ from core.catalog.barcodes import (
 from core.shared.db import UUIDv7
 
 
+def normalize_variant_attributes(
+    attributes: dict[str, str | int | bool],
+) -> dict[str, str | int | bool]:
+    """Trim human-entered characteristics and reject blank or colliding names."""
+    normalized: dict[str, str | int | bool] = {}
+    for raw_name, raw_value in attributes.items():
+        name = raw_name.strip()
+        if not name:
+            raise ValueError("Characteristic name must not be blank.")
+        if name in normalized:
+            raise ValueError("Characteristic names must be unique after trimming.")
+        value = raw_value.strip() if isinstance(raw_value, str) else raw_value
+        if isinstance(value, str) and not value:
+            raise ValueError("Characteristic value must not be blank.")
+        normalized[name] = value
+    return normalized
+
+
 class CategoryBase(PydanticBaseModel):
     """Shared category fields accepted by API schemas."""
 
@@ -51,11 +69,24 @@ class CategoryQuickCreate(PydanticBaseModel):
 class CategoryUpdate(PydanticBaseModel):
     """Payload for updating a catalog category."""
 
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = Field(default=None, min_length=1, max_length=255)
     slug: str | None = Field(default=None, min_length=1, max_length=255)
     parent_id: UUIDv7 | None = None
     sort_order: int | None = None
     is_active: bool | None = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str | None) -> str | None:
+        """Normalize an operator-entered Category title when it is changed."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Category title must not be blank.")
+        return normalized
 
 
 class CategoryRead(CategoryBase):
@@ -64,6 +95,7 @@ class CategoryRead(CategoryBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUIDv7
+    is_archived: bool
     created_at: datetime
     updated_at: datetime
     version: int
@@ -121,6 +153,15 @@ class CatalogVariantCreate(CatalogVariantBase):
 
     manufacturer_barcode: str | None = Field(default=None, max_length=128)
 
+    @field_validator("attributes")
+    @classmethod
+    def validate_attributes(
+        cls,
+        value: dict[str, str | int | bool],
+    ) -> dict[str, str | int | bool]:
+        """Normalize operator-entered characteristic names and string values."""
+        return normalize_variant_attributes(value)
+
     @field_validator("manufacturer_barcode")
     @classmethod
     def validate_manufacturer_barcode(cls, value: str | None) -> str | None:
@@ -137,6 +178,15 @@ class CatalogVariantUpdate(PydanticBaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     attributes: dict[str, str | int | bool] | None = None
     is_active: bool | None = None
+
+    @field_validator("attributes")
+    @classmethod
+    def validate_attributes(
+        cls,
+        value: dict[str, str | int | bool] | None,
+    ) -> dict[str, str | int | bool] | None:
+        """Normalize changed characteristics while leaving omitted attributes untouched."""
+        return normalize_variant_attributes(value) if value is not None else None
 
 
 class CatalogVariantBarcodeRead(PydanticBaseModel):
