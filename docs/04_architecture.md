@@ -164,6 +164,13 @@ API не должен содержать сложную бизнес-логик�
 - провести продажу;
 - создать договор аренды.
 
+Sales следует тем же слоям: `sales/routes.py` переводит HTTP-команды, `SaleService` владеет
+правилами корзины и транзакциями, а `SaleRepository` — выборками, ownership filters и row locks.
+Первый web client хранит только scoped active-Sale pointer; Sale, SaleItem и totals всегда
+серверные. `CheckoutService` обращается только к `PaymentProvider`/`FiscalProvider`, фиксирует
+durable checkpoints до внешних вызовов и не импортирует AQSI. Cloud API или будущий local SDK
+остаются деталями integration adapters.
+
 ---
 
 ### Repository Layer
@@ -196,9 +203,9 @@ Core не должен зависеть от конкретной внешней
 `Настройки → Интеграции`, а не через SQLAdmin. `Integration` описывает отдельное подключение
 провайдера и не является глобальным singleton. Возможности провайдера (`payment`,
 `fiscalization`, `catalog_projection`, `external_sales_import`, `refunds`) объявляются adapter
-registry в коде независимо друг от друга. Текущий AQSI adapter подтверждает `payment`,
-`fiscalization` и `catalog_projection`; первые две возможности пока используются только
-изолированным spike и не означают наличие постоянного Sales/POS workflow.
+registry в коде независимо друг от друга. Текущий AQSI adapter реализует `payment`,
+`fiscalization` и `catalog_projection`; payment/fiscalization используются постоянным Sales
+checkout, а временный spike остаётся историей физической проверки payload.
 
 Секреты принадлежат `IntegrationCredential` и хранятся только как authenticated ciphertext.
 Core использует Fernet из Python-библиотеки `cryptography` (AES-128-CBC + HMAC-SHA256 по
@@ -375,11 +382,11 @@ Purchase price принадлежит ReceiptItem как исторически�
 
 ## Sales
 
-Sales — отдельный transaction context и будущее рабочее место POS. Он отвечает за Cart, Sale,
-позиции, customer selection, скидки, totals, payment state и fiscalization state. Catalog остаётся
-product reference/master data: Product, Variant, current barcode и ссылки на current Price. Stock
-projection принадлежит Inventory и только читается Sales. Точные имена классов и state machine
-будут утверждены в design Epic 5.
+Sales — отдельный transaction context и рабочее место POS. Sprint 5.1 реализует `Sale` и
+`SaleItem`, состояния `DRAFT`/`CANCELLED`, несколько operator-owned корзин, server-side
+persistence и browser-scoped active selection. Catalog остаётся product reference/master data:
+Product, Variant, current barcode и ссылки на current Price. Stock projection принадлежит
+Inventory и только читается Sales.
 
 Целевой пользовательский поток:
 
@@ -387,38 +394,42 @@ projection принадлежит Inventory и только читается Sal
 2D HID/keyboard scan current operational barcode
     -> resolve active Variant
     -> add quantity 1 to Cart (repeat scan: quantity +1)
-    -> optional text / SKU / barcode search
-    -> optional Customer and percentage discount
-    -> calculate and snapshot totals
-    -> direct AQSI acquiring
-    -> itemized fiscalization
-    -> complete Sale
-    -> immutable Inventory SALE movements
+    -> Catalog as visual picker and cart quantity management
+    -> payment/fiscalization through provider contracts
+    -> confirmed payment creates immutable Inventory SALE movements
+    -> itemized fiscalization completes Sale
+    -> [future] Customer/Loyalty
 ```
 
 Неизвестный barcode даёт ясную операторскую ошибку и не создаёт Product или Variant. Sales
-сохраняет снимки base price, discount, final price, quantity и totals; customer discount не
-изменяет Pricing. Sales является бизнес-источником будущих движений `SALE`, а Inventory остаётся
-неизменяемым ledger.
+сохраняет Catalog snapshots либо manual/open line без Variant. Receipt-level percentage discount
+хранится как subtotal/value/amount/total и детерминированные frozen fiscal allocations. Manual
+line участвует в payment/receipt, но не в Inventory. Sales является бизнес-источником движений
+`SALE` после подтверждённой оплаты, а Inventory остаётся неизменяемым ledger.
 
 Граница AQSI для Sales:
 
 ```text
 Core owns Cart / Sale and final business outcome
-    -> AQSI cloud/device performs acquiring and fiscal operations
+    -> PaymentProvider / FiscalProvider contracts
+    -> AQSI cloud now or a future local SDK/device adapter
     -> Core records payment, fiscalization and Sale result
 ```
 
 Физически подтверждены два integration pattern. Pending Order передаёт itemized order, который
 оператор выбирает в меню AQSI; он полезен для pre-created/remote/pickup orders, но не является
-предпочтительным обычным checkout. Direct checkout запускает acquiring без menu navigation, а
-после оплаты — itemized fiscalization; это целевое направление обычного POS. Временный spike
+предпочтительным обычным checkout. Direct checkout для card/QR запускает acquiring без menu
+navigation, а cash подтверждается оператором без acquiring; после любого метода отдельно
+выполняется itemized fiscalization. Это целевое направление обычного POS. Временный spike
 доказал внешнюю интеграцию, но не является production-архитектурой Sales.
 
-Оба pattern зависят от Internet и AQSI cloud API. Поведение при недоступности, durable duplicate
-payment protection, unknown outcome, acquiring success + fiscalization failure,
-cancellation/refund/reversal и поддерживаемые cash/card/SBP сценарии остаются открытыми решениями
-Epic 5.
+Оба pattern зависят от Internet и AQSI cloud API. Постоянный checkout сохраняет durable duplicate
+payment protection, distinct `CANCELED`/`FAILED`/`UNKNOWN` outcomes и состояние acquiring success
+при fiscalization failure. Definitive cancel/failure возвращает редактируемый DRAFT, но требует
+explicit retry с новым PaymentAttempt; UNKNOWN остаётся заблокированным.
+AQSI direct acquiring по умолчанию использует card/QR mode; card-only и QR-only настраиваются в
+Integration. Refund/reversal остаются будущей работой. Sales не импортирует AQSI: mapping
+находится в integration adapter.
 
 ---
 

@@ -12,6 +12,21 @@
 
 **Stage: Active**
 
+## Explicit parallel delivery — Epic 5 Sales Foundation
+
+**Sprint 5.2 — Checkout, Discount, Payment & Fiscalization: implemented, physical UAT pending.**
+
+This user-requested vertical slice does not replace the active Epic 9 Catalog roadmap. It adds
+operator-owned persistent `DRAFT`/`CANCELLED` Sales, multiple resumable carts, a browser-scoped
+active Sale, global shell indicator, Catalog add actions, a dedicated cart workspace and
+context-aware HID scanner routing with Intake priority. Epic 5.2 adds durable cash/card/QR PaymentAttempt,
+separate Fiscalization, unknown-outcome recovery, exact-once Inventory `SALE` movements after
+confirmed payment, receipt-level percentage discount, manual/open fiscal lines without Inventory,
+terminal cancellation recovery, AQSI card/QR acquiring, separate cash fiscalization and checkout UI.
+Customer/Loyalty and refunds/returns remain outside this slice. Architecture
+and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_workspace.md) and
+[`docs/22_checkout_payment_fiscalization.md`](../docs/22_checkout_payment_fiscalization.md).
+
 ### Current operational assessment
 
 - Intake прошёл несколько серьёзных real-world UAT и операционно достаточно пригоден для
@@ -161,11 +176,87 @@
   `Все + Все` включает все физически существующие Product обеих archive-групп;
 - hard-deleted строки физически отсутствуют и не получают trash/recycle-bin semantics; hard
   delete, bulk actions и изменение базового дизайна Product card в этот slice не входят;
-- `SoftDeleteMixin.restore()` существует как технический primitive, но в Catalog отсутствуют
-  repository/service/route с проверками Product/Variant graph и внешних интеграций. Поэтому
-  действие «Восстановить» намеренно не показано: прямой сброс `deleted_at` из UI не добавлялся;
+- безопасное восстановление поверх `SoftDeleteMixin.restore()` добавлено отдельным application
+  workflow в Sprint 9.12.3b; UI не меняет `deleted_at` напрямую;
 - Sprint 9.12 остаётся активным; desktop и physical iPhone/Safari UAT archive visibility ещё
   предстоит выполнить.
+
+### Sprint 9.12.3b — Restore from Archive (implemented, UAT pending)
+
+- архив Product остаётся только Product-level lifecycle state: текущий archive не каскадирует
+  `deleted_at` в Variant. Поэтому restore возвращает только Product и сохраняет собственное
+  active/archived состояние каждого дочернего Variant;
+- Variant восстанавливается отдельно только под существующим, неархивным и operationally active
+  Product. Если родитель архивирован или inactive, API возвращает понятный blocker и требует
+  сначала восстановить Product; combined restore и bulk restore не добавлялись;
+- Product restore внутри одной транзакции блокирует целевую строку, проверяет существующую
+  активную Category и отсутствие другого active Product с тем же slug. Недоступная Category не
+  заменяется автоматически; archived-card UI пока не позволяет переназначить её, поэтому такой
+  Product остаётся в архиве до отдельного category-correction flow;
+- Variant restore сохраняет системные SKU и barcode без регенерации. Перед снятием archive marker
+  повторно проверяются active owner SKU, operational barcode и current barcode history; конфликт
+  блокирует restore без изменения Variant;
+- restore меняет только lifecycle marker и audit updater. Stock ledger, Price, Intake/Receipt,
+  RentalAsset/history, TEST scope и ImageLink остаются прежними и не дублируются;
+- AQSI `Publication`/attempt state сохраняется дословно; restore не запускает публикацию или
+  resync и не утверждает, что remote AQSI synchronized;
+- кнопки «Восстановить товар» и «Восстановить вариант» видимы внутри тех же archived cards в
+  `status=archived|all`. Product использует спокойное подтверждение, Variant — immediate action с
+  feedback; после успеха Catalog перечитывается с тем же URL-backed mode/status/search state;
+- mobile использует те же действия с touch target не меньше 44 px и существующий bottom-sheet
+  confirmation; desktop и physical iPhone/Safari UAT restore flows ещё предстоит выполнить.
+
+### Sprint 9.12.4a — Category Management (implemented, UAT pending)
+
+- обычный Catalog получил явную точку входа «Управление категориями» рядом с существующим
+  деревом и быстрым созданием; SQLAdmin, технический slug и raw parent ids оператору не нужны;
+- Category сохраняет существующую single-parent hierarchy. Создание и редактирование принимают
+  только название и optional parent, а все picker показывают полный путь вида
+  «Канцелярия › Ручки»; Product по-прежнему имеет ровно одну primary Category;
+- backend под row lock проверяет существование и operational availability parent, запрещает self
+  parent, перенос под любого descendant и уже повреждённые циклические ancestor chains;
+- archive остаётся soft-delete и разрешён только пустой leaf Category. Реальные counts активных
+  Product и non-archived child Category блокируют операцию; товары не переносятся, дети не
+  перепривязываются, hard delete Category не добавлялся;
+- archived management view отделён от обычного дерева/picker. Restore возвращает Category с тем
+  же parent и блокируется, если прежний parent отсутствует, archived или inactive; silent move в
+  root не выполняется;
+- Product create/edit/reassignment pickers используют только active, non-archived Category и
+  читаемые hierarchy paths. Rename/move сразу учитываются существующим server-side Catalog
+  descendant filter;
+- `sort_order` сохраняется как существующее системное поле и продолжает задавать стабильный
+  sibling order с title tie-breaker. Ручное ordering и drag-and-drop отложены: текущей
+  операционной потребности для усложнения UI нет;
+- mobile использует тот же management bottom sheet, одно-колоночные строки и touch actions не
+  меньше 44 px; physical iPhone/Safari UAT ещё предстоит выполнить;
+- Supplier management остаётся отдельным следующим slice и этим изменением не считается
+  завершённым.
+
+### Catalog Product Detail Refinement (implemented, UAT pending)
+
+- крупный Product-level Info block удалён: SKU остаётся Variant identity, количество Variant
+  видно в списке, а нулевая Rental analytics больше не доминирует в обычной sale-only карточке;
+- раскрываемое «Управление товаром» сохранено только для Product fields и существующего flow
+  «Добавить вариант»; Variant-specific редактирование находится внутри соответствующей карточки;
+- `CatalogVariant.attributes` остаётся Variant-owned JSON mapping без миграции, но технический
+  JSON editor полностью заменён на «Характеристики» с парами «Название / Значение», отдельными
+  add/edit/delete actions и optional builder при создании Variant;
+- новые и изменённые характеристики нормализуют окружающие пробелы; пустые имя/строковое
+  значение и совпадение имён после trim отклоняются backend. Существующие `bool`/`int` значения
+  читаются без изменения, а введённое оператором новое значение сохраняется строкой;
+- generic «Редактировать» удалено. Название Variant меняется отдельным действием рядом с
+  названием, PATCH не включает attributes или SKU, а SKU остаётся read-only;
+- полный Rental block показывается только Variant с актуальными RentalAsset. Variant без них
+  сохраняет компактную точку входа «Выделить в аренду», а Product без RentalAsset не показывает
+  пустой Product-level Rental section;
+- Product и Variant сохраняют независимые primary `ImageLink`; Variant по-прежнему использует
+  Product primary как fallback. Product теперь использует Variant primary только когда своего
+  primary нет и найден ровно один однозначный Variant primary; файлы не копируются;
+- Inventory adjustment показывает существующие причины по-русски и принимает новый фактический
+  остаток, но отправляет вычисленную delta в прежний append-only ledger workflow. Для `other`
+  комментарий обязателен; новые enum members не добавлялись;
+- автоматические проверки реализованы; desktop и physical iPhone/Safari UAT этого refinement
+  остаётся выполнить по приложенному сценарию.
 
 ### Administrative feature — Test Data Purge (implemented, UAT pending)
 

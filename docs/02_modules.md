@@ -194,20 +194,28 @@ Inventory
 
 # Sales
 
-Отдельный будущий transaction context и POS workspace.
+Серверный transaction context и mobile-first POS workspace. Sprint 5.1 реализует несколько
+operator-owned `DRAFT Sale`, отмену, server-side cart persistence, commercial snapshots,
+переключение active Sale в browser workspace, Catalog add flow и context-aware HID scanner.
+Sprint 5.2 добавляет receipt-level percentage discount, manual/open SaleItem, durable cash/card/QR
+checkout, PaymentAttempt, Fiscalization, recovery и completion.
 
 Отвечает за:
 
 - Cart и Sale lifecycle;
-- позиции и снимки цены/скидки;
-- customer selection;
-- totals;
-- payment и fiscalization state;
-- создание immutable Inventory `SALE` movements после успешного бизнес-результата.
+- Catalog/manual позиции и снимки текущей базовой цены;
+- subtotal, процентную скидку, deterministic fiscal allocation и payable total;
+- payment/fiscalization state через generic provider ports;
+- создание immutable Inventory `SALE` movements после подтверждённой оплаты;
+- будущий customer selection/Loyalty.
 
 Sales использует Catalog для Variant reference/current lookup и Pricing для base current price,
 но не является действием Catalog. AQSI остаётся внешним acquiring/fiscal adapter. Первый-class
-POS input — 2D hardware scanner в HID/keyboard mode; повторный scan увеличивает quantity.
+POS input — hardware scanner в HID/keyboard mode; повторный scan увеличивает quantity. Intake
+имеет приоритетный локальный scanner context. Подробные решения Sprint 5.1 описаны в
+[`21_sales_workspace.md`](21_sales_workspace.md).
+Checkout decisions и failure semantics описаны в
+[`22_checkout_payment_fiscalization.md`](22_checkout_payment_fiscalization.md).
 
 ---
 

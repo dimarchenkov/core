@@ -54,23 +54,44 @@ Movement является источником истины для остатк�
 
 ## Sale
 
-Транзакционный контекст подтверждённой продажи. Sale владеет Cart/Sale lifecycle, выбором клиента,
-итогами, payment state и fiscalization state; он не является действием Catalog.
+Транзакционный контекст продажи. Несколько operator-owned `DRAFT` могут существовать
+одновременно; Active Sale является browser-workspace selection, а не server-global состоянием.
+Checkout замораживает Cart и проводит Sale через `PAYMENT_PENDING`, `PAID`,
+`FISCALIZATION_PENDING` к `COMPLETED`; определённые ошибки сохраняются как `PAYMENT_FAILED` или
+`FISCALIZATION_FAILED`. `CANCELLED` доступен только из DRAFT.
 
-После успешного проведения Sale создаёт отрицательные immutable Movement типа `SALE`. Inventory
-не обязан знать детали кассы или канала продаж: он получает контролируемое движение с источником.
+Sale хранит receipt-level процентную скидку отдельными snapshot-фактами: subtotal, процент,
+discount amount и payable total. Definitive payment `FAILED/CANCELED` остаётся в истории попыток и
+возвращает Sale в редактируемый DRAFT; `UNKNOWN` сохраняет блокировку.
+
+Подтверждённая оплата создаёт отрицательные immutable Movement типа `SALE` exactly once до
+фискализации. Ошибка чека не отменяет оплату и складской факт. DRAFT/CANCELLED Inventory не меняют.
+
+## PaymentAttempt
+
+Отдельный факт оплаты: frozen amount, метод, optional Integration/provider operation ID,
+idempotency identity и результат. `CARD` использует acquiring provider; подтверждённый оператором
+`CASH` сразу хранится как `SUCCEEDED` с provider/Integration `NULL`. `UNKNOWN` не равен `FAILED` и
+запрещает слепую новую оплату.
+
+## Fiscalization
+
+Отдельное обязательство сформировать itemized receipt по SaleItem snapshots через собственную
+Integration/FiscalProvider. Оно существует и для CASH, и для CARD/QR; его состояние и retry не
+изменяют успешный PaymentAttempt и не создают повторные Inventory movements.
 
 ## SaleItem
 
-Историческая позиция Sale. Она ссылается на разрешённый в момент checkout Variant и сохраняет
-достаточный snapshot для реконструкции base unit price, applied discount, final unit price,
-quantity и line total. Изменение будущей цены Variant не переписывает SaleItem.
+Историческая позиция Sale. `CATALOG` snapshot хранит Variant и Product/Variant label, SKU, barcode,
+unit price и quantity. `MANUAL` snapshot не имеет Variant и требует только name, price и quantity.
+Оба вида получают frozen fiscal allocation после receipt discount. Изменение будущего Catalog или
+Price не переписывает SaleItem; Manual item участвует в чеке, но не в Inventory.
 
 ## Cart
 
-Редактируемая подготовка Sale в отдельном POS workspace. Текущий operational barcode разрешает
+Редактируемая часть DRAFT Sale в отдельном POS workspace. Текущий operational barcode разрешает
 Variant и добавляет одну единицу; повторный scan увеличивает количество. Неизвестный barcode не
-создаёт Catalog entities. Точный lifecycle Cart определяется в Epic 5.
+создаёт Catalog entities. Отложенная корзина остаётся DRAFT без отдельного `ON_HOLD` state.
 
 ## Customer
 
