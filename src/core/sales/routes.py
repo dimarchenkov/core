@@ -26,7 +26,7 @@ from core.sales.checkout import (
     CheckoutService,
     CheckoutStateError,
 )
-from core.sales.enums import PaymentMethod, SaleStatus
+from core.sales.enums import CheckoutPaymentOption, FiscalizationStatus, SaleStatus
 from core.sales.models import Sale
 from core.sales.providers import CheckoutProviderBinding
 from core.sales.schemas import (
@@ -71,14 +71,23 @@ def _checkout_binding(
     sale: Sale,
     *,
     for_new: bool = False,
-) -> CheckoutProviderBinding:
+    payment_option: CheckoutPaymentOption | None = None,
+) -> CheckoutProviderBinding | None:
     """Resolve a new or persisted Integration without legacy environment fallback."""
+    if payment_option is CheckoutPaymentOption.CASH_WITHOUT_RECEIPT:
+        return None
     factory = CheckoutProviderFactory(session, settings)
     if for_new or not sale.payments:
         return factory.for_new_checkout()
     if sale.fiscalization is not None:
+        if sale.fiscalization.status is FiscalizationStatus.SKIPPED:
+            return None
+        if sale.fiscalization.integration_id is None:
+            raise CheckoutIntegrationUnavailableError("Не найдена касса для фискального чека")
         return factory.for_recovery(sale.fiscalization.integration_id)
     latest = max(sale.payments, key=lambda item: item.attempt_number)
+    if not latest.fiscalization_required:
+        return None
     if latest.integration_id is None:
         return factory.for_new_checkout()
     return factory.for_recovery(latest.integration_id)
@@ -185,8 +194,9 @@ def checkout_context(
         )
     except CheckoutIntegrationUnavailableError as exc:
         return CheckoutContextRead(
-            available=False,
-            message=str(exc),
+            available=True,
+            message=f"{exc}. Доступна оплата наличными без чека.",
+            fiscalization_available=False,
             stock_warnings=warnings,
         )
     try:
@@ -197,10 +207,11 @@ def checkout_context(
             integration_name=binding.integration_name,
             provider_name=binding.provider_display_name,
             acquiring_label=binding.payment_display_name,
+            fiscalization_available=True,
             stock_warnings=warnings,
         )
     finally:
-        if binding.close is not None:
+        if binding is not None and binding.close is not None:
             binding.close()
 
 
@@ -219,7 +230,7 @@ def start_checkout(
         sale_id,
         current_user.id,
         "start",
-        payment_method=data.payment_method,
+        payment_option=data.payment_option,
     )
 
 
@@ -249,7 +260,7 @@ def retry_payment(
         sale_id,
         current_user.id,
         "retry_payment",
-        payment_method=data.payment_method,
+        payment_option=data.payment_option,
     )
 
 
@@ -271,7 +282,7 @@ def _run_checkout(
     owner_id: UUIDv7,
     command: str,
     *,
-    payment_method: PaymentMethod = PaymentMethod.CARD,
+    payment_option: CheckoutPaymentOption = CheckoutPaymentOption.CARD,
 ) -> Sale:
     """Resolve one Integration and translate checkout failures into stable API errors."""
     try:
@@ -282,6 +293,9 @@ def _run_checkout(
             sale,
             for_new=command in {"start", "retry_payment"}
             and sale.status is SaleStatus.DRAFT,
+            payment_option=(
+                payment_option if command in {"start", "retry_payment"} else None
+            ),
         )
     except SaleNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
@@ -293,7 +307,7 @@ def _run_checkout(
             return checkout.start(
                 sale_id,
                 owner_id=owner_id,
-                payment_method=payment_method,
+                payment_option=payment_option,
             )
         if command == "progress":
             return checkout.progress(sale_id, owner_id=owner_id)
@@ -301,7 +315,7 @@ def _run_checkout(
             return checkout.retry_payment(
                 sale_id,
                 owner_id=owner_id,
-                payment_method=payment_method,
+                payment_option=payment_option,
             )
         if command == "retry_fiscalization":
             return checkout.retry_fiscalization(sale_id, owner_id=owner_id)
@@ -318,7 +332,7 @@ def _run_checkout(
     except CheckoutStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
-        if binding.close is not None:
+        if binding is not None and binding.close is not None:
             binding.close()
 
 

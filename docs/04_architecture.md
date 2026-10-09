@@ -419,8 +419,10 @@ Core owns Cart / Sale and final business outcome
 Физически подтверждены два integration pattern. Pending Order передаёт itemized order, который
 оператор выбирает в меню AQSI; он полезен для pre-created/remote/pickup orders, но не является
 предпочтительным обычным checkout. Direct checkout для card/QR запускает acquiring без menu
-navigation, а cash подтверждается оператором без acquiring; после любого метода отдельно
-выполняется itemized fiscalization. Это целевое направление обычного POS. Временный spike
+navigation и всегда выполняет itemized fiscalization. Cash подтверждается оператором без
+acquiring: вариант «+ чек» вызывает только FiscalProvider, вариант «без чека» сохраняет
+`Fiscalization.SKIPPED` без внешнего вызова. Глобального fiscalization toggle нет. Это целевое
+направление обычного POS. Временный spike
 доказал внешнюю интеграцию, но не является production-архитектурой Sales.
 
 Оба pattern зависят от Internet и AQSI cloud API. Постоянный checkout сохраняет durable duplicate

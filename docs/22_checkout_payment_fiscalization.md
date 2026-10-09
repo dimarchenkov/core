@@ -2,8 +2,8 @@
 
 ## Граница реализации
 
-Epic 5.2 проводит frozen Sale от редактируемой корзины через оплату наличными или картой/QR к itemized fiscal
-receipt. В Sale разрешены Catalog и manual/open позиции, а оператор может применить одну
+Epic 5.2 проводит frozen Sale от редактируемой корзины через card/QR или один из двух явно
+выбранных cash-сценариев. В Sale разрешены Catalog и manual/open позиции, а оператор применяет
 receipt-level процентную скидку. Возвраты, refund, Customer/Loyalty, promo codes и local
 SDK не входят в этап. AQSI Cloud API остаётся текущим adapter; Sales зависит только от generic
 `PaymentProvider` и `FiscalProvider`.
@@ -79,6 +79,11 @@ card data, API key, authorization headers и raw provider response не сохр
 вызывается. Row lock, уникальные attempt number/idempotency key и replay существующего успешного
 cash-факта защищают от двойного клика.
 
+PaymentAttempt также фиксирует `fiscalization_required`. Card/QR всегда требует чек: публичного
+варианта card-without-receipt нет, а инвариант дополнительно защищён constraint базы. Cash
+предлагает два явных варианта: «Наличными + чек» (`true`) и «Наличными без чека» (`false`). Это
+решение относится только к конкретной продаже; глобального выключателя фискализации нет.
+
 Первый DRAFT transition защищён row lock. Core коммитит `PAYMENT_PENDING` и PaymentAttempt до
 Cloud call. Double click/tab/replay видит тот же pending attempt и не вызывает acquiring повторно.
 После `FAILED/CANCELED` новая попытка имеет новый attempt number/idempotency key и создаётся только
@@ -110,10 +115,14 @@ manual items. Receipt total обязан совпасть с payment/Sale total 
 Sale в `COMPLETED`. При definite receipt failure Sale остаётся оплаченной с
 `FISCALIZATION_FAILED`; retry повторяет только fiscal obligation и не создаёт payment/Inventory.
 
-Fiscalization не зависит от наличия acquiring provider в PaymentAttempt. Для cash Sale она
-создаётся через настроенный FiscalProvider и передаёт AQSI отдельную оплату чека type `0` без
-эквайрингового Slip; для card/QR используется type `1` с подтверждённым Slip. Наличные никогда не
-означают «чек не требуется».
+Fiscalization не зависит от наличия acquiring provider в PaymentAttempt. Для «Наличными + чек»
+она создаётся через настроенный FiscalProvider и передаёт AQSI отдельную оплату чека type `0` без
+эквайрингового Slip; для card/QR используется type `1` с подтверждённым Slip.
+
+Для «Наличными без чека» Core не вызывает PaymentProvider или FiscalProvider. После точного
+Inventory posting создаётся durable Fiscalization со статусом `SKIPPED`, без provider/Integration,
+и Sale становится `COMPLETED`. `SKIPPED` является отдельным намеренным фактом, а не success,
+failure или unknown; история показывает «Фискальный чек — Не формировался».
 
 ## Recovery, несколько продаж и безопасность
 

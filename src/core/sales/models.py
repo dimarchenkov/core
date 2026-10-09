@@ -197,6 +197,10 @@ class PaymentAttempt(BaseModel):
             "(payment_method = 'card' AND integration_id IS NOT NULL AND provider IS NOT NULL)",
             name="ck_payment_attempts_method_provider",
         ),
+        CheckConstraint(
+            "payment_method != 'card' OR fiscalization_required",
+            name="ck_payment_attempts_card_requires_fiscalization",
+        ),
         UniqueConstraint("sale_id", "attempt_number", name="uq_payment_attempts_sale_number"),
         UniqueConstraint("idempotency_key", name="uq_payment_attempts_idempotency_key"),
     )
@@ -216,6 +220,11 @@ class PaymentAttempt(BaseModel):
         nullable=False,
     )
     requested_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    fiscalization_required: Mapped[bool] = mapped_column(
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="RUB")
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     status: Mapped[PaymentStatus] = mapped_column(
@@ -242,6 +251,11 @@ class Fiscalization(BaseModel):
     __tablename__ = "fiscalizations"
     __table_args__ = (
         CheckConstraint("fiscal_amount > 0", name="ck_fiscalizations_amount_positive"),
+        CheckConstraint(
+            "(status = 'skipped' AND integration_id IS NULL AND provider IS NULL) OR "
+            "(status != 'skipped' AND integration_id IS NOT NULL AND provider IS NOT NULL)",
+            name="ck_fiscalizations_status_provider",
+        ),
         UniqueConstraint("sale_id", name="uq_fiscalizations_sale_id"),
         UniqueConstraint("idempotency_key", name="uq_fiscalizations_idempotency_key"),
     )
@@ -252,12 +266,12 @@ class Fiscalization(BaseModel):
     payment_attempt_id: Mapped[UUIDv7] = mapped_column(
         ForeignKey("payment_attempts.id", ondelete="RESTRICT"), nullable=False, unique=True
     )
-    integration_id: Mapped[UUIDv7] = mapped_column(
-        ForeignKey("integrations.id", ondelete="RESTRICT"), nullable=False, index=True
+    integration_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("integrations.id", ondelete="RESTRICT"), nullable=True, index=True
     )
-    provider: Mapped[IntegrationProvider] = mapped_column(
+    provider: Mapped[IntegrationProvider | None] = mapped_column(
         Enum(IntegrationProvider, name="integration_provider", values_callable=_enum_values),
-        nullable=False,
+        nullable=True,
     )
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     external_receipt_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

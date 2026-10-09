@@ -22,7 +22,7 @@ active Sale, global shell indicator, Catalog add actions, a dedicated cart works
 context-aware HID scanner routing with Intake priority. Epic 5.2 adds durable cash/card/QR PaymentAttempt,
 separate Fiscalization, unknown-outcome recovery, exact-once Inventory `SALE` movements after
 confirmed payment, receipt-level percentage discount, manual/open fiscal lines without Inventory,
-terminal cancellation recovery, AQSI card/QR acquiring, separate cash fiscalization and checkout UI.
+terminal cancellation recovery, AQSI card/QR acquiring, explicit cash receipt/skipped choice and checkout UI.
 Customer/Loyalty and refunds/returns remain outside this slice. Architecture
 and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_workspace.md) and
 [`docs/22_checkout_payment_fiscalization.md`](../docs/22_checkout_payment_fiscalization.md).

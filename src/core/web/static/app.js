@@ -903,7 +903,9 @@ function renderCheckoutState(sale) {
     fiscalization_pending: fiscal?.status === "unknown"
       ? ["⚠ Оплата прошла, статус чека пока неизвестен", "Проверяем AQSI. Повторная оплата запрещена."]
       : ["✓ Оплата прошла", "Формируем фискальный чек…"],
-    completed: ["✓ Продажа завершена", "Оплата подтверждена, товар списан, чек фискализирован."],
+    completed: fiscal?.status === "skipped"
+      ? ["✓ Продажа завершена", "Оплата подтверждена, товар списан, фискальный чек не формировался."]
+      : ["✓ Продажа завершена", "Оплата подтверждена, товар списан, чек фискализирован."],
     payment_failed: ["⚠ Оплата не выполнена", "Можно явно создать новую попытку оплаты."],
     fiscalization_failed: ["⚠ Оплата прошла, но чек не сформирован", "Повторяйте только формирование чека, не оплату."],
   };
@@ -912,9 +914,15 @@ function renderCheckoutState(sale) {
     : ["Оплата не выполнена", "Деньги не списаны. Продажу можно изменить и оплатить снова."];
   const [title, detail] = sale.status === "draft" ? draftOutcome : messages[sale.status] || ["Состояние продажи", sale.status];
   const paymentLabels = { succeeded: "✓ Оплачено", canceled: "Отменено на терминале", failed: "Не выполнено", unknown: "Результат неизвестен", pending: "Ожидается" };
-  const paymentMethodLabel = payment?.payment_method === "cash" ? "Наличные" : "Карта / QR";
-  const paymentSummary = payment ? `<div><span>Оплата</span><strong>${paymentMethodLabel} · ${formatMoney(payment.requested_amount)}</strong><small>${escapeHtml(paymentLabels[payment.status] || payment.status)}${payment.external_id ? ` · ${escapeHtml(payment.external_id)}` : ""}</small></div>` : "";
-  const fiscalSummary = fiscal ? `<div><span>Чек</span><strong>${fiscal.status === "succeeded" ? "✓ Фискализирован" : escapeHtml(fiscal.status)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}</div>` : "";
+  const paymentMethodLabel = payment?.payment_method === "cash" ? "Наличными" : "Карта / QR";
+  const paidLabel = payment?.status === "succeeded" ? `✓ ${paymentMethodLabel}` : paymentMethodLabel;
+  const paymentSummary = payment ? `<div><span>Оплата</span><strong>${paidLabel} · ${formatMoney(payment.requested_amount)}</strong><small>${escapeHtml(paymentLabels[payment.status] || payment.status)}${payment.external_id ? ` · ${escapeHtml(payment.external_id)}` : ""}</small></div>` : "";
+  const fiscalStatusLabel = fiscal?.status === "succeeded"
+    ? "✓ Фискализирован"
+    : fiscal?.status === "skipped"
+      ? "— Не формировался"
+      : fiscal?.status;
+  const fiscalSummary = fiscal ? `<div><span>Фискальный чек</span><strong>${escapeHtml(fiscalStatusLabel)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}</div>` : "";
   const action = sale.status === "draft" && ["canceled", "failed"].includes(payment?.status)
     ? '<div class="checkout-recovery-actions"><button class="button" id="retry-draft-payment" type="button">Повторить оплату</button><button class="button secondary" id="return-to-sale" type="button">Вернуться к продаже</button></div>'
     : sale.status === "payment_failed"
@@ -952,35 +960,46 @@ async function openCheckoutConfirmation(sale) {
     const dialog = document.createElement("dialog");
     dialog.className = "label-dialog checkout-dialog";
     const acquiringLabel = context.acquiring_label || "Карта / QR";
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">Подтверждение оплаты</p><h2>Продажа #${sale.sale_number}</h2><div class="checkout-facts"><span>${sale.item_quantity} поз.</span><span>Подытог: ${formatMoney(sale.subtotal_amount)}</span>${Number(sale.discount_amount) > 0 ? `<span>Скидка: −${formatMoney(sale.discount_amount)}</span>` : ""}<strong>К оплате: ${formatMoney(sale.total_amount)}</strong></div><fieldset class="checkout-method-options"><legend>Способ оплаты</legend><label><input type="radio" name="payment_method" value="cash"> <span><strong>Наличными</strong><small>Эквайринг не запускается</small></span></label><label><input type="radio" name="payment_method" value="card" checked> <span><strong>${escapeHtml(acquiringLabel)}</strong><small>Оплата на устройстве AQSI</small></span></label></fieldset><div class="checkout-method"><span class="muted small">Касса для фискального чека</span><strong>${escapeHtml(context.integration_name)}</strong><span class="muted small" id="checkout-method-note">На устройстве откроется экран ${escapeHtml(acquiringLabel.toLowerCase())}</span></div>${warnings}<div class="sale-actions"><button class="button secondary" value="cancel">Отмена</button><button class="button" id="confirm-checkout" value="default">Оплатить ${formatMoney(sale.total_amount)}</button></div></form>`;
+    const providerDisabled = context.fiscalization_available ? "" : "disabled";
+    const defaultCard = context.fiscalization_available ? "checked" : "";
+    const defaultCashWithoutReceipt = context.fiscalization_available ? "" : "checked";
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">Подтверждение оплаты</p><h2>Продажа #${sale.sale_number}</h2><div class="checkout-facts"><span>${sale.item_quantity} поз.</span><span>Подытог: ${formatMoney(sale.subtotal_amount)}</span>${Number(sale.discount_amount) > 0 ? `<span>Скидка: −${formatMoney(sale.discount_amount)}</span>` : ""}<strong>К оплате: ${formatMoney(sale.total_amount)}</strong></div><fieldset class="checkout-method-options"><legend>Способ оплаты</legend><label><input type="radio" name="payment_option" value="card" ${defaultCard} ${providerDisabled}> <span><strong>${escapeHtml(acquiringLabel)}</strong><small>Оплата и чек через AQSI</small></span></label><label><input type="radio" name="payment_option" value="cash_with_receipt" ${providerDisabled}> <span><strong>Наличными + чек</strong><small>Наличные, фискальный чек через AQSI</small></span></label><label><input type="radio" name="payment_option" value="cash_without_receipt" ${defaultCashWithoutReceipt}> <span><strong>Наличными без чека</strong><small>Продажа будет учтена в Core без отправки на кассу</small></span></label></fieldset><div class="cash-amount hidden" id="cash-amount"><span>К получению</span><strong>${formatMoney(sale.total_amount)}</strong></div><div class="checkout-method"><span class="muted small">Касса для фискального чека</span><strong id="checkout-fiscal-provider">${context.fiscalization_available ? escapeHtml(context.integration_name) : "Не настроена"}</strong><span class="muted small checkout-method-note" id="checkout-method-note"></span></div>${warnings}<div class="sale-actions"><button class="button secondary" value="cancel">Отмена</button><button class="button" id="confirm-checkout" value="default"></button></div></form>`;
     document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove());
     const confirm = dialog.querySelector("#confirm-checkout");
     const updateMethod = () => {
-      const method = dialog.querySelector('input[name="payment_method"]:checked').value;
-      confirm.textContent = method === "cash" ? "Получено наличными" : `Оплатить ${formatMoney(sale.total_amount)}`;
-      dialog.querySelector("#checkout-method-note").textContent = method === "cash"
-        ? "AQSI acquiring не запускается; фискальный чек формируется отдельно"
-        : `На устройстве откроется экран ${acquiringLabel.toLowerCase()}`;
+      const option = dialog.querySelector('input[name="payment_option"]:checked').value;
+      const isCash = option.startsWith("cash_");
+      confirm.textContent = isCash ? "Получено наличными" : `Оплатить ${formatMoney(sale.total_amount)}`;
+      dialog.querySelector("#cash-amount").classList.toggle("hidden", !isCash);
+      dialog.querySelector("#checkout-method-note").textContent = option === "cash_without_receipt"
+        ? "На кассу ничего не отправляется"
+        : option === "cash_with_receipt"
+          ? "Acquiring не запускается; на AQSI отправляется только наличный чек"
+          : `На устройстве откроется экран ${acquiringLabel.toLowerCase()}, затем сформируется чек`;
+      dialog.querySelector("#checkout-fiscal-provider").textContent = option === "cash_without_receipt"
+        ? "Не используется"
+        : context.integration_name || "Не настроена";
     };
-    dialog.querySelectorAll('input[name="payment_method"]').forEach((input) => input.addEventListener("change", updateMethod));
+    dialog.querySelectorAll('input[name="payment_option"]').forEach((input) => input.addEventListener("change", updateMethod));
+    updateMethod();
     confirm.addEventListener("click", (event) => {
       event.preventDefault();
-      const paymentMethod = dialog.querySelector('input[name="payment_method"]:checked').value;
+      const paymentOption = dialog.querySelector('input[name="payment_option"]:checked').value;
       dialog.close();
       const latest = sale.payments?.[sale.payments.length - 1];
       const retry = ["canceled", "failed"].includes(latest?.status);
-      void executeCheckoutCommand(sale.id, retry ? "retry-payment" : "", paymentMethod);
+      void executeCheckoutCommand(sale.id, retry ? "retry-payment" : "", paymentOption);
     });
     dialog.showModal();
   } catch (error) { showToast(error.message, true); }
 }
 
-async function executeCheckoutCommand(saleId, suffix, paymentMethod = null) {
+async function executeCheckoutCommand(saleId, suffix, paymentOption = null) {
   try {
     const path = `/api/sales/${saleId}/checkout${suffix ? `/${suffix}` : ""}`;
     const options = { method: "POST" };
-    if (paymentMethod) options.body = JSON.stringify({ payment_method: paymentMethod });
+    if (paymentOption) options.body = JSON.stringify({ payment_option: paymentOption });
     const sale = await api(path, options);
     rememberSale(sale);
     renderSalesWorkspace(sale);

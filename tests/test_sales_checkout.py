@@ -33,6 +33,7 @@ from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.sales.checkout import CheckoutService, CheckoutStateError
 from core.sales.enums import (
+    CheckoutPaymentOption,
     FiscalizationStatus,
     PaymentMethod,
     PaymentStatus,
@@ -49,6 +50,7 @@ from core.sales.providers import (
     ProviderOperation,
     ProviderOutcomeState,
 )
+from core.sales.schemas import CheckoutStartRequest
 from core.sales.service import SaleNotDraftError, SaleService
 from core.shared.db import Base
 from core.shared.db.types import generate_uuid_v7
@@ -233,7 +235,7 @@ def test_unknown_payment_blocks_blind_second_charge(
     assert len(provider.payment_initiations) == 1
 
 
-def test_cash_confirmation_skips_acquiring_and_is_idempotent(
+def test_cash_with_receipt_skips_acquiring_and_is_idempotent(
     session: Session,
     checkout_setup: tuple[
         User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
@@ -247,12 +249,12 @@ def test_cash_confirmation_skips_acquiring_and_is_idempotent(
     confirmed = checkout.start(
         sale.id,
         owner_id=user.id,
-        payment_method=PaymentMethod.CASH,
+        payment_option=CheckoutPaymentOption.CASH_WITH_RECEIPT,
     )
     repeated = checkout.start(
         sale.id,
         owner_id=user.id,
-        payment_method=PaymentMethod.CASH,
+        payment_option=CheckoutPaymentOption.CASH_WITH_RECEIPT,
     )
 
     assert provider.payment_initiations == []
@@ -262,6 +264,7 @@ def test_cash_confirmation_skips_acquiring_and_is_idempotent(
     assert payment.status is PaymentStatus.SUCCEEDED
     assert payment.provider is None
     assert payment.integration_id is None
+    assert payment.fiscalization_required is True
     assert payment.requested_amount == repeated.total_amount == Decimal("24.68")
     assert repeated.status is SaleStatus.FISCALIZATION_PENDING
     assert repeated.fiscalization is not None
@@ -269,6 +272,87 @@ def test_cash_confirmation_skips_acquiring_and_is_idempotent(
     assert len(provider.fiscal_initiations) == 1
     assert provider.fiscal_initiations[0].payment_method is PaymentMethod.CASH
     assert provider.fiscal_initiations[0].payment_evidence is None
+    assert session.query(StockMovement).count() == 1
+
+    provider.fiscal_state = ProviderOperation(
+        ProviderOutcomeState.SUCCEEDED,
+        external_id="fiscal-operation-1",
+        external_reference="cash-receipt-1",
+    )
+    completed = checkout.progress(sale.id, owner_id=user.id)
+
+    assert completed.status is SaleStatus.COMPLETED
+    assert completed.fiscalization.status is FiscalizationStatus.SUCCEEDED
+    assert session.query(StockMovement).count() == 1
+
+
+def test_cash_without_receipt_completes_without_any_provider_call(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Explicit no-receipt cash records SKIPPED and exact-once Catalog Inventory."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant, quantity=2)
+    sale = SaleService(session).add_manual_item(
+        sale.id,
+        "Разовая услуга",
+        Decimal("5.00"),
+        1,
+        owner_id=user.id,
+    )
+    checkout = CheckoutService(session, binding)
+
+    completed = checkout.start(
+        sale.id,
+        owner_id=user.id,
+        payment_option=CheckoutPaymentOption.CASH_WITHOUT_RECEIPT,
+    )
+    repeated = checkout.start(
+        sale.id,
+        owner_id=user.id,
+        payment_option=CheckoutPaymentOption.CASH_WITHOUT_RECEIPT,
+    )
+
+    assert completed.status is repeated.status is SaleStatus.COMPLETED
+    assert len(repeated.payments) == 1
+    assert repeated.payments[0].payment_method is PaymentMethod.CASH
+    assert repeated.payments[0].status is PaymentStatus.SUCCEEDED
+    assert repeated.payments[0].fiscalization_required is False
+    assert repeated.payments[0].requested_amount == repeated.total_amount
+    assert repeated.fiscalization is not None
+    assert repeated.fiscalization.status is FiscalizationStatus.SKIPPED
+    assert repeated.fiscalization.provider is None
+    assert repeated.fiscalization.integration_id is None
+    assert provider.payment_initiations == []
+    assert provider.fiscal_initiations == []
+    movements = session.query(StockMovement).all()
+    assert len(movements) == 1
+    assert movements[0].quantity_delta == Decimal("-2")
+
+
+def test_card_checkout_has_no_supported_skip_fiscalization_option(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """The public command has no card-without-receipt state and CARD remains required."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+
+    started = CheckoutService(session, binding).start(
+        sale.id,
+        owner_id=user.id,
+        payment_option=CheckoutPaymentOption.CARD,
+    )
+
+    assert started.payments[0].payment_method is PaymentMethod.CARD
+    assert started.payments[0].fiscalization_required is True
+    assert len(provider.payment_initiations) == 1
+    with pytest.raises(ValueError):
+        CheckoutStartRequest.model_validate({"payment_option": "card_without_receipt"})
 
 
 def test_definite_payment_failure_allows_new_attempt_only_via_explicit_retry(

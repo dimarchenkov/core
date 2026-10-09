@@ -206,6 +206,7 @@ checkout, PaymentAttempt, Fiscalization, recovery и completion.
 - Catalog/manual позиции и снимки текущей базовой цены;
 - subtotal, процентную скидку, deterministic fiscal allocation и payable total;
 - payment/fiscalization state через generic provider ports;
+- per-Sale checkout choice: card/QR с обязательным чеком, cash с чеком или cash со `SKIPPED`;
 - создание immutable Inventory `SALE` movements после подтверждённой оплаты;
 - будущий customer selection/Loyalty.
 

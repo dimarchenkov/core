@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from core.inventory.service import InventoryService
 from core.sales.enums import (
+    CheckoutPaymentOption,
     FiscalizationStatus,
     PaymentMethod,
     PaymentStatus,
@@ -56,7 +57,11 @@ class CheckoutStart:
 class CheckoutService:
     """Durable payment, inventory and fiscalization orchestration for Sales."""
 
-    def __init__(self, session: Session, binding: CheckoutProviderBinding) -> None:
+    def __init__(
+        self,
+        session: Session,
+        binding: CheckoutProviderBinding | None,
+    ) -> None:
         """Create a checkout service with generic provider capabilities."""
         self._session = session
         self._binding = binding
@@ -68,21 +73,21 @@ class CheckoutService:
         sale_id: UUIDv7,
         *,
         owner_id: UUIDv7,
-        payment_method: PaymentMethod = PaymentMethod.CARD,
+        payment_option: CheckoutPaymentOption = CheckoutPaymentOption.CARD,
     ) -> Sale:
         """Freeze one DRAFT and persist one card or cash payment fact."""
         start = self._prepare_payment(
             sale_id,
             owner_id=owner_id,
             retry=False,
-            payment_method=payment_method,
+            payment_option=payment_option,
         )
         if start.request.method is PaymentMethod.CASH:
             return self._advance_paid_sale(start.sale_id, owner_id=owner_id)
         if not start.initiate:
             return self._require_owned(sale_id, owner_id)
         try:
-            operation = self._binding.payment.initiate_payment(start.request)
+            operation = self._require_binding().payment.initiate_payment(start.request)
         except ProviderCallError as exc:
             return self._record_payment_error(start, owner_id=owner_id, error=exc)
         return self._record_payment_operation(start, owner_id=owner_id, operation=operation)
@@ -92,19 +97,19 @@ class CheckoutService:
         sale_id: UUIDv7,
         *,
         owner_id: UUIDv7,
-        payment_method: PaymentMethod = PaymentMethod.CARD,
+        payment_option: CheckoutPaymentOption = CheckoutPaymentOption.CARD,
     ) -> Sale:
         """Create a new attempt only after the prior result is failed or canceled."""
         start = self._prepare_payment(
             sale_id,
             owner_id=owner_id,
             retry=True,
-            payment_method=payment_method,
+            payment_option=payment_option,
         )
         if start.request.method is PaymentMethod.CASH:
             return self._advance_paid_sale(start.sale_id, owner_id=owner_id)
         try:
-            operation = self._binding.payment.initiate_payment(start.request)
+            operation = self._require_binding().payment.initiate_payment(start.request)
         except ProviderCallError as exc:
             return self._record_payment_error(start, owner_id=owner_id, error=exc)
         return self._record_payment_operation(start, owner_id=owner_id, operation=operation)
@@ -123,7 +128,10 @@ class CheckoutService:
                 return sale
             request = self._payment_request(sale, attempt)
             try:
-                operation = self._binding.payment.get_payment(attempt.external_id, request)
+                operation = self._require_binding().payment.get_payment(
+                    attempt.external_id,
+                    request,
+                )
             except ProviderCallError as exc:
                 return self._record_payment_poll_error(sale.id, attempt.id, owner_id, exc)
             sale = self._record_payment_operation(
@@ -168,9 +176,10 @@ class CheckoutService:
         *,
         owner_id: UUIDv7,
         retry: bool,
-        payment_method: PaymentMethod,
+        payment_option: CheckoutPaymentOption,
     ) -> CheckoutStart:
         sale = self._locked_owned(sale_id, owner_id)
+        payment_method, fiscalization_required = self._payment_facts(payment_option)
         if not retry and sale.status in {
             SaleStatus.PAID,
             SaleStatus.FISCALIZATION_PENDING,
@@ -181,6 +190,7 @@ class CheckoutService:
             if (
                 successful.payment_method is PaymentMethod.CASH
                 and payment_method is PaymentMethod.CASH
+                and successful.fiscalization_required is fiscalization_required
             ):
                 self._ensure_binding_matches(sale)
                 request = self._payment_request(sale, successful)
@@ -189,7 +199,7 @@ class CheckoutService:
             self._rollback()
             raise CheckoutStateError(f"Sale cannot start payment from {sale.status.value}.")
         if sale.status is SaleStatus.PAYMENT_PENDING and not retry:
-            if payment_method is not PaymentMethod.CARD:
+            if payment_option is not CheckoutPaymentOption.CARD:
                 self._rollback()
                 raise CheckoutStateError("Pending acquiring payment cannot be replaced with cash.")
             self._ensure_binding_matches(sale)
@@ -217,15 +227,20 @@ class CheckoutService:
         if not sale.items or sale.total_amount <= 0:
             self._rollback()
             raise CheckoutEmptySaleError
+        if fiscalization_required and self._binding is None:
+            self._rollback()
+            raise CheckoutStateError("Fiscal provider is required for this payment option.")
+        binding = self._binding
         attempt_number = len(sale.payments) + 1
         attempt = PaymentAttempt(
             sale_id=sale.id,
             integration_id=(
-                self._binding.integration_id if payment_method is PaymentMethod.CARD else None
+                binding.integration_id if payment_method is PaymentMethod.CARD and binding else None
             ),
-            provider=self._binding.provider if payment_method is PaymentMethod.CARD else None,
+            provider=binding.provider if payment_method is PaymentMethod.CARD and binding else None,
             payment_method=payment_method,
             requested_amount=sale.total_amount,
+            fiscalization_required=fiscalization_required,
             currency=sale.currency,
             status=(
                 PaymentStatus.SUCCEEDED
@@ -386,13 +401,38 @@ class CheckoutService:
                 actor_id=owner_id,
             )
             sale.inventory_posted_at = datetime.now(UTC)
+        if not payment.fiscalization_required:
+            if sale.fiscalization is None:
+                fiscalization = Fiscalization(
+                    sale_id=sale.id,
+                    payment_attempt_id=payment.id,
+                    integration_id=None,
+                    provider=None,
+                    status=FiscalizationStatus.SKIPPED,
+                    idempotency_key=f"sale:{sale.id}:fiscalization:skipped",
+                    attempt_count=0,
+                    fiscal_amount=sale.total_amount,
+                    currency=sale.currency,
+                    provider_metadata={"reason": "operator_selected_cash_without_receipt"},
+                    created_by_id=owner_id,
+                    updated_by_id=owner_id,
+                )
+                sale.fiscalization = fiscalization
+                self._sales.add_fiscalization(fiscalization)
+            sale.status = SaleStatus.COMPLETED
+            sale.completed_at = datetime.now(UTC)
+            sale.updated_by_id = owner_id
+            self._commit()
+            logger.info("Fiscalization skipped by checkout option sale=%s", sale.id)
+            return sale
+        binding = self._require_binding()
         created = False
         if sale.fiscalization is None:
             fiscalization = Fiscalization(
                 sale_id=sale.id,
                 payment_attempt_id=payment.id,
-                integration_id=self._binding.integration_id,
-                provider=self._binding.provider,
+                integration_id=binding.integration_id,
+                provider=binding.provider,
                 status=FiscalizationStatus.PENDING,
                 idempotency_key=f"sale:{sale.id}:fiscalization:1",
                 attempt_count=1,
@@ -417,7 +457,7 @@ class CheckoutService:
                     sale.id, owner_id, "missing_payment_id", "Payment evidence is unavailable."
                 )
             try:
-                refreshed = self._binding.payment.get_payment(
+                refreshed = binding.payment.get_payment(
                     payment.external_id, self._payment_request(sale, payment)
                 )
             except ProviderCallError as exc:
@@ -438,6 +478,7 @@ class CheckoutService:
         sale = self._require_owned(sale_id, owner_id)
         fiscalization = sale.fiscalization
         payment = self._successful_payment(sale)
+        binding = self._require_binding()
         if fiscalization is None:
             raise CheckoutStateError("Fiscalization record is missing.")
         if evidence is None and payment.payment_method is PaymentMethod.CARD:
@@ -446,7 +487,7 @@ class CheckoutService:
                     sale.id, owner_id, "missing_payment_id", "Payment evidence is unavailable."
                 )
             try:
-                payment_state = self._binding.payment.get_payment(
+                payment_state = binding.payment.get_payment(
                     payment.external_id, self._payment_request(sale, payment)
                 )
             except ProviderCallError as exc:
@@ -461,7 +502,7 @@ class CheckoutService:
             )
         request = self._fiscal_request(sale, fiscalization, payment, evidence)
         try:
-            operation = self._binding.fiscal.initiate_fiscalization(request)
+            operation = binding.fiscal.initiate_fiscalization(request)
         except ProviderCallError as exc:
             return self._record_fiscal_error(sale.id, owner_id, exc)
         return self._record_fiscal_operation(sale.id, owner_id, operation)
@@ -481,6 +522,7 @@ class CheckoutService:
                 )
             return sale
         payment = self._successful_payment(sale)
+        binding = self._require_binding()
         try:
             evidence: object | None = None
             if payment.payment_method is PaymentMethod.CARD:
@@ -491,7 +533,7 @@ class CheckoutService:
                         "missing_payment_id",
                         "Payment evidence is unavailable.",
                     )
-                payment_state = self._binding.payment.get_payment(
+                payment_state = binding.payment.get_payment(
                     payment.external_id, self._payment_request(sale, payment)
                 )
                 if payment_state.fiscal_evidence is None:
@@ -502,7 +544,7 @@ class CheckoutService:
                     )
                 evidence = payment_state.fiscal_evidence
             request = self._fiscal_request(sale, fiscalization, payment, evidence)
-            operation = self._binding.fiscal.get_fiscalization(fiscalization.external_id, request)
+            operation = binding.fiscal.get_fiscalization(fiscalization.external_id, request)
         except ProviderCallError as exc:
             return self._mark_fiscal_unknown(sale.id, owner_id, exc.code, str(exc))
         return self._record_fiscal_operation(sale.id, owner_id, operation)
@@ -633,11 +675,30 @@ class CheckoutService:
             if sale.fiscalization is not None
             else self._latest_payment(sale).integration_id
         )
+        if persisted_integration_id is None:
+            return
+        binding = self._require_binding()
         if (
-            persisted_integration_id is not None
-            and persisted_integration_id != self._binding.integration_id
+            persisted_integration_id != binding.integration_id
         ):
             raise CheckoutProviderMismatchError
+
+    def _require_binding(self) -> CheckoutProviderBinding:
+        if self._binding is None:
+            raise CheckoutStateError("A configured fiscal provider is required.")
+        return self._binding
+
+    @staticmethod
+    def _payment_facts(
+        option: CheckoutPaymentOption,
+    ) -> tuple[PaymentMethod, bool]:
+        if option is CheckoutPaymentOption.CARD:
+            return PaymentMethod.CARD, True
+        if option is CheckoutPaymentOption.CASH_WITH_RECEIPT:
+            return PaymentMethod.CASH, True
+        if option is CheckoutPaymentOption.CASH_WITHOUT_RECEIPT:
+            return PaymentMethod.CASH, False
+        raise CheckoutStateError("Unsupported checkout payment option.")
 
     @staticmethod
     def _latest_payment(sale: Sale) -> PaymentAttempt:

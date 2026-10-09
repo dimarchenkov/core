@@ -871,9 +871,16 @@ test('Checkout UI selects cash or card/QR and recovers persisted provider states
   assert.match(source, /К оплате/);
   assert.match(source, /Оплатить \$\{formatMoney\(sale\.total_amount\)\}/);
   assert.match(source, /Получено наличными/);
-  assert.match(source, /name="payment_method" value="cash"/);
-  assert.match(source, /name="payment_method" value="card"/);
-  assert.match(source, /payment_method: paymentMethod/);
+  assert.match(source, /name="payment_option" value="card"/);
+  assert.match(source, /name="payment_option" value="cash_with_receipt"/);
+  assert.match(source, /name="payment_option" value="cash_without_receipt"/);
+  assert.match(source, /payment_option: paymentOption/);
+  assert.match(source, /Оплата и чек через AQSI/);
+  assert.match(source, /Наличные, фискальный чек через AQSI/);
+  assert.match(source, /Продажа будет учтена в Core без отправки на кассу/);
+  assert.match(source, /— Не формировался/);
+  assert.match(source, /фискальный чек не формировался/);
+  assert.match(source, /payment_method === "cash" \? "Наличными" : "Карта \/ QR"/);
   assert.match(source, /Карта \/ QR/);
   assert.match(source, /Только карта/);
   assert.match(source, /Только QR/);
@@ -893,6 +900,11 @@ test('Checkout UI selects cash or card/QR and recovers persisted provider states
   assert.match(styles, /\.sale-item-source/);
   assert.match(styles, /\.transaction-summary/);
   assert.match(styles, /\.checkout-method-options/);
+  assert.match(styles, /\.checkout-dialog \{[^}]*max-width: calc\(100vw - 24px\)[^}]*overflow-x: hidden/);
+  assert.match(styles, /\.checkout-method \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /\.checkout-method-options input\[type="radio"\] \{[^}]*width: 24px[^}]*min-height: 24px/);
+  assert.match(styles, /\.checkout-method-options label span \{[^}]*flex: 1 1 auto[^}]*text-align: left/);
+  assert.match(styles, /overflow-wrap: anywhere/);
 });
 
 test('Switching active Sale changes the Catalog add target without sharing users', async () => {

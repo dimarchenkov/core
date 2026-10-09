@@ -23,6 +23,14 @@ class PaymentMethod(StrEnum):
     CASH = "cash"
 
 
+class CheckoutPaymentOption(StrEnum):
+    """Operator-visible checkout choices with explicit fiscal intent."""
+
+    CARD = "card"
+    CASH_WITH_RECEIPT = "cash_with_receipt"
+    CASH_WITHOUT_RECEIPT = "cash_without_receipt"
+
+
 class PaymentStatus(StrEnum):
     """Durable result of one provider acquiring attempt."""
 
@@ -53,3 +61,4 @@ class FiscalizationStatus(StrEnum):
     UNKNOWN = "unknown"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    SKIPPED = "skipped"

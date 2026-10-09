@@ -72,13 +72,14 @@ discount amount и payable total. Definitive payment `FAILED/CANCELED` оста�
 Отдельный факт оплаты: frozen amount, метод, optional Integration/provider operation ID,
 idempotency identity и результат. `CARD` использует acquiring provider; подтверждённый оператором
 `CASH` сразу хранится как `SUCCEEDED` с provider/Integration `NULL`. `UNKNOWN` не равен `FAILED` и
-запрещает слепую новую оплату.
+запрещает слепую новую оплату. `fiscalization_required` фиксирует выбор конкретной продажи;
+для CARD он всегда `true`.
 
 ## Fiscalization
 
-Отдельное обязательство сформировать itemized receipt по SaleItem snapshots через собственную
-Integration/FiscalProvider. Оно существует и для CASH, и для CARD/QR; его состояние и retry не
-изменяют успешный PaymentAttempt и не создают повторные Inventory movements.
+Отдельный факт обработки чека по SaleItem snapshots. Required-варианты используют собственную
+Integration/FiscalProvider; явный cash-without-receipt создаёт `SKIPPED` без внешнего вызова.
+Состояние и retry не изменяют успешный PaymentAttempt и не создают повторные Inventory movements.
 
 ## SaleItem
 

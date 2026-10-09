@@ -8,6 +8,7 @@ from pydantic import ConfigDict, Field, computed_field
 
 from core.integrations.enums import IntegrationProvider
 from core.sales.enums import (
+    CheckoutPaymentOption,
     FiscalizationStatus,
     PaymentMethod,
     PaymentStatus,
@@ -92,6 +93,7 @@ class PaymentAttemptRead(PydanticBaseModel):
     provider: IntegrationProvider | None
     payment_method: PaymentMethod
     requested_amount: Decimal
+    fiscalization_required: bool
     currency: str
     external_id: str | None
     status: PaymentStatus
@@ -108,8 +110,8 @@ class FiscalizationRead(PydanticBaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUIDv7
-    integration_id: UUIDv7
-    provider: IntegrationProvider
+    integration_id: UUIDv7 | None
+    provider: IntegrationProvider | None
     external_id: str | None
     external_receipt_id: str | None
     status: FiscalizationStatus
@@ -178,9 +180,7 @@ class CheckoutContextRead(PydanticBaseModel):
     integration_name: str | None = None
     provider_name: str | None = None
     acquiring_label: str | None = None
-    payment_methods: list[PaymentMethod] = Field(
-        default_factory=lambda: [PaymentMethod.CASH, PaymentMethod.CARD]
-    )
+    fiscalization_available: bool = False
     stock_warnings: list[CheckoutStockWarningRead] = Field(default_factory=list)
 
 
@@ -189,4 +189,4 @@ class CheckoutStartRequest(PydanticBaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    payment_method: PaymentMethod = PaymentMethod.CARD
+    payment_option: CheckoutPaymentOption = CheckoutPaymentOption.CARD
