@@ -2,15 +2,33 @@
 
 ## Current Epic
 
-**Epic 9 — Catalog Management**
+**Epic 4 — Rental follow-up**
 
-Управление реальными карточками товара через обычный UI Core без обращения к SQLAdmin.
+**Epic status: ✅ Operational milestone completed; active follow-up in progress**
+
+Завершённый операционный milestone Rental не переоткрывается и не считается незавершённым.
+Текущий demand-driven follow-up расширяет его тарифами для реальной эксплуатации Karcher Puzzi
+10/1.
 
 ## Current Sprint
 
-**Sprint 9.12 — Catalog Operations**
+**Sprint 4.18 — Rental Return & Overdue**
 
-**Stage: Active**
+**Stage: Implemented; physical UAT pending**
+
+## Current goal and scope
+
+Добавить item-level возврат с серверным временем, производной просрочкой, фиксированными
+тарифными периодами без поминутной пропорции, осмотром, удержанием из залога и безопасным
+закрытием multi-item заказа только после возврата всех позиций.
+
+Sprint 4.14–4.17 реализованы; оставшийся physical multi-item/iPhone UAT и двусторонняя печать
+не отмечаются принятыми. Sprint 4.18 реализован и ожидает реальную проверку своевременного,
+льготного, просроченного, частичного и проблемного возврата.
+
+## Preserved parallel delivery — Epic 9 Catalog Management
+
+**Sprint 9.12 — Catalog Operations: implemented; remaining physical UAT is preserved below.**
 
 ## Explicit parallel delivery — Epic 5 Sales Foundation
 
@@ -42,9 +60,9 @@ and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_
   Sales/POS, но временный spike ещё не является постоянным доменом Sales.
 - AQSI integration зависит от AQSI cloud API и доступности Internet. Поведение при недоступности
   сети/cloud остаётся открытым архитектурным решением Epic 5.
-- Rental имеет существенную завершённую реализацию, но из-за почти отсутствующего фактического
-  использования дальнейшие Rental UX/UAT отложены до появления реального спроса. Доменная работа
-  остаётся действительной и из roadmap не удаляется.
+- Rental имеет существенную завершённую реализацию. Реальный спрос появился, Karcher Puzzi 10/1
+  входит в эксплуатацию, поэтому тарифный follow-up стал текущим delivery focus. Завершённая
+  доменная работа остаётся действительной и из roadmap не удаляется.
 
 ### Validated baseline from Sprint 9.11
 
@@ -56,7 +74,7 @@ and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_
 - Full implementation/UAT evidence is preserved in
   [Sprint 9.11 history](../docs/releases/sprint-9.11.md).
 
-## Goal
+## Preserved Sprint 9.12 goal
 
 Сделать Catalog пригодным как ежедневное операционное рабочее место без лишних переходов в
 карточки Product/Variant и без технических обходных путей.

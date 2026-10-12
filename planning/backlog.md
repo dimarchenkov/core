@@ -13,21 +13,21 @@
 
 ## Current delivery order
 
-1. **Now:** Sprint 9.12 — Catalog Operations.
-2. **Next:** Sprint 7.13 — AQSI Automatic Synchronization.
-3. **Then:** Epic 5 — Sales Foundation / POS.
-4. **Then:** Epic 10 — Customers & Loyalty MVP.
-5. **Demand-driven:** дальнейший Rental Operations UAT, когда появится реальное использование.
+1. **Now:** Sprint 4.18 — Rental Return & Overdue (implemented; physical UAT pending).
+2. **Preserved UAT:** Sprint 4.17 — Rental Agreements (physical duplex print pending).
+3. **Preserved UAT:** Sprint 4.16 — Rental Operations Workspace & Issue.
+4. **Preserved physical UAT debt:** Sprint 4.15 — Puzzi + Bosch multi-item/iPhone acceptance.
+5. **Preserved parallel follow-up:** Sprint 7.13 — AQSI Automatic Synchronization.
 
 Intake после нескольких real-world UAT операционно достаточно пригоден; его возможный polish не
-должен превращаться в новый redesign. Rental остаётся реализованным первоклассным доменом, но его
-текущий delivery priority снижен из-за почти отсутствующего фактического спроса.
+должен превращаться в новый redesign. Rental остаётся реализованным первоклассным доменом;
+появившийся реальный спрос сделал его тарифный follow-up текущим delivery priority.
 
 ---
 
 ## Epic 1 — Core Foundation
 
-**Status: ✅ Completed**
+**Status: ✅ Operational milestone completed; active follow-up in progress**
 
 Цель Epic — создать надёжное ядро управления каталогом, поставщиками, поступлениями, остатками,
 медиа и доступом сотрудников. Core получает единый источник данных и неизменяемую историю
@@ -197,7 +197,7 @@ Engine.
 
 ## Epic 4 — Rental
 
-**Status: ✅ Completed**
+**Status: ✅ Operational milestone completed; active follow-up in progress**
 
 Цель Epic — обеспечить полный поштучный учёт аренды: от выделения экземпляров при приёмке до
 выдачи, частичного возврата, обслуживания и анализа окупаемости. Каждый физический экземпляр
@@ -206,11 +206,95 @@ Engine.
 **Sprints:** Sprint 9 — Rental Foundation; Sprint 10A — Customers Foundation; Sprint 10B —
 Rental Orders; Sprint 10C — Rental Checkout Workflow ✅; Sprint 10D — Rental Return Workflow ✅;
 Sprint 10E — Catalog & Rental Operations UX ✅; Sprint 10F — Rental History & Maintenance ✅;
-Sprint 10G — Rental Economics & Business Insights ✅.
+Sprint 10G — Rental Economics & Business Insights ✅; Sprint 4.14 — Rental Tariffs ✅;
+Sprint 4.15 — Rental Draft & Tariff Snapshot ✅ implementation / physical UAT pending;
+Sprint 4.16 — Rental Operations Workspace & Issue ✅ implementation / physical UAT pending;
+Sprint 4.17 — Rental Agreements ✅ implementation / physical print UAT pending.
 
-**Current priority:** demand-driven. Реальное использование аренды сейчас очень низкое, поэтому
-дальнейшие Rental UX/UAT отложены до появления операционного спроса. Реализованная доменная модель
-и завершённая работа сохраняются и не считаются ошибочными.
+Новая последовательность follow-up использует действующий формат `Epic.Sprint` с глобальным
+номером Sprint. Исторические Sprint 9–10G не переименовываются:
+
+- Sprint 4.14 — Rental Tariffs;
+- Sprint 4.15 — Rental Draft & Tariff Snapshot;
+- Sprint 4.16 — Rental Operations Workspace & Issue;
+- Sprint 4.17 — Rental Agreements;
+- Sprint 4.18 — Rental Return & Overdue.
+
+**Current priority:** demand-driven active follow-up. Реальный спрос появился, и Karcher Puzzi
+10/1 входит в эксплуатацию. Реализованная доменная модель и завершённая работа сохраняются;
+активный follow-up не возвращает завершённый milestone в статус незавершённого.
+
+### Sprint 4.14 — Rental Tariffs
+
+- [x] Отдельный `RentalTariff`, принадлежащий ровно одному арендуемому `CatalogVariant`.
+- [x] Типы DURATION и SLOT без hardcoded наборов часов/суток.
+- [x] Decimal-цена, grace, deposit, requires_agreement и период действия.
+- [x] Канонический запрос selectable tariffs учитывает lifecycle и даты.
+- [x] Meaningful edit создаёт новую версию и сохраняет старую.
+- [x] Детерминированный snapshot и единый человекочитаемый `tariff_terms` formatter.
+- [x] Обычный mobile-first UI Variant: создание, изменение, архив и история.
+- [ ] Physical iPhone UAT и настройка реальных тарифов Puzzi 10/1.
+
+### Sprint 4.15 — Rental Draft & Tariff Snapshot
+
+- [x] Существующий Customer-first `RentalOrder` переиспользован без второго draft aggregate.
+- [x] Один `RentalOrder` содержит несколько позиций; каждая выбирает конкретный доступный
+  `RentalAsset`, а повтор одного экземпляра серверно отклоняется.
+- [x] Тариф выбирается только через канонический Variant/date selectable query.
+- [x] DURATION в READY хранит плановую дату и начинает срок от фактической выдачи; SLOT использует
+  фиксированные московские границы выбранной даты.
+- [x] Контролируемый «Другой срок» сохраняет `timing_source=MANUAL`, не меняя тариф.
+- [x] Каждая позиция независимо хранит точную tariff version, immutable snapshot, цену, deposit,
+  grace, requires_agreement и planned date; actual issue/due остаются item-level facts.
+- [x] Decimal total, recommended deposit и agreement requirement выводятся из всех позиций;
+  actual/agreed deposit остаётся order-level фактом.
+- [x] `READY` требует хотя бы одну полностью заполненную позицию и полноту каждой позиции;
+  сохранение не выдаёт RentalAsset.
+- [x] Mobile-first UI поддерживает список карточек и независимые Add/Edit/Delete без таблиц.
+- [ ] Manual multi-item UAT на реальных Puzzi + Bosch: разные тарифы/due, totals, edit/remove,
+  duplicate asset и READY.
+
+### Sprint 4.16 — Rental Operations Workspace & Issue
+
+- [x] `/rent` стал основным operational workspace с приоритетом активных и ожидающих выдачи
+  заказов; история доступна отдельным лёгким фильтром.
+- [x] `READY` cards показывают все позиции, тарифы, rental/deposit totals и явные действия
+  «Открыть»/«Выдать» без преждевременного таймера.
+- [x] Выдача использует существующую атомарную операцию `RentalOrder` + `RentalAsset`, повторно
+  проверяет и блокирует строки заказа/активов и идемпотентна при повторном запросе.
+- [x] Обычная выдача использует серверное время; контролируемая ручная корректировка сохраняет
+  реальный `issued_at` и оператора на заказе и каждой позиции.
+- [x] DURATION вычисляет item-level `due_at` из immutable snapshot; SLOT сохраняет фиксированный
+  конец и блокирует обычную выдачу уже завершившегося слота.
+- [x] Активные карточки вычисляют независимые таймеры из `due_at - Date.now()` на каждом тике,
+  показывают просрочку сразу от `due_at`, а grace — отдельной подсказкой без денежного расчёта.
+- [x] Активная карточка начинает существующий return workflow через «Принять возврат» и не
+  предлагает обходное прямое завершение заказа.
+- [x] `requires_agreement=true` серверно блокирует выдачу до сформированного договора;
+  no-agreement позиции используют тот же `RentalOrder` workflow.
+- [ ] Physical UAT: реальная DURATION, multi-item, manual time, SLOT, overdue и mobile `/rent`.
+
+### Sprint 4.17 — Rental Agreements
+
+- [x] Settings показывают реквизиты арендодателя, Markdown editor, safe preview,
+  allowlist placeholders, текущую версию и историю.
+- [x] Meaningful save создаёт новую неизменяемую версию; исторические версии не
+  перезаписываются.
+- [x] Один `RentalAgreement` покрывает весь multi-item `RentalOrder` и берёт тарифы только из
+  item snapshots.
+- [x] Явные preview/create создают канонический A4 PDF ровно на две страницы для 1–3
+  обычных позиций; больший документ отклоняется без нечитаемого сжатия.
+- [x] PDF bytes, number `R-YYYYMMDD-NNNN`, rendered snapshots и SHA-256 хранятся неизменяемо;
+  reprint возвращает тот же artifact без перерендера.
+- [x] SHA-256 проверяет точные PDF bytes, но не заявляется как подпись или trusted timestamp.
+- [x] Паспортные данные/сканы и placeholders отсутствуют; поля предназначены для ручного
+  заполнения на бумаге.
+- [x] Обязательный договор серверно блокирует выдачу; generation оставляет заказ `READY`, а
+  физическая выдача идёт через единую Sprint 4.16 команду.
+- [x] После generation позиции, тарифы, сроки, цены и deposit блокируются; supersede оставлен
+  будущему workflow.
+- [ ] Physical UAT: двусторонняя A4 печать, handwritten fields, Puzzi, multi-item, reprint/hash
+  и фактическая выдача.
 
 После первого полноценного пользовательского тестирования ежедневный UX каталога и аренды
 выделен в отдельный Sprint до расширения истории, обслуживания и экономики.
@@ -281,8 +365,11 @@ Sprint 10G — Rental Economics & Business Insights ✅.
 
 ### Deferred follow-up — не блокирует завершённый milestone
 
-- [ ] Арендные тарифы и duration-based правила расчёта сверх уже реализованных agreed/charged
-  amounts.
+- [x] Настраиваемые арендные тарифы и их неизменяемая история.
+- [x] Применение тарифа в Rental draft/snapshot и server-side DURATION/SLOT timing — Sprint 4.15.
+- [x] Operational `/rent`, атомарная выдача и производные item-level таймеры — Sprint 4.16.
+- [x] Rental Agreements/PDF — Sprint 4.17 (physical print UAT pending).
+- [x] Overdue charging сверх snapshotted grace/terms — Sprint 4.18 (physical UAT pending).
 - [ ] Метрики конфликтов доступности, просрочек и ошибок операций аренды.
 
 ### Milestone
