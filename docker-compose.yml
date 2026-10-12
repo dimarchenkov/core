@@ -22,7 +22,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    command: ["uv", "run", "python", "-m", "core.worker"]
+    command: ["uv", "run", "--no-sync", "python", "-m", "core.worker"]
     restart: unless-stopped
     env_file:
       - path: .env.example
