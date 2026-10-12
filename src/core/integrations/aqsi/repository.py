@@ -6,7 +6,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.integrations.aqsi.enums import PublicationChannel
-from core.integrations.aqsi.models import Publication, PublicationAttempt
+from core.integrations.aqsi.models import (
+    AqsiCatalogReconciliationRun,
+    Publication,
+    PublicationAttempt,
+)
 from core.shared.db import UUIDv7
 
 
@@ -48,6 +52,18 @@ class PublicationRepository:
         if for_update:
             statement = statement.with_for_update()
         return self._session.scalar(statement)
+
+    def list_for_channel(self, channel: PublicationChannel) -> Sequence[Publication]:
+        """Return all active projections owned by one external channel."""
+        statement = (
+            select(Publication)
+            .where(
+                Publication.channel == channel,
+                Publication.deleted_at.is_(None),
+            )
+            .order_by(Publication.external_id)
+        )
+        return self._session.scalars(statement).all()
 
 
 class PublicationAttemptRepository:
@@ -113,5 +129,57 @@ class PublicationAttemptRepository:
             select(PublicationAttempt)
             .where(PublicationAttempt.publication_id == publication_id)
             .order_by(PublicationAttempt.attempt_number.desc())
+        )
+        return self._session.scalars(statement).all()
+
+
+class AqsiCatalogReconciliationRepository:
+    """Database access for append-only catalog comparison evidence."""
+
+    def __init__(self, session: Session) -> None:
+        """Create a repository bound to the current session."""
+        self._session = session
+
+    def add(self, run: AqsiCatalogReconciliationRun) -> AqsiCatalogReconciliationRun:
+        """Add one reconciliation run to the current unit of work."""
+        self._session.add(run)
+        return run
+
+    def get(
+        self,
+        run_id: UUIDv7,
+        *,
+        for_update: bool = False,
+    ) -> AqsiCatalogReconciliationRun | None:
+        """Return one run, optionally locked while queue metrics are finalized."""
+        statement = select(AqsiCatalogReconciliationRun).where(
+            AqsiCatalogReconciliationRun.id == run_id
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return self._session.scalar(statement)
+
+    def latest(self, integration_id: UUIDv7) -> AqsiCatalogReconciliationRun | None:
+        """Return the latest comparison for an integration."""
+        statement = (
+            select(AqsiCatalogReconciliationRun)
+            .where(AqsiCatalogReconciliationRun.integration_id == integration_id)
+            .order_by(AqsiCatalogReconciliationRun.started_at.desc())
+            .limit(1)
+        )
+        return self._session.scalar(statement)
+
+    def list_recent(
+        self,
+        integration_id: UUIDv7,
+        *,
+        limit: int,
+    ) -> Sequence[AqsiCatalogReconciliationRun]:
+        """Return bounded recent reconciliation history newest first."""
+        statement = (
+            select(AqsiCatalogReconciliationRun)
+            .where(AqsiCatalogReconciliationRun.integration_id == integration_id)
+            .order_by(AqsiCatalogReconciliationRun.started_at.desc())
+            .limit(limit)
         )
         return self._session.scalars(statement).all()

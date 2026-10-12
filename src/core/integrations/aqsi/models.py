@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -129,3 +130,70 @@ class PublicationAttempt(BaseModel):
     def restore(self) -> None:
         """Reject restoration because publication attempts cannot be deleted."""
         raise RuntimeError("Publication attempts cannot be restored.")
+
+
+class AqsiCatalogReconciliationRun(BaseModel):
+    """Audited result of one full Core/AQSI catalog comparison."""
+
+    __tablename__ = "aqsi_catalog_reconciliation_runs"
+    __table_args__ = (
+        Index(
+            "ix_aqsi_catalog_reconciliation_integration_started",
+            "integration_id",
+            "started_at",
+        ),
+    )
+
+    integration_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("integrations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expected_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_not_ready_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    remote_total_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    remote_managed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unmanaged_remote_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    missing_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mismatched_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deletion_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    queued_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    queue_failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deletion_guard_triggered: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    destructive_actions_blocked: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    missing_external_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    mismatched_external_ids: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    deletion_candidate_external_ids: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
+        """Reject deletion because reconciliation runs are audit evidence."""
+        del actor_id
+        raise RuntimeError("AQSI reconciliation runs cannot be deleted.")
+
+    def restore(self) -> None:
+        """Reject restoration because reconciliation runs cannot be deleted."""
+        raise RuntimeError("AQSI reconciliation runs cannot be restored.")

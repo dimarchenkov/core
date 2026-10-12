@@ -28,10 +28,9 @@ Those are separate workflows. Publishing a catalog card must never change the Co
 
 Core remains the source of truth. AQSI is a sales channel and a remote projection of Core data.
 
-Edits made directly in AQSI can be detected when an explicit verification/reconciliation read is
-performed, but they are not imported back into the Core catalog. The current manual path has no
-automatic drift monitor. The operator resolves a detected mismatch by publishing the authoritative
-Core representation again.
+Edits made directly in AQSI are detected by the periodic reconciliation read, but they are not
+imported back into the Core catalog. Core repairs missing and mismatched managed goods by publishing
+the authoritative representation again.
 
 The integration depends on the AQSI cloud API and Internet connectivity. A network or AQSI-cloud
 failure must be visible as an external integration failure and must not corrupt Catalog, Pricing or
@@ -66,10 +65,14 @@ left for Sprint 7.13 design.
 after configuration or data correction. Unchanged failed payloads are not retried by every periodic
 sweep; the existing publication job retains its bounded network retry policy.
 
-This first automatic slice detects changes in authoritative Core data. Periodic remote
-reconciliation (“Does AQSI still match the state Core expects?”), event-driven near-immediate
-triggers, and remote archive/deactivation remain follow-up work. AQSI edits never become
-authoritative business data.
+Each automatic sweep also reads the complete account-wide AQSI goods set. It compares only stable
+external IDs owned by Core, verifies every present managed good and its selected-shop binding, then
+repairs missing or mismatched projections. Unrelated AQSI goods are counted but never adopted.
+
+Remote archive/deactivation remains unavailable. Unexpected managed goods are diagnostic deletion
+candidates only. Core blocks all destructive actions and raises an explicit mass-deletion guard when
+more than five candidates, more than ten percent of the expected catalog, or any candidates against
+an empty expected catalog are observed. AQSI edits never become authoritative business data.
 
 Automatic sync exposes existing pending/error/retry/outdated state to operators. It does not imply AQSI
 stock ownership, sales import, receipt import or general bidirectional catalog synchronization.

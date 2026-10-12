@@ -27,7 +27,11 @@ from core.integrations.aqsi.enums import (
     PublicationOperation,
     PublicationStatus,
 )
-from core.integrations.aqsi.models import Publication, PublicationAttempt
+from core.integrations.aqsi.models import (
+    AqsiCatalogReconciliationRun,
+    Publication,
+    PublicationAttempt,
+)
 from core.integrations.aqsi.payload import AqsiPayloadBuilder, AqsiVariantNotReadyError
 from core.integrations.aqsi.processor import AqsiPublicationProcessor
 from core.integrations.aqsi.routes import get_aqsi_queue
@@ -103,6 +107,10 @@ class FakeAqsiGateway:
         """Return a copied fake good when present."""
         good = self.goods.get(external_id)
         return dict(good) if good is not None else None
+
+    def list_goods(self) -> list[dict[str, object]]:
+        """Return copied fake goods as one complete account-wide list."""
+        return [dict(good) for good in self.goods.values()]
 
     def create_good(self, payload: AqsiGoodsPayload) -> None:
         """Create and immediately expose a fake good."""
@@ -214,6 +222,7 @@ def session() -> Generator[Session]:
             PublicationAttempt.__table__,
             Integration.__table__,
             IntegrationCredential.__table__,
+            AqsiCatalogReconciliationRun.__table__,
         ],
     )
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -399,6 +408,95 @@ def test_automatic_catalog_sweep_queues_changes_without_repeating_unchanged_fail
     assert manual_retry.queued == 1
     assert manual_attempt is not None
     assert manual_attempt.created_by_id == user.id
+
+
+def test_reconciliation_repairs_remote_catalog_loss_without_local_change(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+    aqsi_settings: Settings,
+) -> None:
+    """A missing verified good is recreated even when Core's payload hash is unchanged."""
+    service = AqsiPublicationService(session, aqsi_settings)
+    _, initial, _ = service.request_publication(variant.id, actor_id=user.id)
+    gateway = FakeAqsiGateway()
+    AqsiPublicationProcessor(session, aqsi_settings, gateway, sleeper=lambda _: None).process(
+        initial.id
+    )
+    gateway.goods.clear()
+
+    plan = AqsiCatalogSynchronizationService(session, aqsi_settings).plan(
+        actor_id=None,
+        retry_unchanged_failures=False,
+        gateway=gateway,
+    )
+    repair = session.get(PublicationAttempt, plan.attempt_ids[0])
+
+    assert plan.expected == 1
+    assert plan.remote_total == 0
+    assert plan.missing_count == 1
+    assert plan.status == "repairing"
+    assert plan.queued == 1
+    assert repair is not None
+    assert repair.operation is PublicationOperation.CREATE
+
+
+def test_reconciliation_repairs_field_and_shop_drift(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+    aqsi_settings: Settings,
+) -> None:
+    """Remote edits and lost shop binding produce an update repair."""
+    service = AqsiPublicationService(session, aqsi_settings)
+    _, initial, _ = service.request_publication(variant.id, actor_id=user.id)
+    gateway = FakeAqsiGateway()
+    AqsiPublicationProcessor(session, aqsi_settings, gateway, sleeper=lambda _: None).process(
+        initial.id
+    )
+    gateway.goods[str(variant.id)]["name"] = "Changed outside Core"
+    gateway.goods[str(variant.id)]["shops"] = []
+
+    plan = AqsiCatalogSynchronizationService(session, aqsi_settings).plan(
+        actor_id=None,
+        retry_unchanged_failures=False,
+        gateway=gateway,
+    )
+    repair = session.get(PublicationAttempt, plan.attempt_ids[0])
+
+    assert plan.mismatched_count == 1
+    assert repair is not None
+    assert repair.operation is PublicationOperation.UPDATE
+
+
+def test_reconciliation_never_deletes_unexpected_managed_goods(
+    session: Session,
+    variant: CatalogVariant,
+    user: User,
+    aqsi_settings: Settings,
+) -> None:
+    """Locally inactive projections are reported and protected from remote deletion."""
+    service = AqsiPublicationService(session, aqsi_settings)
+    _, initial, _ = service.request_publication(variant.id, actor_id=user.id)
+    gateway = FakeAqsiGateway()
+    AqsiPublicationProcessor(session, aqsi_settings, gateway, sleeper=lambda _: None).process(
+        initial.id
+    )
+    variant.is_active = False
+    session.commit()
+
+    plan = AqsiCatalogSynchronizationService(session, aqsi_settings).plan(
+        actor_id=None,
+        retry_unchanged_failures=False,
+        gateway=gateway,
+    )
+
+    assert plan.expected == 0
+    assert plan.deletion_candidate_count == 1
+    assert plan.destructive_actions_blocked is True
+    assert plan.deletion_guard_triggered is True
+    assert plan.status == "needs_attention"
+    assert plan.queued == 0
 
 
 def test_processor_creates_category_good_and_verifies_projection(
@@ -710,6 +808,15 @@ def test_http_client_uses_official_v2_paths_and_secret_header(
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
+        if request.url.path.endswith("/Goods/list"):
+            page = int(request.url.params["pageNumber"])
+            return httpx2.Response(
+                200,
+                json={
+                    "rows": ([{"id": "first"}] if page == 0 else [{"id": "second"}]),
+                    "pages": 2,
+                },
+            )
         if request.url.path.endswith("/GoodsCategory/list"):
             return httpx2.Response(200, json=[])
         if request.url.path.endswith("/Shops/list"):
@@ -738,6 +845,7 @@ def test_http_client_uses_official_v2_paths_and_secret_header(
         transport=httpx2.MockTransport(handler),
     ) as client:
         assert client.category_exists(category.id) is False
+        assert [item["id"] for item in client.list_goods()] == ["first", "second"]
         client.create_category(category)
         assert client.get_good(payload.id) is None
         client.create_good(payload)
@@ -747,6 +855,8 @@ def test_http_client_uses_official_v2_paths_and_secret_header(
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/pub/v2/GoodsCategory/list"),
+        ("GET", "/pub/v2/Goods/list"),
+        ("GET", "/pub/v2/Goods/list"),
         ("POST", "/pub/v2/GoodsCategory"),
         ("GET", "/pub/v2/Goods/variant-id"),
         ("POST", "/pub/v2/Goods"),

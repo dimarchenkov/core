@@ -60,8 +60,10 @@ class AqsiPublicationService:
         *,
         actor_id: UUIDv7 | None,
         retry_unchanged_failure: bool = True,
+        force_republish: bool = False,
+        remote_missing: bool = False,
     ) -> tuple[Publication, PublicationAttempt, bool]:
-        """Persist one publication command or return its active duplicate."""
+        """Persist a command, optionally repairing verified state that drifted remotely."""
         self._ensure_configured()
         if self._variants.get_for_update(variant_id) is None:
             raise AqsiVariantNotFoundError
@@ -87,13 +89,14 @@ class AqsiPublicationService:
             active_attempt = self._attempts.latest_pending(publication.id)
             if active_attempt is not None and active_attempt.payload_hash == payload_hash:
                 return publication, active_attempt, False
-            if publication.last_verified_payload_hash == payload_hash:
+            if publication.last_verified_payload_hash == payload_hash and not force_republish:
                 latest_attempt = self._attempts.latest(publication.id)
                 if latest_attempt is not None:
                     return publication, latest_attempt, False
             latest_attempt = self._attempts.latest(publication.id)
             if (
                 not retry_unchanged_failure
+                and not force_republish
                 and latest_attempt is not None
                 and latest_attempt.status is PublicationAttemptStatus.FAILED
                 and latest_attempt.payload_hash == payload_hash
@@ -101,9 +104,9 @@ class AqsiPublicationService:
                 return publication, latest_attempt, False
 
         operation = (
-            PublicationOperation.UPDATE
-            if publication.last_verified_payload_hash is not None
-            else PublicationOperation.CREATE
+            PublicationOperation.CREATE
+            if publication.last_verified_payload_hash is None or remote_missing
+            else PublicationOperation.UPDATE
         )
         attempt = PublicationAttempt(
             publication_id=publication.id,

@@ -60,6 +60,7 @@ class AqsiSettingsRead(BaseModel):
     status: str
     using_legacy_environment: bool
     legacy_available: bool
+    catalog_reconciliation: AqsiCatalogReconciliationRead | None = None
 
 
 class ConnectionTestRead(BaseModel):
@@ -81,3 +82,36 @@ class CatalogSyncRequestRead(BaseModel):
 
     queued: bool
     message: str
+
+
+class AqsiCatalogReconciliationRead(BaseModel):
+    """Safe operator-facing summary of one full catalog comparison."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUIDv7
+    integration_id: UUIDv7
+    trigger: str
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+    expected_count: int
+    skipped_not_ready_count: int
+    remote_total_count: int
+    remote_managed_count: int
+    unmanaged_remote_count: int
+    missing_count: int
+    mismatched_count: int
+    deletion_candidate_count: int
+    queued_count: int
+    queue_failure_count: int
+    deletion_guard_triggered: bool
+    destructive_actions_blocked: bool
+    missing_external_ids: list[str]
+    mismatched_external_ids: list[str]
+    deletion_candidate_external_ids: list[str]
+    error_code: str | None
+    error_message: str | None
+
+
+AqsiSettingsRead.model_rebuild()

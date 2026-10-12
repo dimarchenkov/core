@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import SecretStr
 from redis.exceptions import RedisError
 from rq import Queue
@@ -15,6 +15,7 @@ from core.identity.dependencies import get_current_admin
 from core.identity.models import User
 from core.integrations.aqsi.client import AqsiApiError, AqsiHttpClient
 from core.integrations.aqsi.jobs import synchronize_aqsi_catalog
+from core.integrations.aqsi.repository import AqsiCatalogReconciliationRepository
 from core.integrations.credentials import (
     CredentialCipher,
     CredentialDecryptionError,
@@ -24,6 +25,7 @@ from core.integrations.master_key import MasterEncryptionKeyError
 from core.integrations.models import Integration
 from core.integrations.runtime import AmbiguousIntegrationError, get_aqsi_integration
 from core.integrations.schemas import (
+    AqsiCatalogReconciliationRead,
     AqsiSettingsRead,
     AqsiShopRead,
     CatalogSyncRequestRead,
@@ -202,6 +204,7 @@ def read_aqsi_settings(
             legacy_available=legacy_available,
         )
     projection = service.read(integration)
+    latest_reconciliation = AqsiCatalogReconciliationRepository(session).latest(integration.id)
     return AqsiSettingsRead(
         integration=projection,
         status=(
@@ -213,6 +216,11 @@ def read_aqsi_settings(
         ),
         using_legacy_environment=False,
         legacy_available=legacy_available,
+        catalog_reconciliation=(
+            AqsiCatalogReconciliationRead.model_validate(latest_reconciliation)
+            if latest_reconciliation is not None
+            else None
+        ),
     )
 
 
@@ -369,5 +377,31 @@ def synchronize_catalog_now(
         ) from exc
     return CatalogSyncRequestRead(
         queued=True,
-        message="Проверка каталога поставлена в очередь.",
+        message="Сверка и безопасное восстановление каталога поставлены в очередь.",
     )
+
+
+@router.get(
+    "/{integration_id}/sync-runs",
+    response_model=list[AqsiCatalogReconciliationRead],
+)
+def list_catalog_sync_runs(
+    integration_id: UUIDv7,
+    session: Annotated[Session, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> list[AqsiCatalogReconciliationRead]:
+    """Return bounded reconciliation history for diagnostics and audit."""
+    service = IntegrationService(session)
+    try:
+        integration = service.get(integration_id)
+    except IntegrationNotFoundError as exc:
+        raise _not_found(exc) from exc
+    if integration.provider is not IntegrationProvider.AQSI:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Catalog sync is not supported.")
+    return [
+        AqsiCatalogReconciliationRead.model_validate(run)
+        for run in AqsiCatalogReconciliationRepository(session).list_recent(
+            integration.id,
+            limit=limit,
+        )
+    ]

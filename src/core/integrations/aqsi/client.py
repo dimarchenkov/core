@@ -37,6 +37,9 @@ class AqsiGateway(Protocol):
     def get_good(self, external_id: str) -> dict[str, object] | None:
         """Return one AQSI good or None when it does not exist."""
 
+    def list_goods(self) -> list[dict[str, object]]:
+        """Return the complete account-wide AQSI goods catalog."""
+
     def create_good(self, payload: AqsiGoodsPayload) -> None:
         """Submit one AQSI good for creation."""
 
@@ -118,6 +121,46 @@ class AqsiHttpClient:
         if not isinstance(value, dict):
             raise AqsiApiError("invalid_response", "AQSI returned an invalid goods response.")
         return value
+
+    def list_goods(self) -> list[dict[str, object]]:
+        """Read every page of the account-wide AQSI goods catalog."""
+        page_number = 0
+        goods: list[dict[str, object]] = []
+        while True:
+            response = self._request(
+                "GET",
+                "/v2/Goods/list",
+                params={"pageNumber": page_number},
+            )
+            if response is None:
+                raise AqsiApiError("invalid_response", "AQSI returned an empty goods list.")
+            value = response.json()
+            if not isinstance(value, Mapping):
+                raise AqsiApiError("invalid_response", "AQSI returned an invalid goods list.")
+            rows = value.get("rows")
+            pages = value.get("pages")
+            if not isinstance(rows, list) or not isinstance(pages, int) or pages < 0:
+                raise AqsiApiError("invalid_response", "AQSI returned an invalid goods list.")
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    raise AqsiApiError(
+                        "invalid_response",
+                        "AQSI returned an invalid goods list row.",
+                    )
+                if not isinstance(row.get("id"), str) or not row["id"]:
+                    raise AqsiApiError(
+                        "invalid_response",
+                        "AQSI returned a goods list row without an identifier.",
+                    )
+                goods.append(dict(row))
+            page_number += 1
+            if page_number >= max(pages, 1):
+                return goods
+            if page_number > 10_000:
+                raise AqsiApiError(
+                    "invalid_response",
+                    "AQSI returned an unreasonable goods page count.",
+                )
 
     def create_good(self, payload: AqsiGoodsPayload) -> None:
         """Queue creation of one AQSI good."""
@@ -218,11 +261,12 @@ class AqsiHttpClient:
         path: str,
         *,
         json: dict[str, object] | None = None,
+        params: Mapping[str, object] | None = None,
         allow_not_found: bool = False,
     ) -> httpx2.Response | None:
         """Send one request and convert failures into safe domain errors."""
         try:
-            response = self._client.request(method, path, json=json)
+            response = self._client.request(method, path, json=json, params=params)
         except httpx2.ConnectTimeout as exc:
             raise AqsiApiError(
                 "connect_timeout",

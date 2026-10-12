@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator
+from datetime import UTC, datetime
 
 import pytest
 from cryptography.fernet import Fernet
@@ -18,6 +19,7 @@ from core.identity.security import create_access_token
 from core.identity.service import IdentityService
 from core.integrations.aqsi.client import AqsiApiError
 from core.integrations.aqsi.jobs import synchronize_aqsi_catalog
+from core.integrations.aqsi.models import AqsiCatalogReconciliationRun
 from core.integrations.credentials import FERNET_ALGORITHM, CredentialCipher
 from core.integrations.enums import CredentialKind, IntegrationProvider, ProviderCapability
 from core.integrations.models import Integration, IntegrationCredential
@@ -48,6 +50,7 @@ def session() -> Generator[Session]:
             PrivilegeAuditEvent.__table__,
             Integration.__table__,
             IntegrationCredential.__table__,
+            AqsiCatalogReconciliationRun.__table__,
         ],
     )
     factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -368,6 +371,49 @@ def test_admin_can_queue_full_aqsi_catalog_sync(
     assert function is synchronize_aqsi_catalog
     assert args == (str(admin.id), True)
     assert options["job_timeout"] == 300
+
+
+def test_aqsi_settings_exposes_latest_reconciliation_and_bounded_history(
+    client: TestClient,
+    session: Session,
+    admin: User,
+) -> None:
+    """Settings separates API connectivity from actual catalog consistency."""
+    integration = create_aqsi(IntegrationService(session), admin)
+    run = AqsiCatalogReconciliationRun(
+        integration_id=integration.id,
+        trigger="periodic",
+        status="repairing",
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        expected_count=92,
+        remote_total_count=0,
+        remote_managed_count=0,
+        unmanaged_remote_count=0,
+        missing_count=92,
+        mismatched_count=0,
+        deletion_candidate_count=0,
+        queued_count=92,
+        queue_failure_count=0,
+        missing_external_ids=["variant-1", "variant-2"],
+        mismatched_external_ids=[],
+        deletion_candidate_external_ids=[],
+    )
+    session.add(run)
+    session.commit()
+
+    settings_response = client.get("/api/settings/integrations/aqsi", headers=auth(admin))
+    history_response = client.get(
+        f"/api/settings/integrations/{integration.id}/sync-runs?limit=1",
+        headers=auth(admin),
+    )
+
+    assert settings_response.status_code == 200
+    assert settings_response.json()["catalog_reconciliation"]["missing_count"] == 92
+    assert settings_response.json()["catalog_reconciliation"]["status"] == "repairing"
+    assert history_response.status_code == 200
+    assert len(history_response.json()) == 1
+    assert history_response.json()[0]["queued_count"] == 92
 
 
 def test_connection_test_decrypts_server_side_without_leaking_secret(

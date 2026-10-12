@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 
 from core.config import Settings
 from core.integrations.aqsi.client import AqsiApiError, AqsiGateway
+from core.integrations.aqsi.comparison import (
+    aqsi_good_is_bound_to_shop,
+    aqsi_good_matches,
+)
 from core.integrations.aqsi.enums import (
     PublicationAttemptStatus,
     PublicationOperation,
@@ -64,13 +68,13 @@ class AqsiPublicationProcessor:
             remote = self._gateway.get_good(external_id)
             if (
                 remote is not None
-                and self._matches(remote, payload)
-                and self._is_bound_to_shop(remote, shop_id)
+                and aqsi_good_matches(remote, payload)
+                and aqsi_good_is_bound_to_shop(remote, shop_id)
             ):
                 self._mark_published(publication, attempt)
                 return
 
-            if remote is None or not self._matches(remote, payload):
+            if remote is None or not aqsi_good_matches(remote, payload):
                 if not was_accepted:
                     if remote is None:
                         attempt.operation = PublicationOperation.CREATE
@@ -85,7 +89,7 @@ class AqsiPublicationProcessor:
                 AqsiShopPricePayload.for_good(payload.id, shop_id, payload.price)
             )
             remote = self._wait_for_shop_binding(external_id, payload, shop_id)
-            if self._matches(remote, payload):
+            if aqsi_good_matches(remote, payload):
                 self._mark_published(publication, attempt)
         except (AqsiApiError, ValidationError) as exc:
             code = exc.code if isinstance(exc, AqsiApiError) else "invalid_payload"
@@ -141,7 +145,7 @@ class AqsiPublicationProcessor:
         """Poll until AQSI exposes the authoritative goods fields."""
         for verification_number in range(self._settings.aqsi_verification_attempts):
             remote = self._gateway.get_good(external_id)
-            if remote is not None and self._matches(remote, payload):
+            if remote is not None and aqsi_good_matches(remote, payload):
                 return remote
             if verification_number + 1 < self._settings.aqsi_verification_attempts:
                 self._sleeper(self._settings.aqsi_verification_interval_seconds)
@@ -162,8 +166,8 @@ class AqsiPublicationProcessor:
             remote = self._gateway.get_good(external_id)
             if (
                 remote is not None
-                and self._matches(remote, payload)
-                and self._is_bound_to_shop(remote, shop_id)
+                and aqsi_good_matches(remote, payload)
+                and aqsi_good_is_bound_to_shop(remote, shop_id)
             ):
                 return remote
             if verification_number + 1 < self._settings.aqsi_verification_attempts:
@@ -244,53 +248,3 @@ class AqsiPublicationProcessor:
         publication.status = PublicationStatus.ACCEPTED
         publication.last_error = None
         self._session.commit()
-
-    @staticmethod
-    def _matches(remote: dict[str, object], expected: AqsiGoodsPayload) -> bool:
-        """Compare the authoritative subset that Core owns in AQSI."""
-        expected_json = expected.as_aqsi_json()
-        fields = (
-            "id",
-            "group_id",
-            "type",
-            "name",
-            "sku",
-            "barcodes",
-        )
-        if any(remote.get(field) != expected_json.get(field) for field in fields):
-            return False
-        if AqsiPublicationProcessor._normalize_unit(remote.get("unit")) != (
-            AqsiPublicationProcessor._normalize_unit(expected_json["unit"])
-        ):
-            return False
-        for field in ("tax", "unitCode", "subject", "paymentMethodType"):
-            try:
-                if int(remote.get(field, -1)) != int(expected_json[field]):
-                    return False
-            except (TypeError, ValueError):
-                return False
-        try:
-            return float(remote.get("price", -1)) == expected.price
-        except (TypeError, ValueError):
-            return False
-
-    @staticmethod
-    def _normalize_unit(value: object) -> str:
-        """Treat AQSI's canonical piece abbreviation as equal to our display name."""
-        normalized = str(value).strip().casefold()
-        if normalized in {"штука", "шт", "шт."}:
-            return "piece"
-        return normalized
-
-    @staticmethod
-    def _is_bound_to_shop(remote: dict[str, object], shop_id: str) -> bool:
-        """Return whether AQSI reports the good in the selected active shop."""
-        shops = remote.get("shops")
-        if not isinstance(shops, list):
-            return False
-        return any(
-            isinstance(shop, dict)
-            and str(shop.get("id")) == shop_id
-            and shop.get("deletedAt") is None
-            for shop in shops
-        )

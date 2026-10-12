@@ -772,7 +772,11 @@ test('Settings exposes safe AQSI controls without a secret reveal action', () =>
   assert.match(source, /Заменить ключ/);
   assert.match(source, /Проверить подключение/);
   assert.match(source, /Автоматическая синхронизация каталога/);
-  assert.match(source, /Синхронизировать сейчас/);
+  assert.match(source, /Проверить и восстановить/);
+  assert.match(source, /Ожидается из Core/);
+  assert.match(source, /AQSI, управляется Core/);
+  assert.match(source, /destructive_actions_blocked/);
+  assert.match(source, /Core не удаляет внешние товары автоматически/);
   assert.match(source, /catalog_sync_enabled/);
   assert.match(source, /aqsi-checkout-form/);
   assert.match(source, /device_id: deviceId/);

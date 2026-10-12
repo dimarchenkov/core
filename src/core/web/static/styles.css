@@ -540,6 +540,7 @@ body.catalog-drawer-open { overflow: hidden; }
 .settings-shell { max-width: 760px; }
 .integration-card { margin-top: 24px; }
 .settings-warning { margin: 20px 0; padding: 16px; background: #fff2dd; border: 1px solid #efd4ab; border-radius: 16px; }
+.settings-warning.settings-ok { background: #edf8f1; border-color: #b9dec6; }
 .settings-warning p { margin: 6px 0 12px; }
 .settings-facts { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; margin: 18px 0 12px; }
 .settings-facts > div { display: grid; gap: 4px; }

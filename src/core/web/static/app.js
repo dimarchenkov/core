@@ -598,6 +598,37 @@ function aqsiAcquiringModeOptions(selected = "sbp_with_card") {
   return values.map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
 }
 
+function catalogSyncStatusLabel(reconciliation) {
+  if (!reconciliation) return "Не проверялся";
+  if (reconciliation.status === "healthy") return "Согласован";
+  if (reconciliation.status === "repairing") return "Восстанавливается";
+  if (reconciliation.status === "needs_attention") return "Требует внимания";
+  if (reconciliation.status === "failed") return "Ошибка проверки";
+  return "Проверяется";
+}
+
+function renderAqsiReconciliation(reconciliation) {
+  if (!reconciliation) {
+    return `<div class="settings-warning"><strong>Каталог AQSI ещё не сверялся</strong><p class="muted small">Подключение к API не подтверждает наличие товаров. Запустите сверку каталога.</p></div>`;
+  }
+  const good = reconciliation.status === "healthy";
+  const warning = reconciliation.status === "needs_attention" || reconciliation.status === "failed";
+  return `<div class="settings-warning ${good ? "settings-ok" : ""}">
+    <div class="section-heading"><strong>Состояние каталога</strong><span class="chip ${good ? "good" : warning ? "warn" : ""}">${escapeHtml(catalogSyncStatusLabel(reconciliation))}</span></div>
+    <div class="settings-facts">
+      <div><span class="muted small">Ожидается из Core</span><strong>${reconciliation.expected_count}</strong></div>
+      <div><span class="muted small">AQSI, управляется Core</span><strong>${reconciliation.remote_managed_count}</strong></div>
+      <div><span class="muted small">Отсутствуют</span><strong>${reconciliation.missing_count}</strong></div>
+      <div><span class="muted small">Не совпадают</span><strong>${reconciliation.mismatched_count}</strong></div>
+      <div><span class="muted small">Чужие товары AQSI</span><strong>${reconciliation.unmanaged_remote_count}</strong></div>
+      <div><span class="muted small">Кандидаты на удаление</span><strong>${reconciliation.deletion_candidate_count}</strong></div>
+    </div>
+    ${reconciliation.destructive_actions_blocked ? `<p class="muted small">Удаление в AQSI заблокировано. Core не удаляет внешние товары автоматически${reconciliation.deletion_guard_triggered ? " — сработал предохранитель массового удаления" : ""}.</p>` : ""}
+    ${reconciliation.error_message ? `<p class="muted small">${escapeHtml(reconciliation.error_message)}</p>` : ""}
+    <p class="muted small">Последняя сверка: ${formatDate(reconciliation.completed_at || reconciliation.started_at)}</p>
+  </div>`;
+}
+
 function renderSettings(aqsi, agreement) {
   const integration = aqsi.integration;
   const configuration = integration?.configuration || {};
@@ -638,9 +669,10 @@ function renderSettings(aqsi, agreement) {
       </form>
       <div class="divider"></div>
       <div class="settings-sync-control">
+        ${renderAqsiReconciliation(aqsi.catalog_reconciliation)}
         <label class="settings-toggle"><input id="aqsi-auto-sync" type="checkbox" ${configuration.catalog_sync_enabled ? "checked" : ""} ${integration.enabled && savedAt ? "" : "disabled"}> <span>Автоматическая синхронизация каталога</span></label>
-        <p class="muted small">Каждые 5 минут Core отправляет новые и изменившиеся готовые варианты. Архивирование в AQSI пока выполняется отдельно.</p>
-        <button class="button secondary" id="sync-aqsi-now" type="button" ${integration.enabled && savedAt ? "" : "disabled"}>Синхронизировать сейчас</button>
+        <p class="muted small">Каждые 5 минут Core сравнивает полное множество управляемых товаров, восстанавливает отсутствующие и исправляет расхождения. Удаление в AQSI не выполняется автоматически.</p>
+        <div class="inline-actions"><button class="button secondary" id="sync-aqsi-now" type="button" ${integration.enabled && savedAt ? "" : "disabled"}>Проверить и восстановить</button><button class="button ghost" id="refresh-aqsi-sync" type="button">Обновить статус</button></div>
       </div>` : `<form id="new-aqsi-form">
         <div class="field"><label for="new-aqsi-key">API key</label><input id="new-aqsi-key" name="api_key" type="password" autocomplete="new-password" required></div>
         <label class="settings-toggle"><input name="enabled" type="checkbox" checked> <span>Интеграция включена</span></label>
@@ -662,6 +694,7 @@ function renderSettings(aqsi, agreement) {
   document.querySelector("#aqsi-checkout-form")?.addEventListener("submit", (event) => saveAqsiCheckout(event, integration));
   document.querySelector("#aqsi-auto-sync")?.addEventListener("change", (event) => updateAqsiAutoSync(event, integration));
   document.querySelector("#sync-aqsi-now")?.addEventListener("click", () => synchronizeAqsiNow(integration));
+  document.querySelector("#refresh-aqsi-sync")?.addEventListener("click", () => openSettings());
   document.querySelector("#agreement-lessor-form")?.addEventListener("submit", saveAgreementLessorSettings);
   document.querySelector("#agreement-template-preview")?.addEventListener("click", previewAgreementTemplate);
   document.querySelector("#agreement-template-form")?.addEventListener("submit", saveAgreementTemplate);
