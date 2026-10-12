@@ -34,6 +34,11 @@ from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.pricing.schemas import PriceCreate
 from core.pricing.service import PriceService
+from core.rental.agreement_models import (
+    RentalAgreementRecord,
+    RentalAgreementSettingsRecord,
+    RentalAgreementTemplateVersionRecord,
+)
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
 from core.rental.exceptions import RentalDomainError
 from core.rental.lifecycle_routes import get_lifecycle_image_service
@@ -92,6 +97,9 @@ def session() -> Generator[Session]:
             RentalMaintenanceRecord.__table__,
             RentalDamageRecord.__table__,
             RentalConditionPhotoRecord.__table__,
+            RentalAgreementSettingsRecord.__table__,
+            RentalAgreementTemplateVersionRecord.__table__,
+            RentalAgreementRecord.__table__,
         ],
     )
     factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)

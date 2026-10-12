@@ -10,7 +10,7 @@ from core.rental.exceptions import (
     RetirementReasonRequiredError,
 )
 from core.rental.order import RentalOrder, RentalOrderItem
-from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus
+from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus, RentalTimingSource
 from core.rental.order_exceptions import (
     DuplicateRentalAssetError,
     InvalidRentalMoneyError,
@@ -45,5 +45,6 @@ __all__ = [
     "RentalOrderItemNotFoundError",
     "RentalOrderItemStatus",
     "RentalOrderStatus",
+    "RentalTimingSource",
     "RetirementReasonRequiredError",
 ]

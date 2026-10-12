@@ -30,12 +30,15 @@ from core.media.routes import image_link_router, image_router
 from core.pricing.routes import router as pricing_router
 from core.readiness.routes import router as readiness_router
 from core.receipt.routes import router as receipt_router
+from core.rental.agreement_routes import agreement_router as rental_agreement_router
+from core.rental.agreement_routes import settings_router as rental_agreement_settings_router
 from core.rental.allocation_routes import router as rental_allocation_router
 from core.rental.asset_routes import router as rental_asset_router
 from core.rental.economics_routes import router as rental_economics_router
 from core.rental.lifecycle_routes import router as rental_lifecycle_router
 from core.rental.operations_routes import router as rental_operations_router
 from core.rental.order_routes import router as rental_order_router
+from core.rental.tariff_routes import router as rental_tariff_router
 from core.sales.routes import router as sales_router
 from core.supplier.routes import router as supplier_router
 from core.web.routes import router as web_router
@@ -96,10 +99,13 @@ def create_app() -> FastAPI:
     app.include_router(customer_router)
     app.include_router(rental_asset_router)
     app.include_router(rental_allocation_router)
+    app.include_router(rental_agreement_router)
+    app.include_router(rental_agreement_settings_router)
     app.include_router(rental_economics_router)
     app.include_router(rental_operations_router)
     app.include_router(rental_lifecycle_router)
     app.include_router(rental_order_router)
+    app.include_router(rental_tariff_router)
     app.include_router(sales_router)
     app.include_router(identity_router)
     app.include_router(activity_router)

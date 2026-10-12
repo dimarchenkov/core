@@ -76,8 +76,7 @@ def rental_order_to_record(
         created_by_id=actor_id,
     )
     record.items = [
-        _rental_order_item_to_record(item, order.id, actor_id=actor_id)
-        for item in order.items
+        _rental_order_item_to_record(item, order.id, actor_id=actor_id) for item in order.items
     ]
     return record
 
@@ -127,10 +126,31 @@ def update_rental_order_record(
                 _rental_order_item_to_record(domain_item, order.id, actor_id=actor_id)
             )
             continue
+        item_record.rental_asset_id = domain_item.rental_asset_id
+        item_record.asset_number_snapshot = domain_item.asset_number_snapshot
+        item_record.title_snapshot = domain_item.title_snapshot
+        item_record.agreed_price = domain_item.agreed_price
+        item_record.discount = domain_item.discount
+        item_record.rental_tariff_id = domain_item.rental_tariff_id
+        item_record.rental_tariff_version = domain_item.rental_tariff_version
+        item_record.timing_source = domain_item.timing_source
+        item_record.tariff_snapshot = domain_item.tariff_snapshot
+        item_record.planned_rental_date = domain_item.planned_rental_date
+        item_record.planned_start_at = domain_item.planned_start_at
+        item_record.issued_at = domain_item.issued_at
+        item_record.due_at = domain_item.due_at
+        item_record.recommended_deposit = domain_item.recommended_deposit
         item_record.status = domain_item.status
         item_record.charged_amount = domain_item.charged_amount
         item_record.returned_at = domain_item.returned_at
         item_record.return_note = domain_item.return_note
+        item_record.return_condition = domain_item.return_condition
+        item_record.overdue_state = domain_item.overdue_state
+        item_record.overdue_minutes = domain_item.overdue_minutes
+        item_record.overdue_charge = domain_item.overdue_charge
+        item_record.damage_charge = domain_item.damage_charge
+        item_record.deposit_applied = domain_item.deposit_applied
+        item_record.return_calculation_snapshot = domain_item.return_calculation_snapshot
         item_record.updated_by_id = actor_id
 
 
@@ -149,9 +169,25 @@ def _rental_order_item_to_record(
         title_snapshot=item.title_snapshot,
         agreed_price=item.agreed_price,
         discount=item.discount,
+        rental_tariff_id=item.rental_tariff_id,
+        rental_tariff_version=item.rental_tariff_version,
+        timing_source=item.timing_source,
+        tariff_snapshot=item.tariff_snapshot,
+        planned_rental_date=item.planned_rental_date,
+        planned_start_at=item.planned_start_at,
+        issued_at=item.issued_at,
+        due_at=item.due_at,
+        recommended_deposit=item.recommended_deposit,
         charged_amount=item.charged_amount,
         returned_at=item.returned_at,
         return_note=item.return_note,
+        return_condition=item.return_condition,
+        overdue_state=item.overdue_state,
+        overdue_minutes=item.overdue_minutes,
+        overdue_charge=item.overdue_charge,
+        damage_charge=item.damage_charge,
+        deposit_applied=item.deposit_applied,
+        return_calculation_snapshot=item.return_calculation_snapshot,
         status=item.status,
         created_by_id=actor_id,
     )
@@ -166,8 +202,24 @@ def _rental_order_item_from_record(record: RentalOrderItemRecord) -> RentalOrder
         title_snapshot=record.title_snapshot,
         agreed_price=record.agreed_price,
         discount=record.discount,
+        rental_tariff_id=record.rental_tariff_id,
+        rental_tariff_version=record.rental_tariff_version,
+        timing_source=record.timing_source,
+        tariff_snapshot=record.tariff_snapshot,
+        planned_rental_date=record.planned_rental_date,
+        planned_start_at=record.planned_start_at,
+        issued_at=record.issued_at,
+        due_at=record.due_at,
+        recommended_deposit=record.recommended_deposit,
         charged_amount=record.charged_amount,
         returned_at=record.returned_at,
         return_note=record.return_note,
+        return_condition=record.return_condition,
+        overdue_state=record.overdue_state,
+        overdue_minutes=record.overdue_minutes,
+        overdue_charge=record.overdue_charge,
+        damage_charge=record.damage_charge,
+        deposit_applied=record.deposit_applied,
+        return_calculation_snapshot=record.return_calculation_snapshot,
         status=record.status,
     )

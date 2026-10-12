@@ -185,6 +185,22 @@ class RentalAsset:
         )
         self._touch()
 
+    def mark_lost_during_rental(self, reason: str) -> None:
+        """Retire a rented asset that the operator confirms was not returned."""
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise RetirementReasonRequiredError
+        if (
+            self._purpose is not AssetPurpose.RENTAL
+            or self._availability is not RentalAvailability.RENTED
+        ):
+            self._raise_invalid_state("mark lost during rental")
+        self._purpose = AssetPurpose.RETIRED
+        self._condition = AssetCondition.UNUSABLE
+        self._availability = RentalAvailability.MAINTENANCE
+        self._retirement_reason = normalized_reason
+        self._touch()
+
     def send_to_maintenance(self) -> None:
         """Remove an available rental asset from circulation for service."""
         if (

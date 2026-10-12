@@ -1,13 +1,31 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
-from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus
+from core.rental.order_enums import (
+    RentalOrderItemStatus,
+    RentalOrderStatus,
+    RentalOverdueState,
+    RentalReturnCondition,
+    RentalTimingSource,
+)
 from core.shared.db import BaseModel, UUIDv7
 
 
@@ -122,6 +140,22 @@ class RentalOrderItemRecord(BaseModel):
             "rental_asset_id",
             name="uq_rental_order_items_order_asset",
         ),
+        CheckConstraint(
+            "overdue_minutes IS NULL OR overdue_minutes >= 0",
+            name="ck_rental_order_items_overdue_minutes_nonnegative",
+        ),
+        CheckConstraint(
+            "overdue_charge IS NULL OR overdue_charge >= 0",
+            name="ck_rental_order_items_overdue_charge_nonnegative",
+        ),
+        CheckConstraint(
+            "damage_charge IS NULL OR damage_charge >= 0",
+            name="ck_rental_order_items_damage_charge_nonnegative",
+        ),
+        CheckConstraint(
+            "deposit_applied IS NULL OR deposit_applied >= 0",
+            name="ck_rental_order_items_deposit_applied_nonnegative",
+        ),
     )
 
     order_id: Mapped[UUIDv7] = mapped_column(
@@ -138,6 +172,27 @@ class RentalOrderItemRecord(BaseModel):
     title_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
     agreed_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    rental_tariff_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("rental_tariffs.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    rental_tariff_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timing_source: Mapped[RentalTimingSource | None] = mapped_column(
+        Enum(RentalTimingSource, name="rental_timing_source", values_callable=_enum_values),
+        nullable=True,
+    )
+    tariff_snapshot: Mapped[dict[str, str | int | bool | None] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    planned_rental_date: Mapped[date | None] = mapped_column(Date(), nullable=True)
+    planned_start_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    issued_by_id: Mapped[UUIDv7 | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recommended_deposit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     charged_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     returned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_by_id: Mapped[UUIDv7 | None] = mapped_column(
@@ -145,6 +200,29 @@ class RentalOrderItemRecord(BaseModel):
         nullable=True,
     )
     return_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    return_condition: Mapped[RentalReturnCondition | None] = mapped_column(
+        Enum(
+            RentalReturnCondition,
+            name="rental_return_condition",
+            values_callable=_enum_values,
+        ),
+        nullable=True,
+    )
+    overdue_state: Mapped[RentalOverdueState | None] = mapped_column(
+        Enum(
+            RentalOverdueState,
+            name="rental_overdue_state",
+            values_callable=_enum_values,
+        ),
+        nullable=True,
+    )
+    overdue_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    overdue_charge: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    damage_charge: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    deposit_applied: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    return_calculation_snapshot: Mapped[dict[str, str | int | bool | None] | None] = mapped_column(
+        JSON, nullable=True
+    )
     status: Mapped[RentalOrderItemStatus] = mapped_column(
         Enum(
             RentalOrderItemStatus,

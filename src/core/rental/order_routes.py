@@ -9,25 +9,37 @@ from sqlalchemy.orm import Session
 from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
+from core.rental.agreement_service import RentalAgreementTermsLockedError
 from core.rental.exceptions import RentalDomainError
 from core.rental.order import RentalOrder
 from core.rental.order_enums import RentalOrderStatus
-from core.rental.order_exceptions import RentalOrderDomainError
+from core.rental.order_exceptions import ExpiredRentalSlotError, RentalOrderDomainError
 from core.rental.order_schemas import (
+    RentalIssuePreview,
+    RentalItemsReturn,
     RentalOrderCreate,
+    RentalOrderIssue,
     RentalOrderItemCreate,
     RentalOrderItemReturn,
     RentalOrderItemsComplete,
     RentalOrderRead,
+    RentalOrderTariffConfigure,
     RentalOrderUpdate,
+    RentalReturnPreview,
 )
 from core.rental.order_service import (
+    RentalAgreementRequiredError,
     RentalAssetNotFoundError,
     RentalAssetVariantNotFoundError,
     RentalCustomerUnavailableError,
+    RentalIssueTimeError,
     RentalOrderNotFoundError,
     RentalOrderService,
+    RentalTariffUnavailableError,
+    RentalTariffVariantMismatchError,
+    RentalTimingInputError,
 )
+from core.rental.return_calculator import RentalReturnRuleError
 from core.shared.db import UUIDv7
 
 router = APIRouter(
@@ -88,6 +100,31 @@ def update_rental_order(
     return _execute(lambda: service.update_draft(order_id, data, actor_id=current_user.id))
 
 
+@router.post("/{order_id}/tariff-items", response_model=RentalOrderRead)
+def add_rental_tariff_item(
+    order_id: UUIDv7,
+    data: RentalOrderTariffConfigure,
+    service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalOrder:
+    """Add one fully configured item to an editable Rental."""
+    return _execute(lambda: service.add_tariff_item(order_id, data, actor_id=current_user.id))
+
+
+@router.put("/{order_id}/tariff-items/{item_id}", response_model=RentalOrderRead)
+def update_rental_tariff_item(
+    order_id: UUIDv7,
+    item_id: UUIDv7,
+    data: RentalOrderTariffConfigure,
+    service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalOrder:
+    """Edit one configured item without changing its siblings."""
+    return _execute(
+        lambda: service.update_tariff_item(order_id, item_id, data, actor_id=current_user.id)
+    )
+
+
 @router.post("/{order_id}/items", response_model=RentalOrderRead)
 def add_rental_order_item(
     order_id: UUIDv7,
@@ -111,14 +148,27 @@ def remove_rental_order_item(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get("/{order_id}/issue-preview", response_model=RentalIssuePreview)
+def preview_rental_order_issue(
+    order_id: UUIDv7,
+    service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
+) -> RentalIssuePreview:
+    """Return a server-time issue projection for explicit confirmation."""
+    try:
+        return service.issue_preview(order_id)
+    except RentalOrderNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental order not found.") from exc
+
+
 @router.post("/{order_id}/issue", response_model=RentalOrderRead)
 def issue_rental_order(
     order_id: UUIDv7,
     service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
     current_user: Annotated[User, Depends(get_current_user)],
+    data: RentalOrderIssue | None = None,
 ) -> RentalOrder:
     """Issue all order items and their physical assets atomically."""
-    return _execute(lambda: service.issue(order_id, actor_id=current_user.id))
+    return _execute(lambda: service.issue(order_id, data, actor_id=current_user.id))
 
 
 @router.post("/{order_id}/cancel", response_model=RentalOrderRead)
@@ -140,9 +190,7 @@ def return_rental_order_item(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> RentalOrder:
     """Return one item and update its physical asset in the same transaction."""
-    return _execute(
-        lambda: service.return_item(order_id, item_id, data, actor_id=current_user.id)
-    )
+    return _execute(lambda: service.return_item(order_id, item_id, data, actor_id=current_user.id))
 
 
 @router.post("/{order_id}/complete-items", response_model=RentalOrderRead)
@@ -154,6 +202,36 @@ def complete_rental_order_items(
 ) -> RentalOrder:
     """Complete one or many returned/lost items in one transaction."""
     return _execute(lambda: service.complete_items(order_id, data, actor_id=current_user.id))
+
+
+@router.post("/{order_id}/return-preview", response_model=RentalReturnPreview)
+def preview_rental_order_return(
+    order_id: UUIDv7,
+    data: RentalItemsReturn,
+    service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
+) -> RentalReturnPreview:
+    """Preview authoritative overdue and deposit calculations without mutation."""
+    try:
+        return service.preview_return(order_id, data)
+    except RentalOrderNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental order not found.") from exc
+    except RentalReturnRuleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RentalTimingInputError as exc:
+        raise HTTPException(status_code=409, detail="Rental return timing is unavailable.") from exc
+    except (RentalOrderDomainError, RentalDomainError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc) or exc.__class__.__name__) from exc
+
+
+@router.post("/{order_id}/return", response_model=RentalOrderRead)
+def return_rental_order_items(
+    order_id: UUIDv7,
+    data: RentalItemsReturn,
+    service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalOrder:
+    """Return one or all inspected items through the shared atomic workflow."""
+    return _execute(lambda: service.return_items(order_id, data, actor_id=current_user.id))
 
 
 def _execute(
@@ -173,6 +251,33 @@ def _execute(
     except RentalCustomerUnavailableError as exc:
         code = 404 if not_found_customer else 409
         raise HTTPException(status_code=code, detail="Customer is unavailable.") from exc
+    except RentalTariffUnavailableError as exc:
+        raise HTTPException(status_code=409, detail="Rental tariff is not selectable.") from exc
+    except RentalTariffVariantMismatchError as exc:
+        raise HTTPException(
+            status_code=409, detail="Rental tariff does not belong to the selected asset."
+        ) from exc
+    except RentalTimingInputError as exc:
+        raise HTTPException(status_code=409, detail="Rental timing is invalid.") from exc
+    except RentalAgreementRequiredError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Договор обязателен. Сформируйте договор перед выдачей.",
+        ) from exc
+    except RentalAgreementTermsLockedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Условия заблокированы сформированным договором.",
+        ) from exc
+    except RentalIssueTimeError as exc:
+        raise HTTPException(status_code=409, detail="Время выдачи недопустимо.") from exc
+    except RentalReturnRuleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ExpiredRentalSlotError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Слот уже завершён. Исправьте условия перед выдачей.",
+        ) from exc
     except (RentalOrderDomainError, RentalDomainError) as exc:
         raise HTTPException(
             status_code=409,

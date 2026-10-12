@@ -127,6 +127,20 @@ def test_damaged_return_routes_asset_to_maintenance(condition: AssetCondition) -
     assert asset.availability is RentalAvailability.MAINTENANCE
 
 
+def test_lost_rented_asset_is_retired_without_deleting_identity() -> None:
+    """Operational loss closes the rental while keeping the permanent asset passport."""
+    asset = create_asset()
+    asset.checkout()
+
+    asset.mark_lost_during_rental("Клиент подтвердил утрату")
+
+    assert asset.id == ASSET_ID
+    assert asset.purpose is AssetPurpose.RETIRED
+    assert asset.condition is AssetCondition.UNUSABLE
+    assert asset.availability is RentalAvailability.MAINTENANCE
+    assert asset.retirement_reason == "Клиент подтвердил утрату"
+
+
 def test_checkout_rejects_asset_that_is_not_available() -> None:
     """The same physical item cannot be issued twice."""
     asset = create_asset()

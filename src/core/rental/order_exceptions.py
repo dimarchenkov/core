@@ -35,3 +35,7 @@ class RentalOrderItemNotFoundError(RentalOrderDomainError):
 
 class InvalidRentalOrderItemStateError(RentalOrderDomainError):
     """Raised when an item command is invalid in its current state."""
+
+
+class ExpiredRentalSlotError(RentalOrderDomainError):
+    """Raised when physical issue is attempted after a fixed SLOT has ended."""

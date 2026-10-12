@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000)
     database_url: str = Field(default="postgresql+psycopg://core:core@localhost:5432/core")
     redis_url: str = Field(default="redis://localhost:6379/0")
+    rental_timezone: str = Field(default="Europe/Moscow")
     storage_root: Path = Field(default=Path("storage"))
     jwt_secret: str
     jwt_algorithm: str = Field(default="HS256")
