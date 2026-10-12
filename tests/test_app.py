@@ -47,7 +47,8 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert 'name="rental_quantity"' in script.text
     assert "Из них в аренду" in script.text
     assert "Возврат аренды" in script.text
-    assert "/complete-items" in script.text
+    assert "/return-preview" in script.text
+    assert "`/rental/orders/${state.rental.order.id}/return`" in script.text
     assert "Просрочен" in script.text
     assert "/api/operations/catalog/products" in script.text
     assert "/api/operations/rental/assets" in script.text
@@ -67,6 +68,46 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "Каталог" in script.text
     assert "Экземпляры" not in script.text
     assert "Цена продажи" in script.text
+    assert "/api/rental/variants/${variant.id}/tariffs?view=management" in script.text
+    assert "openRentalTariffEditor" in script.text
+    assert "Добавить тариф" in script.text
+    assert "По длительности" in script.text
+    assert "Временной слот" in script.text
+    assert "Договор обязателен" in script.text
+    assert "История" in script.text
+    assert "/tariff-items" in script.text
+    assert "Другой срок" in script.text
+    assert "Срок начнётся в момент фактической выдачи" in script.text
+    assert "Итоговые условия заказа" in script.text
+    assert "Позиция сохранена" in script.text
+    assert "Добавить оборудование" in script.text
+    assert "Аренда подготовлена и готова к выдаче" in script.text
+    assert 'id="rental-ready-issue"' in script.text
+    assert "Ожидают выдачи" in script.text
+    assert "Выдать оборудование" in script.text
+    assert "Сформировать договор" in script.text
+    assert "Договор проката" in script.text
+    assert "Паспортные данные в Core не сохраняются" in script.text
+    assert "/agreement-preview" in script.text
+    assert "/api/settings/rental/agreement" in script.text
+    assert "Принять возврат" in script.text
+    assert "data-rental-due" in script.text
+    assert "Просрочка" in script.text
+    assert "Оформить возврат" in script.text
+    assert "Предварительный расчёт" in script.text
+    assert "/issue-preview" in script.text
+    assert 'name="slot_start" type="time"' in script.text
+    assert 'name="valid_from" type="date"' in script.text
+    assert ".tariff-list" in styles.text
+    assert ".tariff-time-row" in styles.text
+    assert ".tariff-choice-list" in styles.text
+    assert ".rental-ready-summary" in styles.text
+    assert ".rental-operation-card" in styles.text
+    assert ".issue-preview-list" in styles.text
+    assert ".return-calculation" in styles.text
+    assert ".agreement-preview-shell" in styles.text
+    assert ".agreement-settings-card" in styles.text
+    assert "grid-template-columns: minmax(0, 1fr)" in styles.text
     assert "Цена не указана" in script.text
     assert "/api/labels/variants/" in script.text
     assert "/api/labels/variants/print-capability" in script.text
@@ -104,7 +145,24 @@ def test_openapi_schema_is_public() -> None:
     response = client.get("/openapi.json")
 
     assert response.status_code == 200
-    assert response.json()["info"]["title"] == "Core"
+    schema = response.json()
+    assert schema["info"]["title"] == "Core"
+    assert "/api/rental/variants/{variant_id}/tariffs" in schema["paths"]
+    assert "/api/rental/tariffs/{tariff_id}" in schema["paths"]
+    assert "/api/rental/tariffs/{tariff_id}/history" in schema["paths"]
+    assert "/api/rental/tariffs/{tariff_id}/archive" in schema["paths"]
+    assert "/rental/orders/{order_id}/tariff-items" in schema["paths"]
+    assert "/rental/orders/{order_id}/tariff-items/{item_id}" in schema["paths"]
+    assert "/rental/orders/{order_id}/issue-preview" in schema["paths"]
+    assert "/rental/orders/{order_id}/issue" in schema["paths"]
+    assert "/api/settings/rental/agreement" in schema["paths"]
+    assert "/api/settings/rental/agreement/lessor" in schema["paths"]
+    assert "/api/settings/rental/agreement/templates" in schema["paths"]
+    assert "/api/settings/rental/agreement/preview" in schema["paths"]
+    assert "/rental/orders/{order_id}/agreement" in schema["paths"]
+    assert "/rental/orders/{order_id}/agreement-preview" in schema["paths"]
+    assert "/rental/orders/{order_id}/agreements" in schema["paths"]
+    assert "/rental/agreements/{agreement_id}/pdf" in schema["paths"]
 
 
 def test_legacy_intake_openapi_operation_is_deprecated() -> None:

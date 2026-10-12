@@ -730,7 +730,8 @@ test('Rental details are conditional and sale-only Variant keeps one rental entr
   }, product, true);
   assert.match(rental, /Аренда[\s\S]*350[\s\S]*5[^<]*000/);
   assert.match(rental, /Экземпляров: 3[\s\S]*Доступно: 2[\s\S]*Выдано: 1/);
-  assert.match(rental, /Изменить условия/);
+  assert.match(rental, /Базовые условия/);
+  assert.match(rental, /Тарифы[\s\S]*Добавить тариф/);
 });
 
 test('Inventory adjustment uses Russian reason labels and submits a ledger delta', () => {
@@ -765,7 +766,7 @@ test('Characteristics and dialogs stay single-column on narrow mobile screens', 
 test('Settings exposes safe AQSI controls without a secret reveal action', () => {
   assert.match(source, /route\.name === "settings"/);
   assert.match(source, /<strong>Настройки<\/strong>/);
-  assert.match(source, /Настройки[\s\S]*<h1>Интеграции<\/h1>/);
+  assert.match(source, /Настройки[\s\S]*<h1>Настройки<\/h1>[\s\S]*<h2>AQSI<\/h2>/);
   assert.match(source, /API key[\s\S]*•{10,}/);
   assert.match(source, /type="password"[\s\S]*autocomplete="new-password"/);
   assert.match(source, /Заменить ключ/);
@@ -905,6 +906,180 @@ test('Checkout UI selects cash or card/QR and recovers persisted provider states
   assert.match(styles, /\.checkout-method-options input\[type="radio"\] \{[^}]*width: 24px[^}]*min-height: 24px/);
   assert.match(styles, /\.checkout-method-options label span \{[^}]*flex: 1 1 auto[^}]*text-align: left/);
   assert.match(styles, /overflow-wrap: anywhere/);
+});
+
+test('Rental draft UI supports independent tariff-driven items and stops at READY', () => {
+  assert.match(source, /Продолжить к оборудованию/);
+  assert.match(source, /2\. Позиции аренды/);
+  assert.match(source, /3\. Тариф позиции/);
+  assert.match(source, /\/tariff-items/);
+  assert.match(source, /Добавить оборудование/);
+  assert.match(source, /Изменить/);
+  assert.match(source, /Удалить/);
+  assert.match(source, /recommended_deposit_total/);
+  assert.match(source, /Срок начнётся в момент фактической выдачи/);
+  assert.match(source, /Другой срок/);
+  assert.doesNotMatch(source, /Физическая выдача оборудования будет отдельным действием/);
+  assert.match(styles, /\.tariff-choice:has\(input:checked\)/);
+  assert.match(styles, /\.rental-item-card/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.rental-ready-summary/);
+});
+
+test('Rental READY detail exposes the shared Issue flow and other states do not', () => {
+  const s = setup();
+  const base = {
+    id:'order', items:[{id:'item'}], rental_total:'350.00',
+    recommended_deposit_total:'2000.00', requires_agreement:false,
+  };
+  const ready = s.context.renderRentalReadySummary({...base, status:'ready'});
+  const draft = s.context.renderRentalReadySummary({...base, status:'draft'});
+  const active = s.context.renderRentalReadySummary({...base, status:'issued'});
+  const agreementMissing = s.context.renderRentalReadySummary({...base, status:'ready', requires_agreement:true});
+
+  assert.match(ready, /Аренда подготовлена и готова к выдаче/);
+  assert.match(ready, /id="rental-ready-issue"[\s\S]*Выдать оборудование/);
+  assert.doesNotMatch(draft, /id="rental-ready-issue"|Выдать оборудование/);
+  assert.doesNotMatch(active, /id="rental-ready-issue"|Выдать оборудование/);
+  assert.match(agreementMissing, /Перед выдачей сформируйте договор[\s\S]*Сформировать договор/);
+  assert.doesNotMatch(agreementMissing, /id="rental-ready-issue"/);
+  vm.runInContext("state.rental.agreement = {id:'agreement', agreement_number:'R-20261010-0001', generated_at:'2026-10-10T09:00:00Z', template_version:1};", s.context);
+  const agreementReady = s.context.renderRentalReadySummary({...base, status:'ready', requires_agreement:true});
+  assert.match(agreementReady, /Договор № R-20261010-0001[\s\S]*Открыть[\s\S]*Печать/);
+  assert.match(agreementReady, /id="rental-ready-issue"[\s\S]*Выдать оборудование/);
+  assert.match(source, /#rental-ready-issue[^\n]+openRentalIssueConfirmation\(order\.id\)/);
+  assert.equal((source.match(/async function issueRentalOrder\(/g) || []).length, 1);
+  assert.match(source, /await openRentalOperationalOrder\(state\.rental\.order\.id, state\.rental\.order\)/);
+});
+
+test('Rental agreement UI previews, freezes, opens and reprints one stored document', () => {
+  const s = setup();
+  const lockedItems = s.context.renderRentalDraftItems({items:[{
+    id:'item', title_snapshot:'Karcher Puzzi', asset_number_snapshot:'RENT-12',
+    agreed_price:'350.00', recommended_deposit:'2000.00',
+    timing_source:'tariff', planned_rental_date:'2026-10-10',
+    tariff_snapshot:{tariff_name:'3 часа', tariff_type:'duration'},
+  }]}, true);
+
+  assert.doesNotMatch(lockedItems, /Изменить|Удалить/);
+  assert.match(source, /\/rental\/orders\/\$\{orderId\}\/agreement-preview/);
+  assert.match(source, /\/rental\/orders\/\$\{orderId\}\/agreements/);
+  assert.match(source, /\/rental\/agreements\/\$\{state\.rental\.agreement\.id\}\/pdf/);
+  assert.match(source, /Это предпросмотр[\s\S]*Паспортные поля заполняются от руки/);
+  assert.match(source, /Условия зафиксированы/);
+  assert.match(styles, /\.agreement-preview-shell/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.rental-agreement-summary/);
+});
+
+test('Agreement settings expose legal details, safe placeholders and version history', () => {
+  assert.match(source, /Аренда → Договор[\s\S]*Markdown-шаблон/);
+  assert.match(source, /Паспортные данные в Core не сохраняются/);
+  assert.match(source, /\/api\/settings\/rental\/agreement\/lessor/);
+  assert.match(source, /\/api\/settings\/rental\/agreement\/templates/);
+  assert.match(source, /\/api\/settings\/rental\/agreement\/preview/);
+  assert.match(source, /Доступные placeholders[\s\S]*История версий/);
+  assert.match(styles, /\.placeholder-reference/);
+  assert.match(styles, /\.settings-version-list/);
+});
+
+test('Rental tariff selection renders DURATION and SLOT timing controls', () => {
+  const s = setup();
+  const item = {
+    status: 'draft', timing_source: null,
+    planned_rental_date: '2026-10-09', planned_start_at: null, due_at: null,
+  };
+  const duration = s.context.renderRentalTimingForm({
+    id: 'duration', name: '3 часа', type: 'duration', price: '350.00', duration_minutes: 180,
+  }, item);
+  assert.match(duration, /Дата выдачи/);
+  assert.match(duration, /name="rental_date" type="date"/);
+  assert.doesNotMatch(duration, /name="planned_start_at"/);
+  assert.match(duration, /3 ч ·/);
+  assert.match(duration, /Срок начнётся в момент фактической выдачи/);
+
+  const slot = s.context.renderRentalTimingForm({
+    id: 'slot', name: 'Утро', type: 'slot', price: '1900.00',
+    slot_start: '09:00:00', slot_end: '14:00:00',
+  }, item);
+  assert.match(slot, /name="rental_date"/);
+  assert.match(slot, /Выдача 09:00 · вернуть до 14:00/);
+});
+
+test('Rental operations workspace keeps READY timer-free and exposes issue', () => {
+  const s = setup();
+  const ready = {
+    id:'ready', order_number:'RORD-42', customer_name_snapshot:'Иван',
+    rental_total:'2250.00', recommended_deposit_total:'7000.00', requires_agreement:false,
+    items:[
+      {id:'puzzi', title_snapshot:'Karcher Puzzi', asset_number_snapshot:'RENT-12', agreed_price:'1900.00', tariff_snapshot:{tariff_name:'5 часов'}},
+      {id:'bosch', title_snapshot:'Bosch 221', asset_number_snapshot:'RENT-31', agreed_price:'350.00', tariff_snapshot:{tariff_name:'3 часа'}},
+    ],
+  };
+  const html = s.context.renderReadyRentalCard(ready);
+
+  assert.match(source, /Активные[\s\S]*Ожидают выдачи[\s\S]*История/);
+  assert.match(html, /Готово к выдаче[\s\S]*Karcher Puzzi[\s\S]*5 часов[\s\S]*Bosch 221[\s\S]*3 часа/);
+  assert.match(html, /Аренда[\s\S]*Залог[\s\S]*data-open-ready-rental[\s\S]*data-issue-rental/);
+  assert.doesNotMatch(html, /data-rental-due|Осталось|Просрочка/);
+  assert.match(source, /\/rental\/orders\/\$\{orderId\}\/issue-preview/);
+  assert.match(source, /Выдать оборудование/);
+  assert.match(source, /Указать время выдачи вручную/);
+});
+
+test('ACTIVE cards preserve item due times, overdue semantics, grace and Return', () => {
+  const s = setup();
+  const active = {
+    id:'active', order_number:'RORD-43', customer_name_snapshot:'Иван',
+    items:[
+      {id:'puzzi', status:'issued', title_snapshot:'Karcher Puzzi', asset_number_snapshot:'RENT-12', due_at:'2020-01-01T10:00:00Z', tariff_snapshot:{grace_minutes:30}},
+      {id:'bosch', status:'issued', title_snapshot:'Bosch 221', asset_number_snapshot:'RENT-31', due_at:'2020-01-01T12:00:00Z', tariff_snapshot:{grace_minutes:0}},
+    ],
+  };
+  const html = s.context.renderActiveRentalCard(active);
+
+  assert.equal((html.match(/data-rental-due=/g) || []).length, 2);
+  assert.match(html, /2020-01-01T10:00:00Z[\s\S]*2020-01-01T12:00:00Z/);
+  assert.match(html, /Льготный период: 30 мин/);
+  assert.match(html, /data-open-active-rental[\s\S]*Принять возврат/);
+  assert.equal((html.match(/Оформить возврат/g) || []).length, 2);
+  assert.doesNotMatch(html, /Завершить аренду/);
+  assert.match(source, /Date\.now\(\)/);
+  assert.match(source, /Просрочка/);
+  assert.equal(s.context.formatHumanDuration(3_661_000), '1 ч 2 мин');
+});
+
+test('Rental Return shows contractual snapshot total separately from received deposit', () => {
+  const s = setup();
+  const partial = s.context.renderReturnDepositPreview({
+    is_partial:true,
+    required_deposit_total:'7000.00',
+    deposit_received:'0.00',
+    deposit_applied_by_return:'0.00',
+    provisional_deposit_remaining:'0.00',
+    deposit_to_refund:null,
+    remaining_amount_due:null,
+  });
+  const final = s.context.renderReturnDepositPreview({
+    is_partial:false,
+    required_deposit_total:'7000.00',
+    deposit_received:'7000.00',
+    deposit_applied_by_return:'300.00',
+    provisional_deposit_remaining:'6700.00',
+    deposit_to_refund:'6700.00',
+    remaining_amount_due:'0.00',
+  });
+
+  assert.match(partial, /Обеспечительный платёж заказа[\s\S]*7[\s\S]*Фактически получено[\s\S]*0/);
+  assert.match(partial, /Предварительный расчёт[\s\S]*Предварительно остаётся/);
+  assert.match(final, /Финальный расчёт[\s\S]*Обеспечительный платёж заказа[\s\S]*Фактически получено[\s\S]*К возврату/);
+  assert.match(source, /order\.required_deposit_total \?\? order\.recommended_deposit_total/);
+});
+
+test('Rental operations cards and issue confirmation stack for mobile', () => {
+  assert.match(styles, /\.rental-operation-card/);
+  assert.match(styles, /\.rental-card-actions \.button \{[^}]*min-height: 48px/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.workspace-rental-item \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.rental-card-actions \{[^}]*grid-template-columns: 1fr/);
+  assert.match(styles, /\.issue-preview-list/);
 });
 
 test('Switching active Sale changes the Catalog add target without sharing users', async () => {
