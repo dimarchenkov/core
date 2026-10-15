@@ -49,6 +49,10 @@ class IntakeCompletionIncompleteError(Exception):
     """Raised when a draft no longer contains every required valid fact."""
 
 
+class IntakeCompletionInconsistentError(Exception):
+    """Raised when a draft already contains evidence of partial materialization."""
+
+
 class CompleteIntakeWorkflow:
     """Convert one complete operational draft into catalog, Receipt, and ledger facts."""
 
@@ -88,6 +92,7 @@ class CompleteIntakeWorkflow:
 
             active_items = [item for item in intake_session.items if item.abandoned_at is None]
             active_items.sort(key=lambda item: item.kind is not IntakeItemKind.NEW_PRODUCT)
+            self._ensure_not_partially_materialized(intake_session, active_items)
             self._validate_completion(intake_session, active_items)
 
             receipt = self._receipt_service.open_receipt(
@@ -182,6 +187,22 @@ class CompleteIntakeWorkflow:
         except Exception:
             self._session.rollback()
             raise
+
+    def _ensure_not_partially_materialized(
+        self,
+        intake_session: IntakeSession,
+        items: list[IntakeItemDraft],
+    ) -> None:
+        """Stop safely when a draft contains durable facts from an older broken workflow."""
+        if intake_session.receipt_id is not None or intake_session.completed_at is not None:
+            raise IntakeCompletionInconsistentError
+        for item in items:
+            if item.kind is IntakeItemKind.NEW_PRODUCT and (
+                item.product_id is not None or item.variant_id is not None
+            ):
+                raise IntakeCompletionInconsistentError
+            if item.kind is IntakeItemKind.NEW_VARIANT and item.variant_id is not None:
+                raise IntakeCompletionInconsistentError
 
     def _retail_price_changed(self, variant_id: UUIDv7, proposed_amount: Decimal) -> bool:
         """Return whether completion must append a new canonical retail-price fact."""

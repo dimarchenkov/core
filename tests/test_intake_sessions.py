@@ -777,6 +777,125 @@ def test_complete_existing_variant_posts_receipt_and_is_idempotent(
     assert int(completed_events[0].data["duration_seconds"]) >= 0
 
 
+def test_large_intake_finalizes_every_item_once(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """A large Intake is one transaction with one receipt line and movement per item."""
+    test_client, _, _, _ = client
+    _, _, variant = catalog
+    intake = _create_session(test_client)
+    item_count = 32
+    for index in range(item_count):
+        added = test_client.post(
+            f"/api/intake/sessions/{intake['id']}/items/existing",
+            json={
+                "variant_id": str(variant.id),
+                "quantity": index + 1,
+                "purchase_price": "10.00",
+            },
+        )
+        assert added.status_code == 201
+    test_client.patch(
+        f"/api/intake/sessions/{intake['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+
+    first = test_client.post(f"/api/intake/sessions/{intake['id']}/complete")
+    retry = test_client.post(f"/api/intake/sessions/{intake['id']}/complete")
+
+    assert first.status_code == retry.status_code == 200
+    assert retry.json() == first.json()
+    assert len(first.json()["items"]) == item_count
+    receipt_items = session.scalars(select(ReceiptItem)).all()
+    movements = session.scalars(select(StockMovement)).all()
+    expected_quantity = sum(range(1, item_count + 1))
+    assert len(receipt_items) == len(movements) == item_count
+    assert sum(item.quantity for item in receipt_items) == expected_quantity
+    assert sum(movement.quantity_delta for movement in movements) == expected_quantity
+
+
+def test_completed_intake_item_remains_immutable(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """Completion keeps the item guard strict and does not change finalized facts."""
+    test_client, _, _, _ = client
+    _, _, variant = catalog
+    intake = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/existing",
+        json={"variant_id": str(variant.id), "quantity": 4, "purchase_price": "25.00"},
+    ).json()
+    test_client.patch(
+        f"/api/intake/sessions/{intake['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+    assert test_client.post(f"/api/intake/sessions/{intake['id']}/complete").status_code == 200
+
+    mutation = test_client.patch(
+        f"/api/intake/sessions/{intake['id']}/items/{item['id']}",
+        json={"quantity": 999},
+    )
+
+    assert mutation.status_code == 409
+    assert mutation.json()["detail"] == "Intake item is not mutable."
+    persisted = session.get(IntakeItemDraft, UUID(item["id"]))
+    assert persisted is not None and persisted.quantity == 4
+    assert len(session.scalars(select(StockMovement)).all()) == 1
+    assert session.scalars(select(StockMovement)).one().quantity_delta == 4
+
+
+def test_partially_materialized_legacy_draft_is_blocked_without_side_effects(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+    supplier: Supplier,
+    session: Session,
+) -> None:
+    """Suspicious legacy materialization stops before receipt or stock creation."""
+    test_client, _, _, _ = client
+    category, existing_product, _ = catalog
+    intake = _create_session(test_client)
+    item = test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/new",
+        files={"file": ("legacy.png", _png_bytes(), "image/png")},
+    ).json()
+    test_client.patch(
+        f"/api/intake/sessions/{intake['id']}/items/{item['id']}",
+        json={
+            "category_id": str(category.id),
+            "product_title": "Legacy partial",
+            "quantity": 2,
+            "purchase_price": "10.00",
+        },
+    )
+    test_client.patch(
+        f"/api/intake/sessions/{intake['id']}",
+        json={"supplier_id": str(supplier.id)},
+    )
+    persisted_item = session.get(IntakeItemDraft, UUID(item["id"]))
+    assert persisted_item is not None
+    persisted_item.product_id = existing_product.id
+    session.commit()
+
+    response = test_client.post(f"/api/intake/sessions/{intake['id']}/complete")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Intake session has inconsistent completion state; no changes were applied."
+    )
+    assert session.scalars(select(Receipt)).all() == []
+    assert session.scalars(select(ReceiptItem)).all() == []
+    assert session.scalars(select(StockMovement)).all() == []
+    persisted_intake = session.get(IntakeSession, UUID(intake["id"]))
+    assert persisted_intake is not None
+    assert persisted_intake.status is IntakeSessionStatus.DRAFT
+
+
 def test_test_intake_propagates_scope_to_completed_receipt(
     client: tuple[TestClient, User, User, Path],
     catalog: tuple[Category, CatalogProduct, CatalogVariant],

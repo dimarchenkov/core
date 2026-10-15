@@ -25,6 +25,7 @@ from core.intake.completion import (
     CompleteIntakeWorkflow,
     IntakeCompletionAbandonedError,
     IntakeCompletionIncompleteError,
+    IntakeCompletionInconsistentError,
     IntakeCompletionNotFoundError,
 )
 from core.intake.deletion import (
@@ -453,6 +454,11 @@ def complete_intake_session(
         raise HTTPException(status_code=409, detail="Intake session was abandoned.") from exc
     except IntakeCompletionIncompleteError as exc:
         raise HTTPException(status_code=409, detail="Intake session is incomplete.") from exc
+    except IntakeCompletionInconsistentError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Intake session has inconsistent completion state; no changes were applied.",
+        ) from exc
 
 
 @router.get(
