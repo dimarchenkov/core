@@ -109,6 +109,7 @@ def test_business_routes_reject_anonymous_requests(
     }
 
     assert client.get("/api/catalog/categories").status_code == 401
+    assert client.get("/api/catalog/collections").status_code == 401
     product_restore = client.post(
         "/api/catalog/products/00000000-0000-0000-0000-000000000001/restore"
     )
