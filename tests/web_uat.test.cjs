@@ -116,6 +116,57 @@ test('Input during an in-flight save is serialized and latest value wins', async
   assert.equal(s.status.textContent, 'Сохранено');
 });
 
+test('Intake completion coalesces double submit and skips stale saves after completion', async () => {
+  const s = setup();
+  const button = {disabled:false, innerHTML:'', textContent:''};
+  s.context.document.querySelector = selector => selector === '#complete-session' ? button : null;
+  s.context.document.querySelectorAll = () => [];
+  s.context.loadIntakeAqsi = async () => {};
+  s.context.renderResult = () => {};
+  vm.runInContext('state.session = {id:"intake", status:"draft", items:[]}; state.result = null;', s.context);
+  let releaseCompletion;
+  const calls = [];
+  s.context.api = async (url, options = {}) => {
+    calls.push({url, method:options.method || 'GET'});
+    if (!options.method) return {id:'intake', status:'draft', items:[]};
+    await new Promise(resolve => { releaseCompletion = resolve; });
+    return {items:[], readiness:[], receipt:{id:'receipt'}};
+  };
+
+  const first = s.context.completeSession();
+  while (!calls.some(call => call.method === 'POST')) await new Promise(resolve => setImmediate(resolve));
+  const second = s.context.completeSession();
+  assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+  releaseCompletion();
+  await Promise.all([first, second]);
+  assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+  assert.equal(vm.runInContext('state.session.status', s.context), 'completed');
+});
+
+test('Stale Intake screen detects completed server state before saving item forms', async () => {
+  const s = setup();
+  const button = {disabled:false, innerHTML:'', textContent:''};
+  s.context.document.querySelector = selector => selector === '#complete-session' ? button : null;
+  s.context.document.querySelectorAll = () => { throw new Error('stale forms must not be read'); };
+  s.context.loadIntakeAqsi = async () => {};
+  s.context.renderResult = () => {};
+  vm.runInContext('state.session = {id:"intake", status:"draft", items:[]}; state.result = null;', s.context);
+  const calls = [];
+  s.context.api = async (url, options = {}) => {
+    calls.push({url, method:options.method || 'GET'});
+    if (!options.method) return {id:'intake', status:'completed', items:[]};
+    return {items:[], readiness:[], receipt:{id:'receipt'}};
+  };
+
+  await s.context.completeSession();
+
+  assert.deepEqual(calls, [
+    {url:'/api/intake/sessions/intake', method:'GET'},
+    {url:'/api/intake/sessions/intake/complete', method:'POST'},
+  ]);
+  assert.equal(vm.runInContext('state.session.status', s.context), 'completed');
+});
+
 test('Contextual Media targets, camera/gallery, fallback and own photo', () => {
   const s = setup();
   vm.runInContext('state.operations.imageLinks = [{id:"p-link", entity_type:"catalog_product", entity_id:"p", image_id:"photo-p", role:"primary"}];', s.context);
@@ -1057,6 +1108,7 @@ test('Rental Return shows contractual snapshot total separately from received de
     is_partial:true,
     required_deposit_total:'7000.00',
     deposit_received:'0.00',
+    deposit_received_confirmed:true,
     deposit_applied_by_return:'0.00',
     provisional_deposit_remaining:'0.00',
     deposit_to_refund:null,
@@ -1066,6 +1118,7 @@ test('Rental Return shows contractual snapshot total separately from received de
     is_partial:false,
     required_deposit_total:'7000.00',
     deposit_received:'7000.00',
+    deposit_received_confirmed:true,
     deposit_applied_by_return:'300.00',
     provisional_deposit_remaining:'6700.00',
     deposit_to_refund:'6700.00',
@@ -1078,12 +1131,80 @@ test('Rental Return shows contractual snapshot total separately from received de
   assert.match(source, /order\.required_deposit_total \?\? order\.recommended_deposit_total/);
 });
 
+test('READY deposit input suggests the whole snapshot total without confirming it', () => {
+  const s = setup();
+  vm.runInContext('state.rental.agreement = null; state.rental.depositEditing = false;', s.context);
+  const base = {
+    status:'ready', items:[{id:'a'}, {id:'b'}], rental_total:'1000.00',
+    required_deposit_total:'4000.00', recommended_deposit_total:'4000.00',
+    requires_agreement:false, deposit_received:null, deposit_amount:null,
+    deposit_received_confirmed:false,
+  };
+
+  const suggested = s.context.renderRentalReadySummary(base);
+  const confirmedZero = s.context.renderRentalReadySummary({
+    ...base, deposit_received:'0.00', deposit_amount:'0.00', deposit_received_confirmed:true,
+  });
+  const unconfirmedReturn = s.context.renderReturnDepositPreview({
+    is_partial:false, required_deposit_total:'4000.00', deposit_received:null,
+    deposit_received_confirmed:false, deposit_applied_by_return:'0.00',
+    provisional_deposit_remaining:null, deposit_to_refund:null, remaining_amount_due:null,
+  });
+
+  assert.match(suggested, /Рекомендуемый залог[\s\S]*4[\s\S]*Фактически получено, ₽/);
+  assert.match(suggested, /name="deposit_received"[\s\S]*value="4000\.00"/);
+  assert.match(suggested, /По умолчанию предложена рекомендованная сумма/);
+  assert.doesNotMatch(suggested, /rental-deposit-confirmed/);
+  assert.match(confirmedZero, /rental-deposit-confirmed[\s\S]*Фактически получено[\s\S]*Изменить/);
+  assert.doesNotMatch(confirmedZero, /id="rental-deposit-form"/);
+  assert.match(unconfirmedReturn, /Не подтверждён[\s\S]*нельзя завершить/);
+  assert.match(source, /\/rental\/orders\/\$\{state\.rental\.order\.id\}\/deposit/);
+  assert.match(source, /JSON\.stringify\(\{ deposit_received: amount \}\)/);
+});
+
 test('Rental operations cards and issue confirmation stack for mobile', () => {
   assert.match(styles, /\.rental-operation-card/);
   assert.match(styles, /\.rental-card-actions \.button \{[^}]*min-height: 48px/);
   assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.workspace-rental-item \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.rental-card-actions \{[^}]*grid-template-columns: 1fr/);
   assert.match(styles, /\.issue-preview-list/);
+});
+
+test('Rental Asset passport exposes optional serial number and append-only seals', () => {
+  assert.match(source, /Серийный номер/);
+  assert.match(source, /Контрольные пломбы/);
+  assert.match(source, /Добавить пломбу/);
+  assert.match(source, /\/api\/operations\/rental\/assets\/\$\{state\.operations\.asset\.id\}\/identification/);
+  assert.match(source, /\/api\/operations\/rental\/assets\/\$\{state\.operations\.asset\.id\}\/seals/);
+  assert.match(source, /Предыдущая пломба в этом месте сохранена в истории/);
+});
+
+test('Return identification hides empty data and renders the immutable issue snapshot', () => {
+  const s = setup();
+  const empty = s.context.renderReturnIdentification({asset_identification_snapshot:null}, null);
+  const identified = s.context.renderReturnIdentification({
+    id:'item-1',
+    asset_identification_snapshot:{
+      asset_code:'RENT-1',
+      serial_number:'SERIAL-OLD',
+      seals:[
+        {location:'Корпус', seal_number:'001842'},
+        {location:'Шланг', seal_number:'001844'},
+      ],
+    },
+  }, {seal_verifications:[
+    {expected_seal_number:'001842', result:'ok', note:null},
+    {expected_seal_number:'001844', result:'mismatch', note:'Другой номер'},
+  ]});
+
+  assert.equal(empty, '');
+  assert.match(identified, /Ожидаемый серийный номер:[\s\S]*SERIAL-OLD/);
+  assert.match(identified, /Корпус — 001842/);
+  assert.match(identified, /Шланг — 001844/);
+  assert.match(identified, /value="mismatch" selected/);
+  assert.match(identified, /Все соответствуют/);
+  assert.match(source, /item\.asset_identification_snapshot \|\| \{\}/);
+  assert.match(source, /seal_verification_snapshot/);
 });
 
 test('Switching active Sale changes the Catalog add target without sharing users', async () => {
@@ -1114,4 +1235,140 @@ test('Switching active Sale changes the Catalog add target without sharing users
 
   vm.runInContext("state.user = {id:'operator-2'};", s.context);
   assert.equal(s.context.storedActiveSaleId(), null);
+});
+
+test('Catalog Collections expose static membership and computed dynamic matches on Variant cards', () => {
+  const s = setup();
+  vm.runInContext(`state.operations.variantCollections = new Map([['variant-1', {
+    static_collections: [
+      {id:'featured', name:'Витрина', is_member:true},
+      {id:'weekend', name:'Выходные', is_member:false}
+    ],
+    dynamic_collections: [
+      {id:'in-stock', name:'Есть в наличии', variant_count:4}
+    ]
+  }]])`, s.context);
+
+  const html = s.context.renderVariantCollections({id:'variant-1'}, false);
+
+  assert.match(html, /Коллекции/);
+  assert.match(html, /value="featured" checked/);
+  assert.match(html, /value="weekend"/);
+  assert.match(html, /Есть в наличии · по правилам/);
+  assert.match(html, /data-variant-collections-form="variant-1"/);
+  assert.match(source, /\/api\/catalog\/collections\/variants\/\$\{variantId\}/);
+});
+
+test('Active Collections render as selected Catalog sidebar filters with management access', () => {
+  const s = setup();
+  vm.runInContext(`state.operations.collections = [
+    {id:'collection-50', name:'Всё за 50', type:'dynamic', variant_count:5, is_active:true},
+    {id:'checkout', name:'На кассе', type:'static', variant_count:7, is_active:true}
+  ]`, s.context);
+
+  const html = s.context.renderCatalogCollectionNavigation({collectionId:'collection-50'});
+  const params = s.context.catalogUrlParams({mode:'sale', status:'active', collectionId:'collection-50'});
+
+  assert.match(html, /Подборки/);
+  assert.match(html, /collection-link active[^>]+data-collection-id="collection-50"/);
+  assert.match(html, /Всё за 50[\s\S]*5/);
+  assert.match(source, /Управление подборками/);
+  assert.match(source, /data-collection-id[\s\S]*collectionId: button\.dataset\.collectionId/);
+  assert.equal(params.get('collection_id'), 'collection-50');
+  assert.doesNotMatch(source, /id="catalog-open-collections"/);
+});
+
+test('Collection-filtered results keep normal photo and add-to-sale Catalog cards', () => {
+  const s = setup();
+  const html = s.context.renderCatalogProductCard({
+    id:'product-1', title:'Сквиш', description:null, category_id:'toys',
+    category_label:'Игрушки', is_active:true, is_archived:false, is_test:false,
+    primary_image_id:'image-1', rental_economics_applicable:false,
+    card_variants:[{
+      id:'variant-red', title:'Красный', sku:'SKU-RED', is_archived:false,
+      current_retail_price:'50.00', sale_quantity:'3', sale_row_visible:true,
+      rental_row_visible:false, aqsi_status:'published', aqsi_is_current:true,
+    }],
+  }, {mode:'sale', status:'active'});
+
+  assert.match(html, /data-image-id="image-1"/);
+  assert.match(html, /Красный/);
+  assert.match(html, /SKU-RED/);
+  assert.match(html, /data-add-sale-variant="variant-red"/);
+  assert.match(html, /✓ AQSI/);
+});
+
+test('Collection editor hides technical slug and delete uses explicit confirmation', () => {
+  const s = setup();
+  const editor = String(s.context.openCollectionEditor);
+
+  assert.doesNotMatch(editor, /collection-slug|name="slug"|Служебный адрес/);
+  assert.doesNotMatch(String(s.context.saveCollection), /data\.get\("slug"\)/);
+  assert.match(source, /Удалить коллекцию «\$\{escapeHtml\(collection\.name\)\}»\?/);
+  assert.match(source, /Товары и варианты удалены не будут/);
+  assert.match(source, /\/api\/catalog\/collections\/\$\{collectionId\}[\s\S]*method: "DELETE"/);
+});
+
+test('Dynamic Collection editor only offers the whitelisted typed AND rules', () => {
+  const s = setup();
+  const html = s.context.collectionRuleEditorRow({field:'stock', operator:'gte', value:'2'});
+
+  assert.match(html, /Цена[\s\S]*Категория[\s\S]*Остаток[\s\S]*Активность/);
+  assert.match(html, /value="gte" selected/);
+  assert.match(html, /step="1"[\s\S]*value="2"/);
+  assert.doesNotMatch(html, /value="or"|SQL fragment|custom field/i);
+  assert.match(source, /Все условия применяются одновременно \(AND\)/);
+  assert.match(source, /\/api\/catalog\/collections\/preview/);
+  assert.match(source, /include_inactive=true/);
+});
+
+test('Collection management and rule builder collapse without horizontal mobile layout', () => {
+  assert.match(styles, /\.collection-rule-row \{[^}]*grid-template-columns:/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.collection-rule-row \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.collection-row, \.collection-variant-row \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /\.variant-static-collections \{[^}]*flex-wrap: wrap/);
+  assert.match(styles, /\.collection-row-actions \.button, \.collection-variant-row \.button \{[^}]*min-height: 44px/);
+});
+
+test('Product detail exposes predictable up and down Variant ordering controls', () => {
+  const s = setup();
+  const product = {id:'product-1', is_archived:false};
+  const first = s.context.renderOperationsVariant({
+    id:'large', title:'Большой', sku:'SKU-LARGE', attributes:{}, is_archived:false,
+    physical_quantity:'0', ordinary_quantity:'0', rental_asset_count:0,
+    current_retail_price:null,
+  }, product, false, 0, 3);
+  const last = s.context.renderOperationsVariant({
+    id:'small', title:'Маленький', sku:'SKU-SMALL', attributes:{}, is_archived:false,
+    physical_quantity:'0', ordinary_quantity:'0', rental_asset_count:0,
+    current_retail_price:null,
+  }, product, false, 2, 3);
+
+  assert.match(first, /1 из 3/);
+  assert.match(first, /data-move-direction="-1"[^>]*disabled/);
+  assert.match(first, /data-move-direction="1"/);
+  assert.match(last, /data-move-direction="1"[^>]*disabled/);
+  assert.doesNotMatch(first, /name="sort_order"/);
+});
+
+test('Moving a Variant persists the complete Product-local identity order', async () => {
+  const s = setup();
+  const requests = [];
+  vm.runInContext(`state.operations.product = {id:'product-1', variants:[
+    {id:'large'}, {id:'medium'}, {id:'small'}
+  ]}`, s.context);
+  s.context.api = async (url, options) => {
+    requests.push({url, method:options.method, body:JSON.parse(options.body)});
+    return [];
+  };
+  s.context.openOperationsProduct = async () => {};
+  s.context.showToast = () => {};
+
+  await s.context.moveCatalogVariant('medium', -1, {disabled:false, isConnected:true});
+
+  assert.equal(requests[0].url, '/api/catalog/products/product-1/variant-order');
+  assert.equal(requests[0].method, 'PUT');
+  assert.deepEqual([...requests[0].body.variant_ids], ['medium', 'large', 'small']);
+  assert.match(styles, /\.variant-order-actions \{[^}]*grid-column: 1 \/ -1/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.variant-order-actions \.button \{[^}]*min-height: 44px/);
 });

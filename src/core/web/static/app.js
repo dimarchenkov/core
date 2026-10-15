@@ -19,6 +19,8 @@ function recordRoute(name, data = {}) {
 
 function routeUrl(route) {
   if (route.name === "product") return `${window.location.pathname}#product/${route.productId}`;
+  if (route.name === "collection") return `${window.location.pathname}#collection/${route.collectionId}`;
+  if (route.name === "collections") return `${window.location.pathname}#collections`;
   if (route.name === "customer") return `${window.location.pathname}#customer/${route.customerId}`;
   if (route.name === "order") return `${window.location.pathname}#order/${route.orderId}`;
   if (route.name === "intake") return `${window.location.pathname}#intake/${route.sessionId}`;
@@ -35,6 +37,7 @@ function routeFromLocation() {
   const [routePath, queryString = ""] = window.location.hash.slice(1).split("?");
   const [name, id] = routePath.split("/");
   if (name === "product" && id) return { name, productId: id };
+  if (name === "collection" && id) return { name, collectionId: id };
   if (name === "customer" && id) return { name, customerId: id };
   if (name === "order" && id) return { name, orderId: id };
   if (name === "intake" && id) return { name, sessionId: id };
@@ -47,13 +50,14 @@ function routeFromLocation() {
       status: params.get("status") || undefined,
       query: params.get("query") || undefined,
       categoryId: params.get("category_id") || undefined,
+      collectionId: params.get("collection_id") || undefined,
       supplierId: params.get("supplier_id") || undefined,
       attention: params.getAll("attention"),
       productFilter: params.get("product_filter") || undefined,
       sort: params.get("sort") || undefined,
     };
   }
-  if (["workspace", "rental", "settings"].includes(name)) return { name };
+  if (["workspace", "rental", "settings", "collections"].includes(name)) return { name };
   return null;
 }
 
@@ -64,6 +68,8 @@ async function restoreRoute(route) {
     if (!route || route.name === "workspace") await loadHome();
     else if (route.name === "catalog") await openOperationsCatalog(route);
     else if (route.name === "product") await openOperationsProduct(route.productId);
+    else if (route.name === "collections") await openCollections();
+    else if (route.name === "collection") await openCollection(route.collectionId);
     else if (route.name === "rental") await openRentalHub();
     else if (route.name === "settings") await openSettings();
     else if (route.name === "sale") await openSalesWorkspace(route.saleId);
@@ -127,6 +133,7 @@ const state = {
     issuePreview: null,
     agreement: null,
     agreementPreview: null,
+    depositEditing: false,
     returnPreview: null,
     returnItemIds: [],
     timerHandle: null,
@@ -135,6 +142,11 @@ const state = {
   operations: {
     catalog: null,
     categoryManagement: null,
+    collections: [],
+    collection: null,
+    collectionVariants: [],
+    collectionSearch: [],
+    variantCollections: new Map(),
     products: [],
     product: null,
     imageLinks: [],
@@ -180,6 +192,8 @@ function activityDetail(event) {
   if (event.event_type === "intake_item_added") return "Товар добавлен в приёмку";
   return "";
 }
+
+let intakeCompletionInFlight = false;
 
 function escapeHtml(value = "") {
   return String(value)
@@ -2210,18 +2224,46 @@ async function saveSupplier(event) {
 }
 
 async function completeSession() {
+  if (intakeCompletionInFlight) return;
+  intakeCompletionInFlight = true;
   const button = document.querySelector("#complete-session");
-  button.disabled = true;
-  button.innerHTML = '<span class="spinner"></span> Проводим';
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner"></span> Проводим';
+  }
+  const sessionId = state.session.id;
   try {
-    await saveAllItemForms();
-    state.result = await api(`/api/intake/sessions/${state.session.id}/complete`, { method: "POST" });
+    state.session = await api(`/api/intake/sessions/${sessionId}`);
+    if (state.session.status === "draft") await saveAllItemForms();
+    state.result = await api(`/api/intake/sessions/${sessionId}/complete`, { method: "POST" });
+    state.session.status = "completed";
     await loadIntakeAqsi();
     renderResult();
   } catch (error) {
-    showToast(error.message, true);
-    button.disabled = false;
-    button.textContent = "Провести приёмку";
+    const recovered = error.status === 409 && await recoverCompletedIntake(sessionId);
+    if (!recovered) {
+      showToast(error.message, true);
+      if (button) {
+        button.disabled = false;
+        button.textContent = "Провести приёмку";
+      }
+    }
+  } finally {
+    intakeCompletionInFlight = false;
+  }
+}
+
+async function recoverCompletedIntake(sessionId) {
+  try {
+    const current = await api(`/api/intake/sessions/${sessionId}`);
+    if (current.status !== "completed") return false;
+    state.session = current;
+    state.result = await api(`/api/intake/sessions/${sessionId}/complete`, { method: "POST" });
+    await loadIntakeAqsi();
+    renderResult();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -2322,6 +2364,7 @@ function normalizeCatalogState(value = {}) {
     status: statuses.includes(value.status) ? value.status : "active",
     query: String(value.query || "").trim(),
     categoryId: value.categoryId || "",
+    collectionId: value.collectionId || "",
     supplierId: value.supplierId || "",
     attention: [...new Set(Array.isArray(value.attention) ? value.attention.filter((item) => filters.includes(item)) : [])],
     productFilter: mode === "rental" && rentalFilters.includes(value.productFilter) ? value.productFilter : "all",
@@ -2359,6 +2402,7 @@ function catalogUrlParams(value, includeDefaults = true) {
   if (includeDefaults || catalog.status !== "active") params.set("status", catalog.status);
   if (catalog.query) params.set("query", catalog.query);
   if (catalog.categoryId) params.set("category_id", catalog.categoryId);
+  if (catalog.collectionId) params.set("collection_id", catalog.collectionId);
   if (catalog.supplierId) params.set("supplier_id", catalog.supplierId);
   catalog.attention.forEach((filter) => params.append("attention", filter));
   if (includeDefaults || catalog.productFilter !== "all") params.set("product_filter", catalog.productFilter);
@@ -2373,10 +2417,11 @@ async function openOperationsCatalog(options = {}) {
     recordRoute("catalog", catalog);
     logicalParent = () => loadHome();
     const params = catalogUrlParams(catalog);
-    [state.operations.products, state.categories, state.suppliers] = await Promise.all([
+    [state.operations.products, state.categories, state.suppliers, state.operations.collections] = await Promise.all([
       api(`/api/operations/catalog/products?${params}`),
       api("/api/catalog/categories"),
       api("/api/purchasing/suppliers"),
+      api("/api/catalog/collections"),
     ]);
     renderOperationsCatalog(catalog);
   } catch (error) { showToast(error.message, true); }
@@ -2384,20 +2429,29 @@ async function openOperationsCatalog(options = {}) {
 
 function renderOperationsCatalog(catalog) {
   document.body.classList.remove("catalog-drawer-open");
+  const selectedCollection = state.operations.collections.find((collection) => collection.id === catalog.collectionId);
   const rows = state.operations.products.length
     ? state.operations.products.map((product) => renderCatalogProductCard(product, catalog)).join("")
-    : '<div class="empty">Товары не найдены</div>';
+    : selectedCollection
+      ? `<div class="empty"><strong>В подборке пока нет товаров.</strong>${selectedCollection.type === "dynamic" ? '<p class="muted small">Ни один вариант сейчас не соответствует условиям подборки.</p>' : ""}</div>`
+      : '<div class="empty">Товары не найдены</div>';
   const selectedCategory = state.categories.find((category) => category.id === catalog.categoryId);
   const categoryLabel = selectedCategory?.title || "Все";
+  const primaryFilterLabel = selectedCollection
+    ? `Подборка: ${selectedCollection.name}`
+    : `Категория: ${categoryLabel}`;
   root.innerHTML = `<div class="shell catalog-shell">
     ${topbar(true)}
-    <div class="catalog-heading"><div><p class="eyebrow">Каталог</p><h1>Товары</h1></div><button class="button" id="catalog-new-product" type="button">＋ Новый товар</button></div>
+    <div class="catalog-heading"><div><p class="eyebrow">Каталог</p><h1>Товары</h1></div><div class="catalog-heading-actions"><button class="button" id="catalog-new-product" type="button">＋ Новый товар</button></div></div>
     ${renderCatalogSalesContext(catalog)}
     <div class="catalog-workspace">
       <aside class="catalog-sidebar" aria-label="Навигация и фильтры каталога">
         ${renderCatalogCategoryNavigation(catalog)}
         <button class="button secondary full catalog-category-entry" data-open-category-create type="button">＋ Категория</button>
         <button class="button ghost full category-management-entry" data-open-category-management type="button">Управление категориями</button>
+        <div class="divider"></div>
+        ${renderCatalogCollectionNavigation(catalog)}
+        <button class="button ghost full collection-management-entry" data-open-collection-management type="button">Управление подборками</button>
         <div class="divider"></div>
         ${renderCatalogFilters(catalog, false)}
       </aside>
@@ -2413,7 +2467,7 @@ function renderOperationsCatalog(catalog) {
           <button class="button" type="submit">Найти</button>
         </form>
         <div class="catalog-mobile-controls">
-          <button class="button secondary" id="open-category-drawer" type="button">Категория: ${escapeHtml(categoryLabel)} <span aria-hidden="true">⌄</span></button>
+          <button class="button secondary" id="open-category-drawer" type="button">${escapeHtml(primaryFilterLabel)} <span aria-hidden="true">⌄</span></button>
           <button class="button secondary" id="open-filter-drawer" type="button">Фильтры${catalogFilterCount(catalog) ? ` · ${catalogFilterCount(catalog)}` : ""}</button>
         </div>
         <section class="catalog-results" aria-label="Список товаров">
@@ -2427,6 +2481,9 @@ function renderOperationsCatalog(catalog) {
       ${renderCatalogCategoryNavigation(catalog)}
       <button class="button secondary full catalog-category-entry" data-open-category-create type="button">＋ Категория</button>
       <button class="button ghost full category-management-entry" data-open-category-management type="button">Управление категориями</button>
+      <div class="divider"></div>
+      ${renderCatalogCollectionNavigation(catalog)}
+      <button class="button ghost full collection-management-entry" data-open-collection-management type="button">Управление подборками</button>
     </dialog>
     <dialog class="catalog-drawer" id="catalog-filter-dialog" aria-labelledby="filter-dialog-title">
       <form id="catalog-mobile-filter-form">
@@ -2554,7 +2611,13 @@ function renderCatalogCategoryNavigation(catalog) {
     const nextVisited = new Set(visited).add(category.id);
     return `<li><button class="category-link ${catalog.categoryId === category.id ? "active" : ""}" data-category-id="${category.id}" type="button" style="--category-depth:${Math.min(depth, 3)}" aria-pressed="${catalog.categoryId === category.id}">${escapeHtml(category.title)}</button>${children.has(category.id) ? `<ul>${branch(category.id, depth + 1, nextVisited)}</ul>` : ""}</li>`;
   }).join("");
-  return `<div class="catalog-category-nav"><h2>Категории</h2><ul><li><button class="category-link ${catalog.categoryId ? "" : "active"}" data-category-id="" type="button" aria-pressed="${!catalog.categoryId}">Все товары</button></li>${branch(null)}</ul></div>`;
+  const allSelected = !catalog.categoryId && !catalog.collectionId;
+  return `<div class="catalog-category-nav"><h2>Категории</h2><ul><li><button class="category-link ${allSelected ? "active" : ""}" data-category-id="" type="button" aria-pressed="${allSelected}">Все товары</button></li>${branch(null)}</ul></div>`;
+}
+
+function renderCatalogCollectionNavigation(catalog) {
+  const rows = state.operations.collections.map((collection) => `<li><button class="category-link collection-link ${catalog.collectionId === collection.id ? "active" : ""}" data-collection-id="${collection.id}" type="button" aria-pressed="${catalog.collectionId === collection.id}"><span class="catalog-nav-label">${escapeHtml(collection.name)}</span><span class="catalog-nav-count">${collection.variant_count}</span></button></li>`).join("");
+  return `<div class="catalog-category-nav catalog-collection-nav"><h2>Подборки</h2><ul>${rows || '<li><span class="muted small catalog-nav-empty">Активных подборок пока нет</span></li>'}</ul></div>`;
 }
 
 function categoryPathLabel(category, categories) {
@@ -2697,7 +2760,10 @@ function bindCatalogShell(catalog) {
     openOperationsCatalog({ ...catalog, query: String(new FormData(event.currentTarget).get("query") || "").trim() });
   });
   document.querySelectorAll("[data-category-id]").forEach((button) => {
-    button.addEventListener("click", () => openOperationsCatalog({ ...catalog, categoryId: button.dataset.categoryId }));
+    button.addEventListener("click", () => openOperationsCatalog({ ...catalog, categoryId: button.dataset.categoryId, collectionId: "" }));
+  });
+  document.querySelectorAll("[data-collection-id]").forEach((button) => {
+    button.addEventListener("click", () => openOperationsCatalog({ ...catalog, categoryId: "", collectionId: button.dataset.collectionId }));
   });
   document.querySelectorAll("[data-desktop-attention]").forEach((input) => {
     input.addEventListener("change", () => {
@@ -2747,6 +2813,12 @@ function bindCatalogShell(catalog) {
       openCategoryManagement();
     });
   });
+  document.querySelectorAll("[data-open-collection-management]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelector("#catalog-category-dialog")?.close();
+      openCollections();
+    });
+  });
   document.querySelector("[data-category-create-cancel]").addEventListener("click", () => document.querySelector("#catalog-category-create-dialog").close());
   document.querySelector("#catalog-category-create-form").addEventListener("submit", (event) => createCatalogCategory(event, catalog));
   document.querySelector("#catalog-mobile-filter-form").addEventListener("submit", (event) => {
@@ -2755,6 +2827,326 @@ function bindCatalogShell(catalog) {
     openOperationsCatalog({ ...catalog, status: data.get("status") || "active", attention: data.getAll("attention"), supplierId: data.get("supplier_id") || "", productFilter: data.get("product_filter") || "all" });
   });
   document.querySelector("#catalog-filters-reset").addEventListener("click", () => openOperationsCatalog({ ...catalog, status: "active", attention: [], supplierId: "", productFilter: "all" }));
+}
+
+function collectionTypeLabel(type) {
+  return type === "static" ? "Статическая" : "Динамическая";
+}
+
+function collectionOperatorLabel(operator) {
+  return { eq: "равно", lt: "меньше", lte: "не больше", gt: "больше", gte: "не меньше" }[operator] || operator;
+}
+
+function collectionFieldLabel(field) {
+  return { price: "Цена", category: "Категория", stock: "Остаток", is_active: "Активность" }[field] || field;
+}
+
+function collectionRuleValueLabel(rule) {
+  if (rule.field === "category") {
+    return state.categories.find((category) => category.id === rule.value)?.title || "Недоступная категория";
+  }
+  if (rule.field === "is_active") return String(rule.value) === "true" ? "активен" : "неактивен";
+  if (rule.field === "price") return formatMoney(Number(rule.value));
+  return formatQuantity(rule.value);
+}
+
+function renderCollectionRuleSummary(rule) {
+  return `<span class="collection-rule-summary"><strong>${escapeHtml(collectionFieldLabel(rule.field))}</strong><span>${escapeHtml(collectionOperatorLabel(rule.operator))} · ${escapeHtml(collectionRuleValueLabel(rule))}</span></span>`;
+}
+
+async function openCollections() {
+  try {
+    recordRoute("collections");
+    logicalParent = () => openOperationsCatalog(state.operations.catalog || {});
+    [state.operations.collections, state.categories] = await Promise.all([
+      api("/api/catalog/collections?include_inactive=true"),
+      api("/api/catalog/categories?status=all"),
+    ]);
+    renderCollections();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderCollections() {
+  const rows = state.operations.collections.length
+    ? state.operations.collections.map((collection) => `<article class="collection-row card ${collection.is_active ? "" : "disabled"}">
+        <button class="collection-row-main" data-open-collection="${collection.id}" type="button">
+          <span class="collection-row-title"><strong>${escapeHtml(collection.name)}</strong>${collection.is_active ? "" : '<span class="chip warn">Отключена</span>'}</span>
+          <span class="muted small">${escapeHtml(collectionTypeLabel(collection.type))} · ${collection.variant_count} ${pluralizeRu(collection.variant_count, "вариант", "варианта", "вариантов")}</span>
+          ${collection.description ? `<span>${escapeHtml(collection.description)}</span>` : ""}
+          <span class="muted small">Обновлена ${formatDate(collection.updated_at)}</span>
+        </button>
+        <span class="collection-row-actions"><button class="button ghost compact" data-edit-collection="${collection.id}" type="button">Изменить</button><button class="button ${collection.is_active ? "danger" : "secondary"} compact" data-toggle-collection="${collection.id}" type="button">${collection.is_active ? "Отключить" : "Включить"}</button><button class="button ghost compact danger-text" data-delete-collection="${collection.id}" type="button">Удалить</button></span>
+      </article>`).join("")
+    : '<div class="empty">Коллекций пока нет</div>';
+  root.innerHTML = `<div class="shell collection-shell">
+    ${topbar(true)}
+    <div class="catalog-heading"><div><p class="eyebrow">Каталог · Управление</p><h1>Подборки</h1><p class="muted">Статические и динамические группы вариантов для ежедневной работы в Каталоге.</p></div><button class="button" id="collection-create" type="button">＋ Подборка</button></div>
+    <div class="collection-list">${rows}</div>
+    <dialog class="catalog-action-dialog" id="catalog-action-dialog"><div id="catalog-action-content"></div></dialog>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#collection-create").addEventListener("click", () => openCollectionEditor());
+  document.querySelectorAll("[data-open-collection]").forEach((button) => button.addEventListener("click", () => openCollection(button.dataset.openCollection)));
+  document.querySelectorAll("[data-edit-collection]").forEach((button) => button.addEventListener("click", () => {
+    const collection = state.operations.collections.find((item) => item.id === button.dataset.editCollection);
+    loadCollectionEditor(collection);
+  }));
+  document.querySelectorAll("[data-toggle-collection]").forEach((button) => button.addEventListener("click", () => toggleCollection(button.dataset.toggleCollection, button)));
+  document.querySelectorAll("[data-delete-collection]").forEach((button) => button.addEventListener("click", () => {
+    const collection = state.operations.collections.find((item) => item.id === button.dataset.deleteCollection);
+    if (collection) openCollectionDeleteConfirmation(collection);
+  }));
+}
+
+async function loadCollectionEditor(summary) {
+  try {
+    const collection = await api(`/api/catalog/collections/${summary.id}`);
+    openCollectionEditor(collection);
+  } catch (error) { showToast(error.message, true); }
+}
+
+function collectionRuleOperatorOptions(field, selected = "eq") {
+  const operators = ["category", "is_active"].includes(field)
+    ? [["eq", "Равно"]]
+    : [["eq", "Равно"], ["lt", "Меньше"], ["lte", "Не больше"], ["gt", "Больше"], ["gte", "Не меньше"]];
+  return operators.map(([value, label]) => `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("");
+}
+
+function collectionRuleValueControl(field, value = "") {
+  if (field === "category") {
+    const options = state.categories
+      .filter((category) => category.is_active && !category.is_archived)
+      .map((category) => `<option value="${category.id}" ${String(value) === category.id ? "selected" : ""}>${escapeHtml(category.title)}</option>`)
+      .join("");
+    return `<select class="collection-rule-value" aria-label="Категория" required><option value="">Выберите категорию</option>${options}</select>`;
+  }
+  if (field === "is_active") {
+    return `<select class="collection-rule-value" aria-label="Активность" required><option value="true" ${String(value) !== "false" ? "selected" : ""}>Активен</option><option value="false" ${String(value) === "false" ? "selected" : ""}>Неактивен</option></select>`;
+  }
+  const step = field === "price" ? "0.01" : "1";
+  return `<input class="collection-rule-value" type="number" min="0" step="${step}" value="${escapeHtml(value)}" inputmode="decimal" aria-label="Значение" required>`;
+}
+
+function collectionRuleEditorRow(rule = { field: "price", operator: "lte", value: "" }) {
+  return `<div class="collection-rule-row" data-collection-rule-row>
+    <select class="collection-rule-field" aria-label="Поле правила">
+      <option value="price" ${rule.field === "price" ? "selected" : ""}>Цена</option>
+      <option value="category" ${rule.field === "category" ? "selected" : ""}>Категория</option>
+      <option value="stock" ${rule.field === "stock" ? "selected" : ""}>Остаток</option>
+      <option value="is_active" ${rule.field === "is_active" ? "selected" : ""}>Активность</option>
+    </select>
+    <select class="collection-rule-operator" aria-label="Оператор">${collectionRuleOperatorOptions(rule.field, rule.operator)}</select>
+    <span class="collection-rule-value-wrap">${collectionRuleValueControl(rule.field, rule.value)}</span>
+    <button class="button ghost compact" data-remove-collection-rule type="button" aria-label="Удалить правило">Удалить</button>
+  </div>`;
+}
+
+function bindCollectionRuleRow(row) {
+  row.querySelector(".collection-rule-field").addEventListener("change", (event) => {
+    const field = event.target.value;
+    row.querySelector(".collection-rule-operator").innerHTML = collectionRuleOperatorOptions(field);
+    row.querySelector(".collection-rule-value-wrap").innerHTML = collectionRuleValueControl(field);
+  });
+  row.querySelector("[data-remove-collection-rule]").addEventListener("click", () => row.remove());
+}
+
+function addCollectionRuleRow(rule) {
+  const container = document.querySelector("#collection-rules");
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = collectionRuleEditorRow(rule);
+  const row = wrapper.firstElementChild;
+  container.append(row);
+  bindCollectionRuleRow(row);
+}
+
+function setCollectionRuleEditorVisibility(type) {
+  const section = document.querySelector("#collection-rules-section");
+  if (!section) return;
+  section.classList.toggle("hidden", type !== "dynamic");
+  if (type === "dynamic" && !section.querySelector("[data-collection-rule-row]")) addCollectionRuleRow();
+}
+
+function collectCollectionRules() {
+  return [...document.querySelectorAll("[data-collection-rule-row]")].map((row) => ({
+    field: row.querySelector(".collection-rule-field").value,
+    operator: row.querySelector(".collection-rule-operator").value,
+    value: row.querySelector(".collection-rule-value").value,
+  }));
+}
+
+function openCollectionEditor(collection = null) {
+  const editing = Boolean(collection);
+  const type = collection?.type || "static";
+  const rules = collection?.rules || [];
+  const dialog = openCatalogActionDialog(`<form id="collection-editor-form">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">${editing ? "Коллекция" : "Новая коллекция"}</p><h2>${editing ? `Изменить «${escapeHtml(collection.name)}»` : "Создать коллекцию"}</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <div class="field"><label for="collection-name">Название</label><input id="collection-name" name="name" value="${escapeHtml(collection?.name || "")}" maxlength="255" required autofocus></div>
+    <div class="field"><label for="collection-description">Описание <span class="muted">(необязательно)</span></label><textarea id="collection-description" name="description">${escapeHtml(collection?.description || "")}</textarea></div>
+    <div class="field-row collection-editor-fields"><div class="field"><label for="collection-type">Тип</label><select id="collection-type" name="type" ${editing ? "disabled" : ""}><option value="static" ${type === "static" ? "selected" : ""}>Статическая · ручной состав</option><option value="dynamic" ${type === "dynamic" ? "selected" : ""}>Динамическая · по правилам</option></select></div><div class="field"><label for="collection-sort">Порядок</label><input id="collection-sort" name="sort_order" type="number" step="1" value="${collection?.sort_order ?? 0}"></div></div>
+    <label class="catalog-check collection-active-check"><input name="is_active" type="checkbox" ${collection?.is_active === false ? "" : "checked"}><span>Коллекция активна</span></label>
+    <section id="collection-rules-section" class="collection-rules-section ${type === "dynamic" ? "" : "hidden"}"><div class="section-heading"><div><strong>Правила</strong><p class="muted small">Все условия применяются одновременно (AND). Состав пересчитывается по текущим данным.</p></div><button class="button secondary compact" id="collection-add-rule" type="button">＋ Условие</button></div><div id="collection-rules">${rules.map(collectionRuleEditorRow).join("")}</div><div class="collection-preview-actions"><button class="button secondary compact" id="collection-preview" type="button">Проверить состав</button><span id="collection-preview-result" class="muted small"></span></div></section>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button" type="submit">${editing ? "Сохранить" : "Создать"}</button></div>
+  </form>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelectorAll("[data-collection-rule-row]").forEach(bindCollectionRuleRow);
+  dialog.querySelector("#collection-type").addEventListener("change", (event) => setCollectionRuleEditorVisibility(event.target.value));
+  dialog.querySelector("#collection-add-rule").addEventListener("click", () => addCollectionRuleRow());
+  dialog.querySelector("#collection-preview").addEventListener("click", previewCollectionRules);
+  dialog.querySelector("#collection-editor-form").addEventListener("submit", (event) => saveCollection(event, collection));
+}
+
+async function previewCollectionRules() {
+  const result = document.querySelector("#collection-preview-result");
+  const rules = collectCollectionRules();
+  if (!rules.length) { result.textContent = "Добавьте хотя бы одно условие"; return; }
+  try {
+    const preview = await api("/api/catalog/collections/preview", { method: "POST", body: JSON.stringify({ rules }) });
+    result.textContent = `Сейчас подходит: ${preview.count} ${pluralizeRu(preview.count, "вариант", "варианта", "вариантов")}`;
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function saveCollection(event, collection) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const data = new FormData(form);
+  const type = collection?.type || data.get("type");
+  const rules = type === "dynamic" ? collectCollectionRules() : [];
+  if (type === "dynamic" && !rules.length) { showToast("Добавьте хотя бы одно правило", true); return; }
+  button.disabled = true;
+  const metadata = {
+    name: String(data.get("name") || "").trim(),
+    description: nullableText(data.get("description")),
+    sort_order: Number(data.get("sort_order") || 0),
+    is_active: data.get("is_active") === "on",
+  };
+  try {
+    if (collection) {
+      if (type === "dynamic") await api(`/api/catalog/collections/${collection.id}/rules`, { method: "PUT", body: JSON.stringify({ rules }) });
+      await api(`/api/catalog/collections/${collection.id}`, { method: "PATCH", body: JSON.stringify(metadata) });
+    } else {
+      await api("/api/catalog/collections", { method: "POST", body: JSON.stringify({ ...metadata, type, rules }) });
+    }
+    document.querySelector("#catalog-action-dialog")?.close();
+    if (state.operations.collection?.id === collection?.id) await openCollection(collection.id);
+    else await openCollections();
+    showToast(collection ? "Коллекция сохранена" : "Коллекция создана");
+  } catch (error) { showToast(error.message, true); button.disabled = false; }
+}
+
+async function toggleCollection(collectionId, button) {
+  const collection = state.operations.collections.find((item) => item.id === collectionId) || state.operations.collection;
+  if (!collection) return;
+  button.disabled = true;
+  try {
+    await api(`/api/catalog/collections/${collectionId}`, { method: "PATCH", body: JSON.stringify({ is_active: !collection.is_active }) });
+    if (state.operations.collection?.id === collectionId) await openCollection(collectionId);
+    else await openCollections();
+    showToast(collection.is_active ? "Коллекция отключена" : "Коллекция включена");
+  } catch (error) { showToast(error.message, true); button.disabled = false; }
+}
+
+function openCollectionDeleteConfirmation(collection) {
+  const dialog = openCatalogActionDialog(`<div class="catalog-delete-dialog">
+    <div class="catalog-dialog-head"><div><p class="eyebrow">Удаление подборки</p><h2>Удалить коллекцию «${escapeHtml(collection.name)}»?</h2></div><button class="drawer-close" data-action-cancel type="button" aria-label="Закрыть">×</button></div>
+    <p>Товары и варианты удалены не будут.</p>
+    <p class="muted small">Будут удалены только правила и ручные связи этой коллекции.</p>
+    <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button danger" data-confirm-delete-collection type="button">Удалить коллекцию</button></div>
+  </div>`);
+  dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector("[data-confirm-delete-collection]").addEventListener("click", (event) => deleteCollection(collection.id, event.currentTarget));
+}
+
+async function deleteCollection(collectionId, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/catalog/collections/${collectionId}`, { method: "DELETE" });
+    document.querySelector("#catalog-action-dialog")?.close();
+    state.operations.collection = null;
+    await openCollections();
+    showToast("Коллекция удалена");
+  } catch (error) { showToast(error.message, true); button.disabled = false; }
+}
+
+function renderCollectionVariantRow(variant, removable = false) {
+  return `<article class="collection-variant-row"><span><strong>${escapeHtml(variant.product_name)}${meaningfulVariantSuffix(variant.variant_name)}</strong><small class="muted">${escapeHtml(variant.sku)} · ${variant.current_retail_price === null ? "без цены" : formatMoney(variant.current_retail_price)} · ${formatQuantity(variant.stock)}</small></span>${removable ? `<button class="button ghost compact danger-text" data-remove-collection-member="${variant.id}" type="button">Убрать</button>` : ""}</article>`;
+}
+
+async function openCollection(collectionId, returnProductId = null) {
+  try {
+    recordRoute("collection", { collectionId });
+    logicalParent = returnProductId ? () => openOperationsProduct(returnProductId) : openCollections;
+    [state.operations.collection, state.operations.collectionVariants, state.categories] = await Promise.all([
+      api(`/api/catalog/collections/${collectionId}`),
+      api(`/api/catalog/collections/${collectionId}/variants?limit=100`),
+      api("/api/catalog/categories?status=all"),
+    ]);
+    state.operations.collectionSearch = [];
+    renderCollectionDetail();
+  } catch (error) { showToast(error.message, true); }
+}
+
+function renderCollectionDetail() {
+  const collection = state.operations.collection;
+  const variants = state.operations.collectionVariants.length
+    ? state.operations.collectionVariants.map((variant) => renderCollectionVariantRow(variant, collection.type === "static")).join("")
+    : '<div class="empty">Подходящих вариантов нет</div>';
+  const rules = collection.type === "dynamic"
+    ? `<section class="card collection-rule-card"><div class="section-heading"><div><h2>Правила</h2><p class="muted small">Все условия применяются одновременно. Состав не хранится и пересчитывается по текущим цене, категории, остатку и активности.</p></div></div><div class="collection-rule-summaries">${collection.rules.map(renderCollectionRuleSummary).join("")}</div></section>`
+    : "";
+  const staticAdd = collection.type === "static" && collection.is_active ? `<section class="card collection-member-search"><div class="section-heading"><div><h2>Добавить варианты</h2><p class="muted small">Найдите вариант по товару, названию, SKU или штрихкоду.</p></div></div><form class="search-row" id="collection-variant-search"><input name="query" placeholder="Название, SKU или штрихкод" autocomplete="off" required><button class="button secondary" type="submit">Найти</button></form><div id="collection-search-results"></div></section>` : "";
+  root.innerHTML = `<div class="shell collection-shell">
+    ${topbar(true)}
+    <div class="catalog-heading"><div><p class="eyebrow">Каталог · Подборки</p><h1>${escapeHtml(collection.name)} ${collection.is_active ? "" : '<span class="chip warn">Отключена</span>'}</h1><p class="muted">${escapeHtml(collection.description || collectionTypeLabel(collection.type))}</p></div><div class="catalog-heading-actions"><button class="button secondary" id="collection-edit" type="button">Изменить</button><button class="button ${collection.is_active ? "danger" : "secondary"}" id="collection-toggle" type="button">${collection.is_active ? "Отключить" : "Включить"}</button><button class="button ghost danger-text" id="collection-delete" type="button">Удалить коллекцию</button></div></div>
+    <div class="collection-facts"><span><small>Тип</small><strong>${escapeHtml(collectionTypeLabel(collection.type))}</strong></span><span><small>Состав</small><strong>${collection.variant_count} ${pluralizeRu(collection.variant_count, "вариант", "варианта", "вариантов")}</strong></span><span><small>Обновлена</small><strong>${formatDate(collection.updated_at)}</strong></span></div>
+    ${rules}${staticAdd}
+    <div class="section-heading"><h2>${collection.type === "static" ? "Состав" : "Текущий результат"}</h2><span class="muted small">${collection.variant_count}</span></div>
+    <div class="collection-variant-list">${variants}</div>
+    <dialog class="catalog-action-dialog" id="catalog-action-dialog"><div id="catalog-action-content"></div></dialog>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#collection-edit").addEventListener("click", () => openCollectionEditor(collection));
+  document.querySelector("#collection-toggle").addEventListener("click", (event) => toggleCollection(collection.id, event.currentTarget));
+  document.querySelector("#collection-delete").addEventListener("click", () => openCollectionDeleteConfirmation(collection));
+  document.querySelector("#collection-variant-search")?.addEventListener("submit", searchCollectionVariants);
+  document.querySelectorAll("[data-remove-collection-member]").forEach((button) => button.addEventListener("click", () => removeCollectionMember(button.dataset.removeCollectionMember, button)));
+}
+
+async function searchCollectionVariants(event) {
+  event.preventDefault();
+  const query = String(new FormData(event.currentTarget).get("query") || "").trim();
+  if (!query) return;
+  try {
+    state.operations.collectionSearch = await api(`/api/catalog/collections/variant-search?query=${encodeURIComponent(query)}&limit=12`);
+    const existing = new Set(state.operations.collectionVariants.map((variant) => variant.id));
+    const html = state.operations.collectionSearch.length
+      ? `${state.operations.collectionSearch.map((variant) => `<label class="collection-variant-row collection-search-option"><span><strong>${escapeHtml(variant.product_name)}${meaningfulVariantSuffix(variant.variant_name)}</strong><small class="muted">${escapeHtml(variant.sku)} · ${variant.current_retail_price === null ? "без цены" : formatMoney(variant.current_retail_price)} · ${formatQuantity(variant.stock)}</small></span><input type="checkbox" data-collection-member-choice value="${variant.id}" ${existing.has(variant.id) ? "checked disabled" : ""} aria-label="Добавить ${escapeHtml(variant.sku)}"></label>`).join("")}<button class="button secondary collection-add-selected" id="collection-add-selected" type="button">Добавить выбранные</button>`
+      : '<div class="empty">Варианты не найдены</div>';
+    document.querySelector("#collection-search-results").innerHTML = html;
+    document.querySelector("#collection-add-selected")?.addEventListener("click", (event) => {
+      const ids = [...document.querySelectorAll("[data-collection-member-choice]:checked:not(:disabled)")].map((input) => input.value);
+      addCollectionMembers(ids, event.currentTarget);
+    });
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addCollectionMembers(variantIds, button) {
+  if (!variantIds.length) { showToast("Выберите хотя бы один вариант", true); return; }
+  button.disabled = true;
+  try {
+    await api(`/api/catalog/collections/${state.operations.collection.id}/memberships`, { method: "POST", body: JSON.stringify({ variant_ids: variantIds }) });
+    await openCollection(state.operations.collection.id);
+    showToast(`${variantIds.length} ${pluralizeRu(variantIds.length, "вариант добавлен", "варианта добавлены", "вариантов добавлены")} в коллекцию`);
+  } catch (error) { showToast(error.message, true); button.disabled = false; }
+}
+
+async function removeCollectionMember(variantId, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/catalog/collections/${state.operations.collection.id}/memberships/${variantId}`, { method: "DELETE" });
+    await openCollection(state.operations.collection.id);
+    showToast("Вариант убран из коллекции");
+  } catch (error) { showToast(error.message, true); button.disabled = false; }
 }
 
 function openCatalogActionDialog(content) {
@@ -3119,6 +3511,7 @@ async function openOperationsProduct(productId) {
     await Promise.all([
       loadAqsiStates(state.operations.product.variants.filter((variant) => !variant.is_archived)),
       loadRentalTariffs(state.operations.product.variants),
+      loadVariantCollectionStates(state.operations.product.variants),
     ]);
     renderOperationsProduct();
   } catch (error) { showToast(error.message, true); }
@@ -3134,6 +3527,16 @@ async function loadRentalTariffs(variants) {
   entries.forEach(([variantId, tariffs]) => state.operations.tariffs.set(variantId, tariffs));
 }
 
+async function loadVariantCollectionStates(variants) {
+  state.operations.variantCollections = new Map();
+  const operational = variants.filter((variant) => !variant.is_archived);
+  const entries = await Promise.all(operational.map(async (variant) => [
+    variant.id,
+    await api(`/api/catalog/collections/variants/${variant.id}`),
+  ]));
+  entries.forEach(([variantId, collections]) => state.operations.variantCollections.set(variantId, collections));
+}
+
 function renderVariantCharacteristics(variant, readOnly = false) {
   const rows = Object.entries(variant.attributes || {}).map(([name, value]) => `<div class="characteristic-row">
     <span class="characteristic-name">${escapeHtml(name)}</span>
@@ -3144,6 +3547,39 @@ function renderVariantCharacteristics(variant, readOnly = false) {
     <div class="variant-section-heading"><strong>Характеристики</strong>${readOnly ? "" : `<button class="link-button" data-add-characteristic="${variant.id}" type="button">+ Добавить характеристику</button>`}</div>
     ${rows ? `<div class="characteristic-list">${rows}</div>` : '<p class="muted small characteristic-empty">Не указаны</p>'}
   </section>`;
+}
+
+function renderVariantCollections(variant, readOnly = false) {
+  const collections = state.operations.variantCollections.get(variant.id);
+  if (!collections) return "";
+  const staticOptions = collections.static_collections.map((collection) => `<label class="catalog-check"><input type="checkbox" name="collection_id" value="${collection.id}" ${collection.is_member ? "checked" : ""} ${readOnly ? "disabled" : ""}><span>${escapeHtml(collection.name)}</span></label>`).join("");
+  const dynamicMatches = collections.dynamic_collections.map((collection) => `<button class="chip collection-match-chip" data-open-variant-collection="${collection.id}" type="button" title="Состав вычислен по правилам">${escapeHtml(collection.name)} · по правилам</button>`).join("");
+  if (!staticOptions && !dynamicMatches) return `<section class="variant-collections"><div class="variant-section-heading"><strong>Коллекции</strong></div><p class="muted small">Вариант пока не входит в активные коллекции.</p></section>`;
+  return `<section class="variant-collections"><div class="variant-section-heading"><strong>Коллекции</strong>${staticOptions && !readOnly ? `<button class="link-button" type="submit" form="variant-collections-${variant.id}">Сохранить</button>` : ""}</div>
+    ${staticOptions ? `<form class="variant-static-collections" id="variant-collections-${variant.id}" data-variant-collections-form="${variant.id}">${staticOptions}</form>` : ""}
+    ${dynamicMatches ? `<div class="variant-dynamic-collections"><span class="muted small">По правилам</span><span class="chips">${dynamicMatches}</span></div>` : ""}
+  </section>`;
+}
+
+async function saveVariantCollections(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const variantId = form.dataset.variantCollectionsForm;
+  const button = document.querySelector(`[form="variant-collections-${variantId}"]`);
+  if (button) button.disabled = true;
+  try {
+    const collectionIds = new FormData(form).getAll("collection_id");
+    const result = await api(`/api/catalog/collections/variants/${variantId}`, {
+      method: "PUT",
+      body: JSON.stringify({ collection_ids: collectionIds }),
+    });
+    state.operations.variantCollections.set(variantId, result);
+    await openOperationsProduct(state.operations.product.id);
+    showToast("Коллекции варианта сохранены");
+  } catch (error) {
+    showToast(error.message, true);
+    if (button?.isConnected) button.disabled = false;
+  }
 }
 
 function renderVariantRentalBlock(variant, readOnly = false) {
@@ -3193,13 +3629,18 @@ function renderVariantTariffs(variant, readOnly = false) {
   </section>`;
 }
 
-function renderOperationsVariant(variant, product, canDeleteCatalog) {
+function renderOperationsVariant(variant, product, canDeleteCatalog, position = 0, variantCount = 1) {
   const readOnly = product.is_archived || variant.is_archived;
+  const orderActions = !product.is_archived && variantCount > 1
+    ? `<span class="variant-order-actions" aria-label="Порядок варианта ${escapeHtml(visibleVariantTitle(variant.title, "Единственный вариант"))}"><span class="muted small">${position + 1} из ${variantCount}</span><button class="button ghost compact" data-move-variant="${variant.id}" data-move-direction="-1" type="button" ${position === 0 ? "disabled" : ""}>↑ Выше</button><button class="button ghost compact" data-move-variant="${variant.id}" data-move-direction="1" type="button" ${position === variantCount - 1 ? "disabled" : ""}>↓ Ниже</button></span>`
+    : "";
   return `<article class="variant-commercial-card card ${variant.is_archived ? "archived" : ""}">
+    ${orderActions}
     ${renderCatalogMedia("catalog_variant", variant.id, product, readOnly)}
     <span class="variant-commercial-main">
       <span class="variant-identity"><span class="variant-info-section"><span class="variant-info-content"><span class="muted small">Название варианта</span><strong>${escapeHtml(visibleVariantTitle(variant.title, "Единственный вариант"))}</strong></span>${readOnly ? "" : `<span class="variant-info-action"><button class="link-button" data-rename-variant="${variant.id}" type="button">Изменить</button></span>`}</span>${variant.is_archived ? '<span class="chip archive-chip">АРХИВНЫЙ ВАРИАНТ</span>' : ""}<span class="muted small">SKU · ${escapeHtml(variant.sku)}</span></span>
       ${renderVariantCharacteristics(variant, readOnly)}
+      ${renderVariantCollections(variant, readOnly)}
       ${renderVariantBarcodes(variant, readOnly)}
       <span class="commercial-block variant-info-section"><span class="variant-info-content"><strong>Продажа</strong><span>Цена: ${variant.current_retail_price === null ? "не настроена" : formatMoney(variant.current_retail_price)}</span></span>${readOnly ? "" : `<span class="variant-info-action"><button class="link-button" data-set-sale-price="${variant.id}" type="button">Изменить</button></span>`}</span>
       ${renderVariantRentalBlock(variant, readOnly)}
@@ -3226,7 +3667,7 @@ function renderOperationsProduct() {
     includeRoot: false,
   });
   const variants = product.variants.length
-    ? product.variants.map((variant) => renderOperationsVariant(variant, product, canDeleteCatalog)).join("")
+    ? product.variants.map((variant, index) => renderOperationsVariant(variant, product, canDeleteCatalog, index, product.variants.length)).join("")
     : '<div class="empty">У товара пока нет вариантов</div>';
   const rentalAssets = product.rental_assets.length ? `<div class="section-heading"><h2>Предметы аренды</h2></div><div class="session-list">${product.rental_assets.map(renderOperationsAssetRow).join("")}</div>` : "";
   root.innerHTML = `<div class="shell">
@@ -3271,6 +3712,8 @@ function renderOperationsProduct() {
   document.querySelectorAll("[data-add-characteristic]").forEach((button) => button.addEventListener("click", () => openCharacteristicEditor(button.dataset.addCharacteristic)));
   document.querySelectorAll("[data-edit-characteristic]").forEach((button) => button.addEventListener("click", () => openCharacteristicEditor(button.dataset.editCharacteristic, button.dataset.characteristicName)));
   document.querySelectorAll("[data-delete-characteristic]").forEach((button) => button.addEventListener("click", () => deleteVariantCharacteristic(button.dataset.deleteCharacteristic, button.dataset.characteristicName)));
+  document.querySelectorAll("[data-variant-collections-form]").forEach((form) => form.addEventListener("submit", saveVariantCollections));
+  document.querySelectorAll("[data-open-variant-collection]").forEach((button) => button.addEventListener("click", () => openCollection(button.dataset.openVariantCollection, product.id)));
   document.querySelectorAll("[data-replace-barcode]").forEach((button) => button.addEventListener("click", () => replaceVariantBarcode(button.dataset.replaceBarcode)));
   document.querySelectorAll("[data-delete-external-barcode]").forEach((button) => button.addEventListener("click", () => deleteExternalBarcode(button.dataset.deleteExternalBarcode)));
   document.querySelectorAll("[data-set-sale-price]").forEach((button) => button.addEventListener("click", () => editCatalogSalePrice(button.dataset.setSalePrice)));
@@ -3291,10 +3734,32 @@ function renderOperationsProduct() {
   document.querySelectorAll("[data-print-label]").forEach((button) => button.addEventListener("click", () => printVariantLabels(button.dataset.printLabel, 1)));
   document.querySelectorAll("[data-delete-product]").forEach((button) => button.addEventListener("click", () => openCatalogDeletePreflight("product", button.dataset.deleteProduct)));
   document.querySelectorAll("[data-delete-variant]").forEach((button) => button.addEventListener("click", () => openCatalogDeletePreflight("variant", button.dataset.deleteVariant)));
+  document.querySelectorAll("[data-move-variant]").forEach((button) => button.addEventListener("click", () => moveCatalogVariant(button.dataset.moveVariant, Number(button.dataset.moveDirection), button)));
   document.querySelectorAll("[data-restore-product]").forEach((button) => button.addEventListener("click", () => openCatalogRestoreConfirmation(button.dataset.restoreProduct, button.dataset.restoreTitle, button.dataset.restoreContext)));
   document.querySelectorAll("[data-restore-variant]").forEach((button) => button.addEventListener("click", () => executeCatalogRestore("variant", button.dataset.restoreVariant, button, button.dataset.restoreContext)));
   document.querySelectorAll("[data-classify-test-product]").forEach((button) => button.addEventListener("click", () => openCatalogTestDataPreflight(button.dataset.classifyTestProduct, "classify")));
   document.querySelectorAll("[data-purge-test-product]").forEach((button) => button.addEventListener("click", () => openCatalogTestDataPreflight(button.dataset.purgeTestProduct, "purge")));
+}
+
+async function moveCatalogVariant(variantId, direction, button) {
+  const product = state.operations.product;
+  const variantIds = product.variants.map((variant) => variant.id);
+  const currentIndex = variantIds.indexOf(variantId);
+  const targetIndex = currentIndex + direction;
+  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= variantIds.length) return;
+  [variantIds[currentIndex], variantIds[targetIndex]] = [variantIds[targetIndex], variantIds[currentIndex]];
+  button.disabled = true;
+  try {
+    await api(`/api/catalog/products/${product.id}/variant-order`, {
+      method: "PUT",
+      body: JSON.stringify({ variant_ids: variantIds }),
+    });
+    await openOperationsProduct(product.id);
+    showToast("Порядок вариантов сохранён");
+  } catch (error) {
+    showToast(error.message, true);
+    if (button.isConnected) button.disabled = false;
+  }
 }
 
 async function openVariantLabel(variantId) {
@@ -4035,6 +4500,12 @@ async function openOperationsAsset(assetId) {
 function renderOperationsAsset() {
   const asset = state.operations.asset;
   const economics = asset.economics;
+  const seals = asset.seals || [];
+  const sealRows = seals.length ? seals.map((seal) => `
+    <article class="session-row asset-seal-row">
+      <span><strong>${escapeHtml(seal.location)} — ${escapeHtml(seal.seal_number)}</strong><br><span class="muted small">${escapeHtml(sealStatusLabel(seal.status))} · установлена ${formatDate(seal.installed_at)}${seal.removed_at ? ` · снята ${formatDate(seal.removed_at)}` : ""}</span>${seal.note ? `<br><span class="muted small">${escapeHtml(seal.note)}</span>` : ""}</span>
+      ${seal.status === "active" ? `<span class="inline-actions"><button class="button ghost compact" data-seal-status="removed" data-seal-id="${seal.id}">Снять</button><button class="button ghost compact" data-seal-status="broken" data-seal-id="${seal.id}">Отметить повреждение</button></span>` : ""}
+    </article>`).join("") : '<div class="empty">Контрольные пломбы не установлены</div>';
   const timeline = asset.timeline.length ? asset.timeline.map((event) => `
     <article class="timeline-row">
       <span class="timeline-dot"></span>
@@ -4066,6 +4537,19 @@ function renderOperationsAsset() {
       ${asset.current_order_id ? `<button class="button" id="asset-open-order">Открыть аренду →</button>` : ""}
       ${asset.purpose === "rental" && asset.availability === "available" ? '<button class="button ghost" id="asset-withdraw-for-sale">Вывести из аренды</button>' : ""}
     </div>
+    <div class="section-heading"><h2>Идентификация</h2><span class="muted small">Необязательно для выдачи</span></div>
+    <form class="card" id="asset-identification-form">
+      <div class="field"><label>Серийный номер</label><input name="serial_number" maxlength="120" value="${escapeHtml(asset.serial_number || "")}" placeholder="Оставьте пустым, если номера нет"></div>
+      <button class="button secondary" type="submit">Сохранить серийный номер</button>
+    </form>
+    <div class="section-heading"><h2>Контрольные пломбы</h2></div>
+    <div class="session-list">${sealRows}</div>
+    <form class="card" id="asset-seal-form">
+      <h3>Добавить пломбу</h3>
+      <div class="field-row"><div class="field"><label>Место установки</label><input name="location" maxlength="160" required placeholder="Например, Корпус"></div><div class="field"><label>Номер пломбы</label><input name="seal_number" maxlength="120" required></div></div>
+      <div class="field"><label>Комментарий</label><textarea name="note" maxlength="2000"></textarea></div>
+      <button class="button secondary full" type="submit">Добавить пломбу</button>
+    </form>
     <div class="section-heading"><h2>Экономика</h2><span class="chips">${economics.flags.map(efficiencyChip).join("")}</span></div>
     <section class="card order-facts">
       <div><span class="muted small">Стоимость приобретения</span><strong>${economics.acquisition_cost === null ? "Не зафиксирована" : formatMoney(economics.acquisition_cost)}</strong></div>
@@ -4108,11 +4592,67 @@ function renderOperationsAsset() {
   document.querySelector("#asset-print-label").addEventListener("click", () => openRentalAssetLabel(asset.id));
   document.querySelector("#asset-open-order")?.addEventListener("click", () => openRentalReturnOrder(asset.current_order_id));
   document.querySelector("#asset-withdraw-for-sale")?.addEventListener("click", withdrawAssetForSale);
+  document.querySelector("#asset-identification-form").addEventListener("submit", updateAssetIdentification);
+  document.querySelector("#asset-seal-form").addEventListener("submit", addAssetSeal);
+  document.querySelectorAll("[data-seal-status]").forEach((button) => button.addEventListener("click", updateAssetSealStatus));
   document.querySelectorAll("[data-passport-order]").forEach((button) => button.addEventListener("click", () => openRentalReturnOrder(button.dataset.passportOrder)));
   document.querySelectorAll("[data-passport-customer]").forEach((button) => button.addEventListener("click", () => selectRentalCustomer(button.dataset.passportCustomer)));
   document.querySelector("#asset-maintenance-form").addEventListener("submit", addAssetMaintenance);
   document.querySelector("#asset-damage-form").addEventListener("submit", addAssetDamage);
   document.querySelector("#asset-photo-form").addEventListener("submit", addAssetConditionPhoto);
+}
+
+function sealStatusLabel(status) {
+  return { active: "Активна", removed: "Снята", broken: "Повреждена" }[status] || status;
+}
+
+async function updateAssetIdentification(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    state.operations.asset = await api(`/api/operations/rental/assets/${state.operations.asset.id}/identification`, {
+      method: "PATCH",
+      body: JSON.stringify({ serial_number: nullableText(data.get("serial_number")) }),
+    });
+    renderOperationsAsset();
+    showToast("Серийный номер сохранён.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addAssetSeal(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/seals`, {
+      method: "POST",
+      body: JSON.stringify({
+        location: String(data.get("location") || "").trim(),
+        seal_number: String(data.get("seal_number") || "").trim(),
+        note: nullableText(data.get("note")),
+      }),
+    });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast("Пломба добавлена. Предыдущая пломба в этом месте сохранена в истории.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function updateAssetSealStatus(event) {
+  const button = event.currentTarget;
+  const status = button.dataset.sealStatus;
+  const note = window.prompt(status === "broken" ? "Опишите повреждение пломбы:" : "Комментарий к снятию пломбы (необязательно):", "");
+  if (note === null) return;
+  if (status === "broken" && !note.trim()) {
+    showToast("Для повреждённой пломбы нужен комментарий.", true);
+    return;
+  }
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/seals/${button.dataset.sealId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, note: nullableText(note) }),
+    });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast(status === "broken" ? "Повреждение пломбы сохранено." : "Пломба снята.");
+  } catch (error) { showToast(error.message, true); }
 }
 
 async function withdrawAssetForSale() {
@@ -4513,6 +5053,7 @@ async function openRentalDraft(orderId, loadedOrder = null) {
     state.rental.editingItemId = null;
     state.rental.selectedAssetId = null;
     state.rental.selectedTariffId = null;
+    state.rental.depositEditing = false;
     state.rental.tariffs = [];
     renderRentalDraft();
   } catch (error) { showToast(error.message, true); }
@@ -4568,6 +5109,10 @@ function renderRentalDraft() {
   });
   document.querySelector("#rental-tariff-form")?.addEventListener("submit", saveRentalTariffDraft);
   document.querySelector("#rental-deposit-form")?.addEventListener("submit", saveRentalOrderDeposit);
+  document.querySelector("#rental-edit-deposit")?.addEventListener("click", () => {
+    state.rental.depositEditing = true;
+    renderRentalDraft();
+  });
   document.querySelector("#rental-ready-issue")?.addEventListener("click", () => openRentalIssueConfirmation(order.id));
   document.querySelector("#rental-generate-agreement")?.addEventListener("click", () => openRentalAgreementPreview(order.id));
   document.querySelector("[data-open-agreement]")?.addEventListener("click", () => openAuthenticatedFile(`/rental/agreements/${state.rental.agreement.id}/pdf`));
@@ -4671,9 +5216,15 @@ function toggleRentalTimingFields() {
 
 function renderRentalReadySummary(order) {
   const agreement = state.rental.agreement;
-  const depositControl = agreement
-    ? `<div><span class="muted small">Фактический залог</span><strong>${formatMoney(Number(order.deposit_amount))}</strong></div>`
-    : `<form id="rental-deposit-form" class="rental-deposit-form"><div class="field"><label>Фактически полученный залог, ₽</label><input name="deposit_amount" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(order.deposit_amount)}" required><small class="muted">Рекомендация по позициям: ${formatMoney(Number(order.recommended_deposit_total))}</small></div><button class="button secondary compact" type="submit">Сохранить залог</button></form>`;
+  const depositReceived = order.deposit_received ?? order.deposit_amount ?? null;
+  const depositConfirmed = order.deposit_received_confirmed === true
+    || (order.deposit_received_confirmed === undefined && depositReceived !== null);
+  const suggestedDeposit = depositConfirmed
+    ? depositReceived
+    : order.required_deposit_total ?? order.recommended_deposit_total;
+  const depositControl = depositConfirmed && !state.rental.depositEditing
+    ? `<div class="rental-deposit-confirmed"><span><span class="muted small">Фактически получено</span><strong>${formatMoney(Number(depositReceived))}</strong></span><button class="button secondary compact" type="button" id="rental-edit-deposit">Изменить</button></div>`
+    : `<form id="rental-deposit-form" class="rental-deposit-form"><div class="field"><label>Фактически получено, ₽</label><input name="deposit_received" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(suggestedDeposit)}" required><small class="muted">По умолчанию предложена рекомендованная сумма. Измените её, если фактически получена другая сумма.</small></div><button class="button secondary compact" type="submit">Сохранить залог</button></form>`;
   const readyAction = order.status !== "ready"
     ? '<p class="muted small rental-ready-message">Заполните условия всех позиций, чтобы подготовить аренду к выдаче.</p>'
     : order.requires_agreement && !agreement
@@ -4694,14 +5245,15 @@ function renderRentalReadySummary(order) {
 
 async function saveRentalOrderDeposit(event) {
   event.preventDefault();
-  const amount = String(new FormData(event.currentTarget).get("deposit_amount"));
+  const amount = String(new FormData(event.currentTarget).get("deposit_received"));
   try {
-    state.rental.order = await api(`/rental/orders/${state.rental.order.id}`, {
+    state.rental.order = await api(`/rental/orders/${state.rental.order.id}/deposit`, {
       method: "PATCH",
-      body: JSON.stringify({ deposit_amount: amount }),
+      body: JSON.stringify({ deposit_received: amount }),
     });
+    state.rental.depositEditing = false;
     renderRentalDraft();
-    showToast("Фактический залог сохранён");
+    showToast("Фактически полученный залог сохранён");
   } catch (error) { showToast(error.message, true); }
 }
 
@@ -4999,7 +5551,10 @@ async function openRentalReturnOrder(orderId, focusItemId = null) {
     const activeIds = state.rental.order.items.filter((item) => item.status === "issued").map((item) => item.id);
     state.rental.returnItemIds = focusItemId ? activeIds.filter((id) => id === focusItemId) : activeIds;
     state.rental.returnPreview = state.rental.returnItemIds.length
-      ? await requestRentalReturnPreview(state.rental.returnItemIds.map((item_id) => ({ item_id, condition: "good", damage_charge: "0", notes: null })))
+      ? await requestRentalReturnPreview(state.rental.returnItemIds.map((item_id) => {
+        const item = state.rental.order.items.find((candidate) => candidate.id === item_id);
+        return { item_id, condition: "good", damage_charge: "0", notes: null, seal_verifications: defaultSealVerifications(item) };
+      }))
       : null;
     state.rental.agreement = await api(`/rental/orders/${orderId}/agreement`);
     renderRentalReturnOrder();
@@ -5009,7 +5564,10 @@ async function openRentalReturnOrder(orderId, focusItemId = null) {
 function renderRentalReturnOrder() {
   const order = state.rental.order;
   const requiredDepositTotal = Number(order.required_deposit_total ?? order.recommended_deposit_total ?? 0);
-  const depositReceived = Number(order.deposit_amount || 0);
+  const rawDepositReceived = order.deposit_received ?? order.deposit_amount ?? null;
+  const depositReceivedConfirmed = order.deposit_received_confirmed === true
+    || (order.deposit_received_confirmed === undefined && rawDepositReceived !== null);
+  const depositReceived = depositReceivedConfirmed ? Number(rawDepositReceived) : null;
   const total = order.items.reduce(
     (sum, item) => sum + Number(item.agreed_price) - Number(item.discount),
     0,
@@ -5031,6 +5589,7 @@ function renderRentalReturnOrder() {
       </div>
       ${completed ? renderCompletedRentalItem(item) : `
       <div class="return-timing-facts"><span><small>Выдано</small><strong>${formatDate(item.issued_at)}</strong></span><span><small>Вернуть до</small><strong>${formatDate(item.due_at)}</strong></span><span><small>Льгота</small><strong>${Number(item.tariff_snapshot?.grace_minutes || 0)} мин</strong></span><span><small>Тариф</small><strong>${escapeHtml(item.tariff_snapshot?.tariff_name || "Тариф")}</strong></span></div>
+      ${renderReturnIdentification(item, preview)}
       <div class="field-row">
         <div class="field"><label>Состояние при возврате</label><select data-return-condition="${item.id}">
           <option value="good" ${preview?.condition === "good" ? "selected" : ""}>Без замечаний</option>
@@ -5053,16 +5612,17 @@ function renderRentalReturnOrder() {
     <section class="card order-facts">
       <div><span class="muted small">Срок</span><strong>${formatShortDate(order.planned_start_at)} — ${formatShortDate(order.planned_return_at)}</strong></div>
       <div><span class="muted small">Стоимость</span><strong>${formatMoney(total)}</strong></div>
-      <div><span class="muted small">Обеспечительный платёж</span><strong>${formatMoney(requiredDepositTotal)}</strong><small class="muted">Фактически получено: ${formatMoney(depositReceived)}</small></div>
+      <div><span class="muted small">Обеспечительный платёж</span><strong>${formatMoney(requiredDepositTotal)}</strong><small class="muted">Фактически получено: ${depositReceivedConfirmed ? formatMoney(depositReceived) : "не подтверждено"}</small></div>
       <div><span class="muted small">Статус</span><strong>${order.status === "closed" ? "Завершён" : order.is_overdue ? "Просрочен" : "Активен"}</strong></div>
     </section>
+    ${depositReceivedConfirmed ? "" : `<section class="notice rental-deposit-warning"><strong>Фактическое получение обеспечительного платежа не было подтверждено.</strong><p>Подтвердите полученную сумму перед оформлением возврата и расчётом. Ноль указывается явно.</p><form id="return-deposit-form" class="rental-deposit-form"><div class="field"><label>Фактически получено, ₽</label><input name="deposit_received" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(order.required_deposit_total ?? order.recommended_deposit_total ?? 0)}" required></div><button class="button secondary compact" type="submit">Сохранить залог</button></form></section>`}
     <div class="section-heading"><h2>Предметы аренды · ${order.items.length}</h2><span class="muted small">Ожидают: ${activeItems.length}</span></div>
     <div>${itemCards}</div>
     ${state.rental.returnPreview ? renderReturnDepositPreview(state.rental.returnPreview) : ""}
     ${order.status === "closed" ? `<section class="checkout-summary return-deposit-preview"><div class="section-heading"><h2>Финальный расчёт</h2><span class="chip good">Завершён</span></div><span>Обеспечительный платёж <strong>${formatMoney(requiredDepositTotal)}</strong></span><span>Фактически получено <strong>${formatMoney(depositReceived)}</strong></span><span>Просрочка <strong>${formatMoney(Number(order.overdue_charge_total || 0))}</strong></span><span>Повреждения / компенсация <strong>${formatMoney(Number(order.damage_charge_total || 0))}</strong></span><span>Удержано из залога <strong>${formatMoney(Number(order.deposit_applied_total || 0))}</strong></span><span>К возврату <strong>${formatMoney(Number(order.deposit_to_refund || 0))}</strong></span><span>Доплатить <strong>${formatMoney(Number(order.remaining_amount_due || 0))}</strong></span></section>` : ""}
     ${activeItems.length ? `<section class="checkout-summary">
-      <button class="button secondary" id="complete-selected-items">Подтвердить выбранные</button>
-      <button class="button" id="complete-all-items">Оформить возврат всех</button>
+      <button class="button secondary" id="complete-selected-items" ${depositReceivedConfirmed ? "" : "disabled"}>Подтвердить выбранные</button>
+      <button class="button" id="complete-all-items" ${depositReceivedConfirmed ? "" : "disabled"}>Оформить возврат всех</button>
     </section>` : ""}
     ${state.rental.agreement ? `<section class="card"><span class="muted small">Договор</span><strong>№ ${escapeHtml(state.rental.agreement.agreement_number)}</strong><button class="button ghost compact" data-open-return-agreement>Открыть PDF</button></section>` : ""}
   </div>`;
@@ -5070,15 +5630,59 @@ function renderRentalReturnOrder() {
   document.querySelectorAll("[data-return-select]").forEach((checkbox) => {
     checkbox.addEventListener("change", updateReturnSelection);
   });
-  document.querySelectorAll("[data-return-condition], [data-return-damage-charge], [data-return-note]").forEach((input) => input.addEventListener("change", refreshRentalReturnPreview));
+  document.querySelectorAll("[data-return-condition], [data-return-damage-charge], [data-return-note], [data-return-seal-result], [data-return-seal-note]").forEach((input) => input.addEventListener("change", refreshRentalReturnPreview));
+  document.querySelectorAll("[data-return-seals-ok]").forEach((button) => button.addEventListener("click", markAllReturnSealsOk));
   document.querySelectorAll("[data-return-open-asset]").forEach((button) => {
     button.addEventListener("click", () => openOperationsAsset(button.dataset.returnOpenAsset));
   });
   document.querySelector("#return-open-customer").addEventListener("click", () => selectRentalCustomer(order.customer_id));
+  document.querySelector("#return-deposit-form")?.addEventListener("submit", saveRentalReturnDeposit);
   document.querySelector("#complete-selected-items")?.addEventListener("click", () => completeRentalItems(false));
   document.querySelector("#complete-all-items")?.addEventListener("click", () => completeRentalItems(true));
   document.querySelector("[data-open-return-agreement]")?.addEventListener("click", () => openAuthenticatedFile(`/rental/agreements/${state.rental.agreement.id}/pdf`));
   updateReturnSelection();
+}
+
+function defaultSealVerifications(item) {
+  return (item?.asset_identification_snapshot?.seals || []).map((seal) => ({
+    location: seal.location,
+    seal_number: seal.seal_number,
+    result: "ok",
+    note: null,
+  }));
+}
+
+function renderReturnIdentification(item, preview) {
+  const identification = item.asset_identification_snapshot || {};
+  const seals = identification.seals || [];
+  if (!identification.serial_number && !seals.length) return "";
+  const verificationByNumber = new Map((preview?.seal_verifications || []).map((verification) => [verification.expected_seal_number, verification]));
+  const sealRows = seals.map((seal) => {
+    const verification = verificationByNumber.get(seal.seal_number) || { result: "ok", note: null };
+    return `<div class="return-seal-row ${verification.result === "ok" ? "" : "seal-problem"}">
+      <div><strong>${escapeHtml(seal.location)} — ${escapeHtml(seal.seal_number)}</strong><small class="muted">Ожидаемая пломба из снимка выдачи</small></div>
+      <div class="field"><label>Проверка</label><select data-return-seal-result="${item.id}" data-seal-location="${escapeHtml(seal.location)}" data-seal-number="${escapeHtml(seal.seal_number)}">
+        <option value="ok" ${verification.result === "ok" ? "selected" : ""}>OK</option>
+        <option value="broken" ${verification.result === "broken" ? "selected" : ""}>BROKEN</option>
+        <option value="missing" ${verification.result === "missing" ? "selected" : ""}>MISSING</option>
+        <option value="mismatch" ${verification.result === "mismatch" ? "selected" : ""}>MISMATCH</option>
+      </select></div>
+      <div class="field"><label>Комментарий при проблеме</label><input data-return-seal-note="${item.id}" data-seal-number="${escapeHtml(seal.seal_number)}" value="${escapeHtml(verification.note || "")}" placeholder="Что обнаружено"></div>
+    </div>`;
+  }).join("");
+  return `<section class="return-identification">
+    <div class="section-heading"><strong>Идентификация при выдаче</strong>${seals.length ? `<button class="button ghost compact" type="button" data-return-seals-ok="${item.id}">Все соответствуют</button>` : ""}</div>
+    ${identification.serial_number ? `<p>Ожидаемый серийный номер: <strong>${escapeHtml(identification.serial_number)}</strong></p>` : ""}
+    ${(preview?.seal_verifications || []).some((verification) => verification.result !== "ok") ? '<p class="seal-warning"><strong>Есть расхождение по пломбам — проверьте комментарий перед возвратом.</strong></p>' : ""}
+    ${sealRows}
+  </section>`;
+}
+
+function markAllReturnSealsOk(event) {
+  const itemId = event.currentTarget.dataset.returnSealsOk;
+  document.querySelectorAll(`[data-return-seal-result="${itemId}"]`).forEach((select) => { select.value = "ok"; });
+  document.querySelectorAll(`[data-return-seal-note="${itemId}"]`).forEach((input) => { input.value = ""; });
+  refreshRentalReturnPreview();
 }
 
 function renderReturnItemCalculation(preview) {
@@ -5098,6 +5702,13 @@ function renderReturnItemCalculation(preview) {
 }
 
 function renderReturnDepositPreview(preview) {
+  if (!preview.deposit_received_confirmed) {
+    return `<section class="checkout-summary return-deposit-preview rental-deposit-warning">
+      <div class="section-heading"><h2>Обеспечительный платёж</h2><span class="chip warn">Не подтверждён</span></div>
+      <span>Обеспечительный платёж заказа <strong>${formatMoney(Number(preview.required_deposit_total))}</strong></span>
+      <p>Фактическое получение обеспечительного платежа не было подтверждено. Финальный расчёт нельзя завершить до подтверждения.</p>
+    </section>`;
+  }
   return `<section class="checkout-summary return-deposit-preview">
     <div class="section-heading"><h2>Обеспечительный платёж</h2><span class="chip ${preview.is_partial ? "warn" : "good"}">${preview.is_partial ? "Предварительный расчёт" : "Финальный расчёт"}</span></div>
     <span>Обеспечительный платёж заказа <strong>${formatMoney(Number(preview.required_deposit_total))}</strong></span>
@@ -5108,6 +5719,19 @@ function renderReturnDepositPreview(preview) {
   </section>`;
 }
 
+async function saveRentalReturnDeposit(event) {
+  event.preventDefault();
+  const amount = String(new FormData(event.currentTarget).get("deposit_received"));
+  try {
+    state.rental.order = await api(`/rental/orders/${state.rental.order.id}/deposit`, {
+      method: "PATCH",
+      body: JSON.stringify({ deposit_received: amount }),
+    });
+    await openRentalReturnOrder(state.rental.order.id);
+    showToast("Фактически полученный залог сохранён");
+  } catch (error) { showToast(error.message, true); }
+}
+
 function renderCompletedRentalItem(item) {
   const condition = {
     good: "Без замечаний",
@@ -5115,12 +5739,14 @@ function renderCompletedRentalItem(item) {
     incomplete: "Неполный комплект",
     lost: "Утрачено",
   }[item.return_condition] || itemStatusLabel(item.status);
+  const verificationRows = (item.seal_verification_snapshot || []).map((verification) => `<span class="${verification.result === "ok" ? "" : "seal-warning"}">${escapeHtml(verification.location)} — ${escapeHtml(verification.expected_seal_number)} <strong>${escapeHtml(String(verification.result).toUpperCase())}</strong>${verification.note ? ` · ${escapeHtml(verification.note)}` : ""}</span>`).join("");
   return `<div class="return-history-breakdown">
     <div class="chips"><span class="chip ${item.status === "lost" ? "warn" : "good"}">${escapeHtml(condition)}</span><span class="chip">${item.returned_at ? formatDate(item.returned_at) : "—"}</span></div>
     <span>Базовая аренда <strong>${formatMoney(Number(item.agreed_price) - Number(item.discount))}</strong></span>
     <span>Просрочка <strong>${formatMoney(Number(item.overdue_charge || 0))}</strong></span>
     <span>Повреждение / компенсация <strong>${formatMoney(Number(item.damage_charge || 0))}</strong></span>
     <span>Удержано из залога <strong>${formatMoney(Number(item.deposit_applied || 0))}</strong></span>
+    ${verificationRows ? `<div class="return-verification-history"><strong>Проверка пломб при возврате</strong>${verificationRows}</div>` : ""}
     ${item.return_note ? `<p>${escapeHtml(item.return_note)}</p>` : ""}
   </div>`;
 }
@@ -5138,11 +5764,19 @@ function updateReturnSelection(event = null) {
 }
 
 function buildReturnCompletion(itemId) {
+  const sealNotes = [...document.querySelectorAll(`[data-return-seal-note="${itemId}"]`)];
+  const sealVerifications = [...document.querySelectorAll(`[data-return-seal-result="${itemId}"]`)].map((select, index) => ({
+    location: select.dataset.sealLocation,
+    seal_number: select.dataset.sealNumber,
+    result: select.value,
+    note: nullableText(sealNotes[index]?.value),
+  }));
   return {
     item_id: itemId,
     condition: document.querySelector(`[data-return-condition="${itemId}"]`).value,
     damage_charge: document.querySelector(`[data-return-damage-charge="${itemId}"]`).value,
     notes: nullableText(document.querySelector(`[data-return-note="${itemId}"]`).value),
+    seal_verifications: sealVerifications,
   };
 }
 
