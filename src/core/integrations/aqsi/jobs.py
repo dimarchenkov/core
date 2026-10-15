@@ -83,6 +83,7 @@ def synchronize_aqsi_catalog(
             )
             session.add(run)
             session.commit()
+            run_id = run.id
         except (
             AmbiguousIntegrationError,
             AqsiIntegrationDisabledError,
@@ -104,6 +105,10 @@ def synchronize_aqsi_catalog(
                     gateway=gateway,
                 )
         except AqsiApiError as exc:
+            session.rollback()
+            run = session.get(AqsiCatalogReconciliationRun, run_id)
+            if run is None:
+                raise RuntimeError("AQSI reconciliation run disappeared") from exc
             run.status = "failed"
             run.error_code = exc.code[:128]
             run.error_message = str(exc)[:1000]
@@ -122,7 +127,11 @@ def synchronize_aqsi_catalog(
                 "queued": 0,
                 "error_code": exc.code,
             }
-        except Exception:
+        except Exception as exc:
+            session.rollback()
+            run = session.get(AqsiCatalogReconciliationRun, run_id)
+            if run is None:
+                raise RuntimeError("AQSI reconciliation run disappeared") from exc
             run.status = "failed"
             run.error_code = "internal_error"
             run.error_message = "Core could not complete AQSI catalog reconciliation."

@@ -19,6 +19,7 @@ def test_worker_starts_with_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
     session_context.__exit__ = Mock(return_value=None)
     validate_credentials = Mock()
     ensure_sync_schedule = Mock()
+    dispose_engine = Mock()
 
     monkeypatch.setattr(worker_module.Redis, "from_url", Mock(return_value=redis_connection))
     monkeypatch.setattr(worker_module, "build_worker", Mock(return_value=worker))
@@ -38,10 +39,12 @@ def test_worker_starts_with_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
         "ensure_aqsi_catalog_sync_schedule",
         ensure_sync_schedule,
     )
+    monkeypatch.setattr(worker_module.engine, "dispose", dispose_engine)
 
     worker_module.main()
 
     validate_credentials.assert_called_once_with(database_session, "resolved-master-key")
+    dispose_engine.assert_called_once_with()
     ensure_sync_schedule.assert_called_once_with(redis_connection)
     worker.work.assert_called_once_with(with_scheduler=True)
 
