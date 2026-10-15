@@ -2300,7 +2300,6 @@ function renderResult() {
         <span class="chip good">Готово к продаже: ${readyCount}</span>
         ${pending ? `<span class="chip warn">Требует внимания: ${pending}</span>` : ""}
       </div>
-      <p>Удержано из залога: <strong>${formatMoney(Number(order.deposit_applied_total || 0))}</strong><br>К возврату: <strong>${formatMoney(Number(order.deposit_to_refund || 0))}</strong>${Number(order.remaining_amount_due || 0) ? `<br>Доплатить: <strong>${formatMoney(Number(order.remaining_amount_due))}</strong>` : ""}</p>
       ${attention ? `<div class="attention-list"><h3>Что нужно сделать дальше</h3>${attention}</div>` : ""}
       <div class="attention-list"><h3>AQSI</h3>${aqsiRows}<button class="button full" id="publish-intake-aqsi">Отправить готовые товары в AQSI</button><button class="button ghost full" id="refresh-intake-aqsi">Обновить статусы</button></div>
       <button class="button full" id="finish-home" style="margin-top:20px">Готово</button>

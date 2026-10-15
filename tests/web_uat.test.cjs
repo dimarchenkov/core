@@ -167,6 +167,16 @@ test('Stale Intake screen detects completed server state before saving item form
   assert.equal(vm.runInContext('state.session.status', s.context), 'completed');
 });
 
+test('Intake completion result does not depend on Rental order state', () => {
+  const resultRenderer = source.slice(
+    source.indexOf('function renderResult()'),
+    source.indexOf('async function loadIntakeAqsi()'),
+  );
+  assert.match(resultRenderer, /state\.result\.receipt\.number/);
+  assert.doesNotMatch(resultRenderer, /\border\./);
+  assert.doesNotMatch(resultRenderer, /deposit_applied_total|deposit_to_refund|remaining_amount_due/);
+});
+
 test('Contextual Media targets, camera/gallery, fallback and own photo', () => {
   const s = setup();
   vm.runInContext('state.operations.imageLinks = [{id:"p-link", entity_type:"catalog_product", entity_id:"p", image_id:"photo-p", role:"primary"}];', s.context);
