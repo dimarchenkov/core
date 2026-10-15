@@ -45,6 +45,7 @@ from core.rental.lifecycle_routes import get_lifecycle_image_service
 from core.rental.mapper import rental_order_from_record, rental_order_to_record
 from core.rental.models import (
     RentalAssetRecord,
+    RentalAssetSealRecord,
     RentalConditionPhotoRecord,
     RentalDamageRecord,
     RentalMaintenanceRecord,
@@ -92,6 +93,7 @@ def session() -> Generator[Session]:
             Publication.__table__,
             StockMovement.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetSealRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
             RentalMaintenanceRecord.__table__,
@@ -486,6 +488,55 @@ def test_api_supports_authenticated_rental_order_workflow(
     assert client.get(f"/rental/orders/{order_id}", headers=headers).status_code == 200
 
 
+def test_api_preserves_unconfirmed_deposit_and_confirms_exact_operator_amount(
+    client: TestClient,
+    session: Session,
+    customer: Customer,
+) -> None:
+    """The dedicated command distinguishes NULL, custom money, and explicit zero."""
+    user = IdentityService(session).create_admin(
+        "deposit-operator@example.com",
+        "Deposit Operator",
+        "long enough password",
+    )
+    login = client.post(
+        "/api/auth/login",
+        data={"username": user.email, "password": "long enough password"},
+    )
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    created = client.post(
+        "/rental/orders",
+        headers=headers,
+        json={
+            "customer_id": str(customer.id),
+            "planned_start_at": NOW.isoformat(),
+            "planned_return_at": (NOW + timedelta(days=2)).isoformat(),
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["deposit_received"] is None
+    assert created.json()["deposit_received_confirmed"] is False
+    order_id = created.json()["id"]
+
+    for amount in ("4000", "2000", "0"):
+        confirmed = client.patch(
+            f"/rental/orders/{order_id}/deposit",
+            headers=headers,
+            json={"deposit_received": amount},
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["deposit_received"] == f"{Decimal(amount):.2f}"
+        assert confirmed.json()["deposit_received_confirmed"] is True
+
+    ambiguous_float = client.patch(
+        f"/rental/orders/{order_id}/deposit",
+        headers=headers,
+        json={"deposit_received": 1.5},
+    )
+    assert ambiguous_float.status_code == 422
+
+
 def test_api_searches_rental_assets_for_checkout(
     client: TestClient,
     session: Session,
@@ -510,6 +561,7 @@ def test_api_searches_rental_assets_for_checkout(
         {
             "id": str(asset.id),
             "asset_number": "RENT-000001",
+                "serial_number": None,
             "variant_id": str(asset.variant_id),
             "product_title": "Инструменты",
             "variant_title": "Шуруповерт Bosch",

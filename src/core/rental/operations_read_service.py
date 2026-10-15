@@ -7,7 +7,9 @@ from decimal import Decimal
 from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import Session
 
+from core.catalog.collection_service import CollectionNotFoundError, CollectionService
 from core.catalog.models import CatalogProduct, CatalogVariant, Category
+from core.catalog.ordering import variant_ordering_expressions
 from core.integrations.aqsi.enums import PublicationChannel, PublicationStatus
 from core.integrations.aqsi.models import Publication
 from core.inventory.service import InventoryService
@@ -46,6 +48,10 @@ class OperationsProductNotFoundError(Exception):
     """Raised when an operational product card does not exist."""
 
 
+class OperationsCollectionNotFoundError(Exception):
+    """Raised when a Catalog filter references a missing or disabled Collection."""
+
+
 class RentalOperationsReadService:
     """Read-only projections joining Catalog and Rental for daily operations."""
 
@@ -60,12 +66,21 @@ class RentalOperationsReadService:
         mode: CatalogMode = CatalogMode.SALE,
         catalog_status: CatalogStatus = CatalogStatus.ACTIVE,
         category_id: UUIDv7 | None = None,
+        collection_id: UUIDv7 | None = None,
         supplier_id: UUIDv7 | None = None,
         attention_filters: frozenset[CatalogAttentionFilter] = frozenset(),
         product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
         sort: CatalogOperationsSort | None = None,
     ) -> list[CatalogProductOperationsRead]:
         """Return shared Catalog products using server-side workspace filters."""
+        collection_variant_ids: set[UUIDv7] | None = None
+        if collection_id is not None:
+            try:
+                collection_variant_ids = CollectionService(
+                    self._session
+                ).get_active_collection_variant_ids(collection_id)
+            except CollectionNotFoundError as exc:
+                raise OperationsCollectionNotFoundError from exc
         statement = select(CatalogProduct)
         if catalog_status is CatalogStatus.ACTIVE:
             statement = statement.where(CatalogProduct.deleted_at.is_(None))
@@ -80,6 +95,14 @@ class RentalOperationsReadService:
             category_ids = self._category_with_descendants(category_id)
             statement = statement.where(
                 CatalogProduct.category_id.in_(category_ids) if category_ids else false()
+            )
+        if collection_variant_ids is not None:
+            statement = statement.where(
+                CatalogProduct.variants.any(
+                    CatalogVariant.id.in_(collection_variant_ids)
+                    if collection_variant_ids
+                    else false()
+                )
             )
         if supplier_id is not None:
             supplier_product_ids = self._posted_supplier_product_ids(supplier_id)
@@ -126,6 +149,10 @@ class RentalOperationsReadService:
             variant
             for variant in all_variants
             if variant.is_active
+            and (
+                collection_variant_ids is None
+                or variant.id in collection_variant_ids
+            )
             and self._variant_matches_status(
                 variant,
                 product=products_by_id[variant.product_id],
@@ -233,6 +260,8 @@ class RentalOperationsReadService:
             rows = [row for row in rows if row.is_active and row.variant_count > 0]
         if mode is CatalogMode.RENTAL:
             rows = [row for row in rows if row.rental_asset_count > 0]
+        if collection_variant_ids is not None:
+            rows = [row for row in rows if row.variant_count > 0]
         if CatalogAttentionFilter.MISSING_PRICE in attention_filters:
             rows = [
                 row
@@ -506,6 +535,7 @@ class RentalOperationsReadService:
             id=variant.id,
             title=meaningful_variant_name(variant.title) or None,
             sku=variant.sku,
+            sort_order=variant.sort_order,
             is_archived=variant.deleted_at is not None,
             current_retail_price=retail_price.amount if retail_price is not None else None,
             retail_currency=retail_price.currency if retail_price is not None else None,
@@ -636,6 +666,7 @@ class RentalOperationsReadService:
                     barcode=variant.barcode,
                     barcode_source=variant.barcode_source,
                     attributes=variant.attributes,
+                    sort_order=variant.sort_order,
                     is_active=variant.is_active,
                     is_archived=variant.deleted_at is not None,
                     physical_quantity=balances[variant.id],
@@ -785,7 +816,7 @@ class RentalOperationsReadService:
             self._session.scalars(
                 select(CatalogVariant)
                 .where(CatalogVariant.product_id.in_(product_ids))
-                .order_by(CatalogVariant.title, CatalogVariant.sku)
+                .order_by(CatalogVariant.product_id, *variant_ordering_expressions())
             ).all()
         )
 

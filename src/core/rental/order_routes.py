@@ -15,6 +15,7 @@ from core.rental.order import RentalOrder
 from core.rental.order_enums import RentalOrderStatus
 from core.rental.order_exceptions import ExpiredRentalSlotError, RentalOrderDomainError
 from core.rental.order_schemas import (
+    RentalDepositReceivedUpdate,
     RentalIssuePreview,
     RentalItemsReturn,
     RentalOrderCreate,
@@ -98,6 +99,23 @@ def update_rental_order(
 ) -> RentalOrder:
     """Change mutable details of a draft order."""
     return _execute(lambda: service.update_draft(order_id, data, actor_id=current_user.id))
+
+
+@router.patch("/{order_id}/deposit", response_model=RentalOrderRead)
+def confirm_rental_order_deposit(
+    order_id: UUIDv7,
+    data: RentalDepositReceivedUpdate,
+    service: Annotated[RentalOrderService, Depends(get_rental_order_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalOrder:
+    """Confirm the exact deposit amount physically received from the customer."""
+    return _execute(
+        lambda: service.confirm_deposit_received(
+            order_id,
+            data,
+            actor_id=current_user.id,
+        )
+    )
 
 
 @router.post("/{order_id}/tariff-items", response_model=RentalOrderRead)

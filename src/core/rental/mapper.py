@@ -16,6 +16,7 @@ def rental_asset_to_record(
     return RentalAssetRecord(
         id=asset.id,
         asset_number=asset.asset_number,
+        serial_number=asset.serial_number,
         variant_id=asset.variant_id,
         intake_item_id=asset.intake_item_id,
         purpose=asset.purpose,
@@ -42,6 +43,7 @@ def rental_asset_from_record(record: RentalAssetRecord) -> RentalAsset:
         record.created_at,
         record.updated_at,
         record.retirement_reason,
+        record.serial_number,
     )
 
 
@@ -51,6 +53,7 @@ def update_rental_asset_record(record: RentalAssetRecord, asset: RentalAsset) ->
     record.condition = asset.condition
     record.availability = asset.availability
     record.retirement_reason = asset.retirement_reason
+    record.serial_number = asset.serial_number
     record.updated_at = asset.updated_at
 
 
@@ -135,6 +138,7 @@ def update_rental_order_record(
         item_record.rental_tariff_version = domain_item.rental_tariff_version
         item_record.timing_source = domain_item.timing_source
         item_record.tariff_snapshot = domain_item.tariff_snapshot
+        item_record.asset_identification_snapshot = domain_item.asset_identification_snapshot
         item_record.planned_rental_date = domain_item.planned_rental_date
         item_record.planned_start_at = domain_item.planned_start_at
         item_record.issued_at = domain_item.issued_at
@@ -151,6 +155,7 @@ def update_rental_order_record(
         item_record.damage_charge = domain_item.damage_charge
         item_record.deposit_applied = domain_item.deposit_applied
         item_record.return_calculation_snapshot = domain_item.return_calculation_snapshot
+        item_record.seal_verification_snapshot = domain_item.seal_verification_snapshot
         item_record.updated_by_id = actor_id
 
 
@@ -173,6 +178,7 @@ def _rental_order_item_to_record(
         rental_tariff_version=item.rental_tariff_version,
         timing_source=item.timing_source,
         tariff_snapshot=item.tariff_snapshot,
+        asset_identification_snapshot=item.asset_identification_snapshot,
         planned_rental_date=item.planned_rental_date,
         planned_start_at=item.planned_start_at,
         issued_at=item.issued_at,
@@ -188,6 +194,7 @@ def _rental_order_item_to_record(
         damage_charge=item.damage_charge,
         deposit_applied=item.deposit_applied,
         return_calculation_snapshot=item.return_calculation_snapshot,
+        seal_verification_snapshot=item.seal_verification_snapshot,
         status=item.status,
         created_by_id=actor_id,
     )
@@ -206,6 +213,7 @@ def _rental_order_item_from_record(record: RentalOrderItemRecord) -> RentalOrder
         rental_tariff_version=record.rental_tariff_version,
         timing_source=record.timing_source,
         tariff_snapshot=record.tariff_snapshot,
+        asset_identification_snapshot=record.asset_identification_snapshot,
         planned_rental_date=record.planned_rental_date,
         planned_start_at=record.planned_start_at,
         issued_at=record.issued_at,
@@ -221,5 +229,6 @@ def _rental_order_item_from_record(record: RentalOrderItemRecord) -> RentalOrder
         damage_charge=record.damage_charge,
         deposit_applied=record.deposit_applied,
         return_calculation_snapshot=record.return_calculation_snapshot,
+        seal_verification_snapshot=record.seal_verification_snapshot,
         status=record.status,
     )

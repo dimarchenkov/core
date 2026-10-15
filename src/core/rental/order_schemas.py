@@ -4,10 +4,19 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel as PydanticBaseModel
-from pydantic import ConfigDict, Field, computed_field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
+from pydantic import (
+    BaseModel as PydanticBaseModel,
+)
 
-from core.rental.enums import AssetCondition
+from core.rental.enums import AssetCondition, RentalSealVerificationResult
 from core.rental.order_enums import (
     RentalOrderItemStatus,
     RentalOrderStatus,
@@ -27,7 +36,11 @@ class RentalOrderCreate(PydanticBaseModel):
     customer_id: UUIDv7
     planned_start_at: datetime | None = None
     planned_return_at: datetime | None = None
-    deposit_amount: Decimal = Field(default=Decimal("0"), ge=0)
+    deposit_received: Decimal | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("deposit_received", "deposit_amount"),
+    )
     note: str | None = None
 
     @model_validator(mode="after")
@@ -45,8 +58,28 @@ class RentalOrderUpdate(PydanticBaseModel):
 
     planned_start_at: datetime | None = None
     planned_return_at: datetime | None = None
-    deposit_amount: Decimal | None = None
+    deposit_received: Decimal | None = Field(
+        default=None,
+        ge=0,
+        validation_alias=AliasChoices("deposit_received", "deposit_amount"),
+    )
     note: str | None = None
+
+
+class RentalDepositReceivedUpdate(PydanticBaseModel):
+    """Explicit confirmation of the actual deposit physically received."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deposit_received: Decimal = Field(max_digits=12, ge=0)
+
+    @field_validator("deposit_received", mode="before")
+    @classmethod
+    def reject_binary_float(cls, value: object) -> object:
+        """Require confirmed money without binary-float ambiguity."""
+        if isinstance(value, float):
+            raise ValueError("Money must be sent as a decimal string or integer.")
+        return value
 
 
 class RentalOrderItemCreate(PydanticBaseModel):
@@ -191,6 +224,29 @@ class RentalOrderItemsComplete(PydanticBaseModel):
         return self
 
 
+class RentalSealVerificationDraft(PydanticBaseModel):
+    """Operator verification of one seal expected from the issue snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    location: str = Field(min_length=1, max_length=160)
+    seal_number: str = Field(min_length=1, max_length=120)
+    result: RentalSealVerificationResult
+    note: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_problem_note(self) -> RentalSealVerificationDraft:
+        """Require an explanation for broken, missing, or mismatched seals."""
+        self.location = self.location.strip()
+        self.seal_number = self.seal_number.strip()
+        self.note = self.note.strip() if self.note else None
+        if not self.location or not self.seal_number:
+            raise ValueError("location and seal_number are required")
+        if self.result is not RentalSealVerificationResult.OK and not self.note:
+            raise ValueError("note is required for a seal problem")
+        return self
+
+
 class RentalItemReturnDraft(PydanticBaseModel):
     """Operator-entered inspection facts; timing and overdue money remain server-owned."""
 
@@ -200,6 +256,7 @@ class RentalItemReturnDraft(PydanticBaseModel):
     condition: RentalReturnCondition
     damage_charge: Decimal = Field(default=Decimal("0"), max_digits=12, ge=0)
     notes: str | None = Field(default=None, max_length=4000)
+    seal_verifications: list[RentalSealVerificationDraft] = Field(default_factory=list)
 
     @field_validator("damage_charge", mode="before")
     @classmethod
@@ -257,6 +314,8 @@ class RentalReturnPreviewItem(PydanticBaseModel):
     damage_charge: Decimal
     total_charge: Decimal
     deposit_applied: Decimal
+    asset_identification_snapshot: dict[str, object] | None
+    seal_verifications: list[dict[str, object]]
 
 
 class RentalReturnPreview(PydanticBaseModel):
@@ -267,10 +326,11 @@ class RentalReturnPreview(PydanticBaseModel):
     is_partial: bool
     settlement_final_after_return: bool
     required_deposit_total: Decimal
-    deposit_received: Decimal
+    deposit_received: Decimal | None
+    deposit_received_confirmed: bool
     deposit_applied_before: Decimal
     deposit_applied_by_return: Decimal
-    provisional_deposit_remaining: Decimal
+    provisional_deposit_remaining: Decimal | None
     deposit_to_refund: Decimal | None
     remaining_amount_due: Decimal | None
     items: list[RentalReturnPreviewItem]
@@ -291,6 +351,7 @@ class RentalOrderItemRead(PydanticBaseModel):
     rental_tariff_version: int | None
     timing_source: RentalTimingSource | None
     tariff_snapshot: dict[str, str | int | bool | None] | None
+    asset_identification_snapshot: dict[str, object] | None
     planned_rental_date: date | None
     planned_start_at: datetime | None
     issued_at: datetime | None
@@ -306,6 +367,7 @@ class RentalOrderItemRead(PydanticBaseModel):
     damage_charge: Decimal | None
     deposit_applied: Decimal | None
     return_calculation_snapshot: dict[str, str | int | bool | None] | None
+    seal_verification_snapshot: list[dict[str, object]] | None
     status: RentalOrderItemStatus
 
     @computed_field
@@ -350,7 +412,9 @@ class RentalOrderRead(PydanticBaseModel):
     planned_return_at: datetime
     issued_at: datetime | None
     closed_at: datetime | None
-    deposit_amount: Decimal
+    deposit_amount: Decimal | None
+    deposit_received: Decimal | None
+    deposit_received_confirmed: bool
     rental_total: Decimal
     required_deposit_total: Decimal
     recommended_deposit_total: Decimal

@@ -38,6 +38,7 @@ def _asset_read(
     return RentalAssetRead(
         id=record.id,
         asset_number=record.asset_number,
+        serial_number=record.serial_number,
         variant_id=record.variant_id,
         product_title=product_title,
         variant_title=variant_title,
@@ -79,6 +80,7 @@ def search_rental_assets(
         RentalAssetRead(
             id=record.id,
             asset_number=record.asset_number,
+            serial_number=record.serial_number,
             variant_id=record.variant_id,
             product_title=product_title,
             variant_title=variant_title,

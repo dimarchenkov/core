@@ -11,7 +11,7 @@ from core.identity.models import User
 from core.media.models import Image
 from core.media.service import ImageService
 from core.rental.economics_service import RentalEconomicsService
-from core.rental.enums import AssetPurpose
+from core.rental.enums import AssetPurpose, RentalSealStatus
 from core.rental.lifecycle_schemas import (
     AssetTimelineEvent,
     ConditionPhotoRead,
@@ -22,10 +22,16 @@ from core.rental.lifecycle_schemas import (
     DamageRead,
     MaintenanceCreate,
     MaintenanceRead,
+    RentalAssetIdentificationUpdate,
     RentalAssetPassportRead,
+    RentalAssetSealCreate,
+    RentalAssetSealRead,
+    RentalAssetSealStatusUpdate,
 )
+from core.rental.mapper import rental_asset_from_record, update_rental_asset_record
 from core.rental.models import (
     RentalAssetRecord,
+    RentalAssetSealRecord,
     RentalConditionPhotoRecord,
     RentalDamageRecord,
     RentalMaintenanceRecord,
@@ -33,7 +39,7 @@ from core.rental.models import (
     RentalOrderRecord,
 )
 from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus
-from core.shared.db import UUIDv7
+from core.shared.db import UUIDv7, generate_uuid_v7
 
 
 class RentalLifecycleNotFoundError(Exception):
@@ -42,6 +48,10 @@ class RentalLifecycleNotFoundError(Exception):
 
 class RentalLifecycleReferenceError(Exception):
     """Raised when an order item does not belong to the selected asset."""
+
+
+class RentalSealStateError(Exception):
+    """Raised when a historical seal is asked to perform an invalid transition."""
 
 
 class RentalLifecycleService:
@@ -90,6 +100,16 @@ class RentalLifecycleService:
                 select(RentalConditionPhotoRecord)
                 .where(RentalConditionPhotoRecord.rental_asset_id == asset_id)
                 .order_by(RentalConditionPhotoRecord.created_at)
+            ).all()
+        )
+        seal_records = list(
+            self._session.scalars(
+                select(RentalAssetSealRecord)
+                .where(RentalAssetSealRecord.rental_asset_id == asset_id)
+                .order_by(
+                    RentalAssetSealRecord.installed_at,
+                    RentalAssetSealRecord.created_at,
+                )
             ).all()
         )
         user_ids = {
@@ -157,6 +177,7 @@ class RentalLifecycleService:
         return RentalAssetPassportRead(
             id=asset.id,
             asset_number=asset.asset_number,
+            serial_number=asset.serial_number,
             product_id=product.id,
             product_title=product.title,
             variant_id=variant.id,
@@ -185,8 +206,101 @@ class RentalLifecycleService:
                 )
                 for record in photo_records
             ],
+            seals=[RentalAssetSealRead.model_validate(record) for record in seal_records],
             economics=RentalEconomicsService(self._session).get_asset(asset.id),
         )
+
+    def update_asset_identification(
+        self,
+        asset_id: UUIDv7,
+        data: RentalAssetIdentificationUpdate,
+        *,
+        actor_id: UUIDv7,
+    ) -> RentalAssetPassportRead:
+        """Set or clear the optional serial without affecting rental availability."""
+        record = self._session.get(RentalAssetRecord, asset_id, with_for_update=True)
+        if record is None or record.deleted_at is not None:
+            raise RentalLifecycleNotFoundError
+        asset = rental_asset_from_record(record)
+        asset.set_serial_number(data.serial_number)
+        update_rental_asset_record(record, asset)
+        record.updated_by_id = actor_id
+        self._session.commit()
+        return self.get_asset_passport(asset_id)
+
+    def add_seal(
+        self,
+        asset_id: UUIDv7,
+        data: RentalAssetSealCreate,
+        *,
+        actor_id: UUIDv7,
+    ) -> RentalAssetSealRead:
+        """Install a seal and preserve any active seal it replaces at the same location."""
+        asset = self._session.get(RentalAssetRecord, asset_id, with_for_update=True)
+        if asset is None or asset.deleted_at is not None:
+            raise RentalLifecycleNotFoundError
+        installed_at = data.installed_at or datetime.now(UTC)
+        active_at_location = list(
+            self._session.scalars(
+                select(RentalAssetSealRecord)
+                .where(
+                    RentalAssetSealRecord.rental_asset_id == asset_id,
+                    RentalAssetSealRecord.status == RentalSealStatus.ACTIVE,
+                )
+                .with_for_update()
+            ).all()
+        )
+        normalized_location = data.location.casefold()
+        for existing in active_at_location:
+            if existing.location.casefold() == normalized_location:
+                existing.status = RentalSealStatus.REMOVED
+                existing.removed_at = installed_at
+                existing.updated_by_id = actor_id
+        record = RentalAssetSealRecord(
+            id=generate_uuid_v7(),
+            rental_asset_id=asset_id,
+            location=data.location,
+            seal_number=data.seal_number,
+            status=RentalSealStatus.ACTIVE,
+            installed_at=installed_at,
+            removed_at=None,
+            note=self._optional_text(data.note),
+            created_by_id=actor_id,
+        )
+        self._session.add(record)
+        self._session.commit()
+        self._session.refresh(record)
+        return RentalAssetSealRead.model_validate(record)
+
+    def update_seal_status(
+        self,
+        asset_id: UUIDv7,
+        seal_id: UUIDv7,
+        data: RentalAssetSealStatusUpdate,
+        *,
+        actor_id: UUIDv7,
+    ) -> RentalAssetSealRead:
+        """End one active seal while preserving its number and installation facts."""
+        asset = self._session.get(RentalAssetRecord, asset_id, with_for_update=True)
+        if asset is None or asset.deleted_at is not None:
+            raise RentalLifecycleNotFoundError
+        record = self._session.get(RentalAssetSealRecord, seal_id, with_for_update=True)
+        if record is None or record.rental_asset_id != asset_id:
+            raise RentalLifecycleNotFoundError
+        if record.status is not RentalSealStatus.ACTIVE:
+            raise RentalSealStateError
+        if data.status is RentalSealStatus.ACTIVE:
+            raise RentalSealStateError
+        record.status = data.status
+        record.removed_at = data.removed_at
+        if data.status is RentalSealStatus.REMOVED and record.removed_at is None:
+            record.removed_at = datetime.now(UTC)
+        if data.note is not None:
+            record.note = self._optional_text(data.note)
+        record.updated_by_id = actor_id
+        self._session.commit()
+        self._session.refresh(record)
+        return RentalAssetSealRead.model_validate(record)
 
     def add_maintenance(
         self,

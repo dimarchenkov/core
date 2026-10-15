@@ -9,7 +9,12 @@ from pydantic import ConfigDict, Field, field_validator
 
 from core.customers.enums import CustomerStatus
 from core.rental.economics_schemas import RentalAssetEconomicsRead
-from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
+from core.rental.enums import (
+    AssetCondition,
+    AssetPurpose,
+    RentalAvailability,
+    RentalSealStatus,
+)
 from core.rental.order_enums import RentalOrderStatus
 from core.shared.db import UUIDv7
 
@@ -37,6 +42,66 @@ class ConditionPhotoStage(StrEnum):
 
     BEFORE = "before"
     AFTER = "after"
+
+
+class RentalAssetIdentificationUpdate(PydanticBaseModel):
+    """Payload for setting or clearing an optional manufacturer serial number."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    serial_number: str | None = Field(default=None, max_length=120)
+
+    @field_validator("serial_number")
+    @classmethod
+    def normalize_serial(cls, value: str | None) -> str | None:
+        """Normalize blank serial values to the valid absent state."""
+        normalized = (value or "").strip()
+        return normalized or None
+
+
+class RentalAssetSealCreate(PydanticBaseModel):
+    """Payload for installing a new immutable seal identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    location: str = Field(min_length=1, max_length=160)
+    seal_number: str = Field(min_length=1, max_length=120)
+    installed_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("location", "seal_number")
+    @classmethod
+    def normalize_required_text(cls, value: str) -> str:
+        """Reject whitespace-only seal location or number."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Seal location and number are required.")
+        return normalized
+
+
+class RentalAssetSealStatusUpdate(PydanticBaseModel):
+    """Payload for ending an active seal without rewriting its identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: RentalSealStatus
+    removed_at: datetime | None = None
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class RentalAssetSealRead(PydanticBaseModel):
+    """One current or historical seal displayed in the asset passport."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: UUIDv7
+    rental_asset_id: UUIDv7
+    location: str
+    seal_number: str
+    status: RentalSealStatus
+    installed_at: datetime
+    removed_at: datetime | None
+    note: str | None
 
 
 class MaintenanceCreate(PydanticBaseModel):
@@ -147,6 +212,7 @@ class RentalAssetPassportRead(PydanticBaseModel):
 
     id: UUIDv7
     asset_number: str
+    serial_number: str | None
     product_id: UUIDv7
     product_title: str
     variant_id: UUIDv7
@@ -165,6 +231,7 @@ class RentalAssetPassportRead(PydanticBaseModel):
     maintenance: list[MaintenanceRead]
     damages: list[DamageRead]
     condition_photos: list[ConditionPhotoRead]
+    seals: list[RentalAssetSealRead]
     economics: RentalAssetEconomicsRead
 
 

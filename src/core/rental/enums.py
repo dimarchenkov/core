@@ -25,3 +25,20 @@ class RentalAvailability(StrEnum):
     AVAILABLE = "available"
     RENTED = "rented"
     MAINTENANCE = "maintenance"
+
+
+class RentalSealStatus(StrEnum):
+    """Lifecycle status of one historically preserved physical seal."""
+
+    ACTIVE = "active"
+    REMOVED = "removed"
+    BROKEN = "broken"
+
+
+class RentalSealVerificationResult(StrEnum):
+    """Operator observation for one seal expected from the issue snapshot."""
+
+    OK = "ok"
+    BROKEN = "broken"
+    MISSING = "missing"
+    MISMATCH = "mismatch"

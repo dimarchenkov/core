@@ -20,12 +20,17 @@ from core.rental.lifecycle_schemas import (
     DamageRead,
     MaintenanceCreate,
     MaintenanceRead,
+    RentalAssetIdentificationUpdate,
     RentalAssetPassportRead,
+    RentalAssetSealCreate,
+    RentalAssetSealRead,
+    RentalAssetSealStatusUpdate,
 )
 from core.rental.lifecycle_service import (
     RentalLifecycleNotFoundError,
     RentalLifecycleReferenceError,
     RentalLifecycleService,
+    RentalSealStateError,
 )
 from core.shared.db import UUIDv7
 
@@ -60,6 +65,59 @@ def get_asset_passport(
         return service.get_asset_passport(asset_id)
     except RentalLifecycleNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Rental asset not found.") from exc
+
+
+@router.patch("/assets/{asset_id}/identification", response_model=RentalAssetPassportRead)
+def update_asset_identification(
+    asset_id: UUIDv7,
+    data: RentalAssetIdentificationUpdate,
+    service: Annotated[RentalLifecycleService, Depends(get_lifecycle_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalAssetPassportRead:
+    """Set or clear an optional serial number without changing asset availability."""
+    try:
+        return service.update_asset_identification(asset_id, data, actor_id=current_user.id)
+    except RentalLifecycleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental asset not found.") from exc
+
+
+@router.post(
+    "/assets/{asset_id}/seals",
+    response_model=RentalAssetSealRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_asset_seal(
+    asset_id: UUIDv7,
+    data: RentalAssetSealCreate,
+    service: Annotated[RentalLifecycleService, Depends(get_lifecycle_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalAssetSealRead:
+    """Install a new seal while retaining any replaced seal in history."""
+    try:
+        return service.add_seal(asset_id, data, actor_id=current_user.id)
+    except RentalLifecycleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental asset not found.") from exc
+
+
+@router.patch(
+    "/assets/{asset_id}/seals/{seal_id}", response_model=RentalAssetSealRead
+)
+def update_asset_seal_status(
+    asset_id: UUIDv7,
+    seal_id: UUIDv7,
+    data: RentalAssetSealStatusUpdate,
+    service: Annotated[RentalLifecycleService, Depends(get_lifecycle_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalAssetSealRead:
+    """Mark one active seal removed or broken without rewriting its identity."""
+    try:
+        return service.update_seal_status(
+            asset_id, seal_id, data, actor_id=current_user.id
+        )
+    except RentalLifecycleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental seal not found.") from exc
+    except RentalSealStateError as exc:
+        raise HTTPException(status_code=409, detail="Seal is no longer active.") from exc
 
 
 @router.post(

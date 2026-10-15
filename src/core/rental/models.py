@@ -18,7 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
+from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability, RentalSealStatus
 from core.rental.order_enums import (
     RentalOrderItemStatus,
     RentalOrderStatus,
@@ -40,6 +40,7 @@ class RentalAssetRecord(BaseModel):
     __tablename__ = "rental_assets"
 
     asset_number: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
+    serial_number: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     variant_id: Mapped[UUIDv7] = mapped_column(
         ForeignKey("catalog_variants.id", ondelete="RESTRICT"),
         nullable=False,
@@ -68,6 +69,11 @@ class RentalAssetRecord(BaseModel):
     )
     retirement_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     acquisition_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    seals: Mapped[list[RentalAssetSealRecord]] = relationship(
+        "RentalAssetSealRecord",
+        back_populates="rental_asset",
+        order_by="RentalAssetSealRecord.installed_at",
+    )
 
     def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
         """Reject deletion because RentalAsset identity and history are permanent."""
@@ -77,6 +83,38 @@ class RentalAssetRecord(BaseModel):
     def restore(self) -> None:
         """Reject restoration because RentalAsset records cannot be deleted."""
         raise RuntimeError("Rental assets cannot be restored.")
+
+
+class RentalAssetSealRecord(BaseModel):
+    """One append-only seal identity attached to a physical rental asset."""
+
+    __tablename__ = "rental_asset_seals"
+
+    rental_asset_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("rental_assets.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    location: Mapped[str] = mapped_column(String(160), nullable=False)
+    seal_number: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    status: Mapped[RentalSealStatus] = mapped_column(
+        Enum(RentalSealStatus, name="rental_seal_status", values_callable=_enum_values),
+        nullable=False,
+        index=True,
+    )
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rental_asset: Mapped[RentalAssetRecord] = relationship(
+        "RentalAssetRecord", back_populates="seals"
+    )
+
+    def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
+        """Reject deletion because seal identity and replacement history are permanent."""
+        del actor_id
+        raise RuntimeError("Rental asset seals cannot be deleted.")
+
+    def restore(self) -> None:
+        """Reject restoration because seal records cannot be deleted."""
+        raise RuntimeError("Rental asset seals cannot be restored.")
 
 
 class RentalOrderRecord(BaseModel):
@@ -110,7 +148,7 @@ class RentalOrderRecord(BaseModel):
         nullable=True,
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deposit_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    deposit_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     items: Mapped[list[RentalOrderItemRecord]] = relationship(
@@ -183,6 +221,9 @@ class RentalOrderItemRecord(BaseModel):
     tariff_snapshot: Mapped[dict[str, str | int | bool | None] | None] = mapped_column(
         JSON, nullable=True
     )
+    asset_identification_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        JSON, nullable=True
+    )
     planned_rental_date: Mapped[date | None] = mapped_column(Date(), nullable=True)
     planned_start_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -221,6 +262,9 @@ class RentalOrderItemRecord(BaseModel):
     damage_charge: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     deposit_applied: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     return_calculation_snapshot: Mapped[dict[str, str | int | bool | None] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    seal_verification_snapshot: Mapped[list[dict[str, object]] | None] = mapped_column(
         JSON, nullable=True
     )
     status: Mapped[RentalOrderItemStatus] = mapped_column(

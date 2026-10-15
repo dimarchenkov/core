@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.rental.operations_read_service import (
+    OperationsCollectionNotFoundError,
     OperationsProductNotFoundError,
     RentalOperationsReadService,
 )
@@ -46,22 +47,30 @@ def list_operational_products(
     mode: CatalogMode = CatalogMode.SALE,
     catalog_status: Annotated[CatalogStatus, Query(alias="status")] = CatalogStatus.ACTIVE,
     category_id: Annotated[UUIDv7 | None, Query()] = None,
+    collection_id: Annotated[UUIDv7 | None, Query()] = None,
     supplier_id: Annotated[UUIDv7 | None, Query()] = None,
     attention: Annotated[list[CatalogAttentionFilter] | None, Query()] = None,
     product_filter: CatalogOperationsFilter = CatalogOperationsFilter.ALL,
     sort: CatalogOperationsSort | None = None,
 ) -> list[CatalogProductOperationsRead]:
     """List products for the URL-backed operational Catalog workspace."""
-    return service.list_products(
-        query,
-        mode=mode,
-        catalog_status=catalog_status,
-        category_id=category_id,
-        supplier_id=supplier_id,
-        attention_filters=frozenset(attention or []),
-        product_filter=product_filter,
-        sort=sort,
-    )
+    try:
+        return service.list_products(
+            query,
+            mode=mode,
+            catalog_status=catalog_status,
+            category_id=category_id,
+            collection_id=collection_id,
+            supplier_id=supplier_id,
+            attention_filters=frozenset(attention or []),
+            product_filter=product_filter,
+            sort=sort,
+        )
+    except OperationsCollectionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Collection not found.",
+        ) from exc
 
 
 @router.get("/catalog/products/{product_id}", response_model=CatalogProductOperationsDetail)

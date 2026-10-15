@@ -31,7 +31,8 @@ from core.rental.agreement_template import (
     RENTAL_AGREEMENT_TEMPLATE_V1,
     SUPPORTED_AGREEMENT_PLACEHOLDERS,
 )
-from core.rental.models import RentalOrderItemRecord, RentalOrderRecord
+from core.rental.enums import RentalSealStatus
+from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
 from core.rental.order_enums import RentalOrderStatus
 from core.shared.db import UUIDv7
 
@@ -363,10 +364,13 @@ class RentalAgreementService:
             rental_total += price
             deposit_total += deposit
             item_term = self._tariff_terms(item, snapshot, price)
+            identification = self._agreement_identification(item.rental_asset_id)
+            identification_text = self._agreement_identification_text(identification)
             item_lines.append(
                 f"{index}. {item.title_snapshot}; № {item.asset_number_snapshot}; "
                 f"тариф «{tariff_name}»; стоимость {self._money(price)} ₽; "
-                f"обеспечительный платёж {self._money(deposit)} ₽."
+                f"обеспечительный платёж {self._money(deposit)} ₽"
+                f"{identification_text}."
             )
             summaries.append(f"{index}. {tariff_name}: {self._timing_summary(item, snapshot)}")
             terms.append(f"{index}. {item.title_snapshot}: {item_term}")
@@ -378,6 +382,7 @@ class RentalAgreementService:
                     "title": item.title_snapshot,
                     "agreed_price": f"{price:.2f}",
                     "recommended_deposit": f"{deposit:.2f}",
+                    "asset_identification": identification,
                     "tariff_snapshot": snapshot,
                     "rendered_tariff_terms": item_term,
                 }
@@ -398,6 +403,40 @@ class RentalAgreementService:
             "deposit_total": self._money(deposit_total),
         }
         return values, items_snapshot
+
+    def _agreement_identification(self, asset_id: UUIDv7) -> dict[str, Any]:
+        """Capture current optional asset identity inside the immutable agreement artifact."""
+        asset = self._session.get(RentalAssetRecord, asset_id)
+        if asset is None:
+            return {"serial_number": None, "seals": []}
+        active_seals = sorted(
+            (seal for seal in asset.seals if seal.status is RentalSealStatus.ACTIVE),
+            key=lambda seal: (seal.location.casefold(), seal.seal_number.casefold()),
+        )
+        return {
+            "serial_number": asset.serial_number,
+            "seals": [
+                {"location": seal.location, "seal_number": seal.seal_number}
+                for seal in active_seals
+            ],
+        }
+
+    @staticmethod
+    def _agreement_identification_text(identification: dict[str, Any]) -> str:
+        """Render only present serial/seal facts without placeholder dashes."""
+        parts: list[str] = []
+        serial_number = identification.get("serial_number")
+        if serial_number:
+            parts.append(f"серийный номер {serial_number}")
+        seals = identification.get("seals") or []
+        if seals:
+            parts.append(
+                "пломбы: "
+                + ", ".join(
+                    f"{seal['location']} — {seal['seal_number']}" for seal in seals
+                )
+            )
+        return f"; {'; '.join(parts)}" if parts else ""
 
     def _tariff_terms(
         self,

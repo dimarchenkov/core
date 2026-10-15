@@ -16,6 +16,7 @@ class RentalAssetRead(PydanticBaseModel):
 
     id: UUIDv7
     asset_number: str
+    serial_number: str | None
     variant_id: UUIDv7
     product_title: str
     variant_title: str

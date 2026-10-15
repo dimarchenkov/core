@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -48,6 +49,7 @@ class RentalOrderItem:
     _rental_tariff_version: int | None
     _timing_source: RentalTimingSource | None
     _tariff_snapshot: dict[str, str | int | bool | None] | None
+    _asset_identification_snapshot: dict[str, object] | None
     _planned_rental_date: date | None
     _planned_start_at: datetime | None
     _issued_at: datetime | None
@@ -63,6 +65,7 @@ class RentalOrderItem:
     _damage_charge: Decimal | None
     _deposit_applied: Decimal | None
     _return_calculation_snapshot: dict[str, str | int | bool | None] | None
+    _seal_verification_snapshot: list[dict[str, object]] | None
     _status: RentalOrderItemStatus
 
     def __init__(
@@ -78,6 +81,7 @@ class RentalOrderItem:
         rental_tariff_version: int | None = None,
         timing_source: RentalTimingSource | None = None,
         tariff_snapshot: dict[str, str | int | bool | None] | None = None,
+        asset_identification_snapshot: dict[str, object] | None = None,
         planned_rental_date: date | None = None,
         planned_start_at: datetime | None = None,
         issued_at: datetime | None = None,
@@ -93,6 +97,7 @@ class RentalOrderItem:
         damage_charge: Decimal | None = None,
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
+        seal_verification_snapshot: list[dict[str, object]] | None = None,
         status: RentalOrderItemStatus = RentalOrderItemStatus.PREPARED,
     ) -> None:
         """Initialize entity state for aggregate construction or rehydration."""
@@ -106,6 +111,11 @@ class RentalOrderItem:
         self._rental_tariff_version = rental_tariff_version
         self._timing_source = timing_source
         self._tariff_snapshot = dict(tariff_snapshot) if tariff_snapshot is not None else None
+        self._asset_identification_snapshot = (
+            deepcopy(asset_identification_snapshot)
+            if asset_identification_snapshot is not None
+            else None
+        )
         self._planned_rental_date = planned_rental_date
         self._planned_start_at = planned_start_at
         self._issued_at = issued_at
@@ -122,6 +132,11 @@ class RentalOrderItem:
         self._deposit_applied = deposit_applied
         self._return_calculation_snapshot = (
             dict(return_calculation_snapshot) if return_calculation_snapshot is not None else None
+        )
+        self._seal_verification_snapshot = (
+            [dict(value) for value in seal_verification_snapshot]
+            if seal_verification_snapshot is not None
+            else None
         )
         self._status = status
 
@@ -174,6 +189,15 @@ class RentalOrderItem:
     def tariff_snapshot(self) -> dict[str, str | int | bool | None] | None:
         """Return a defensive copy of this item's immutable commercial terms."""
         return dict(self._tariff_snapshot) if self._tariff_snapshot is not None else None
+
+    @property
+    def asset_identification_snapshot(self) -> dict[str, object] | None:
+        """Return identification frozen at physical issue, independent of current asset data."""
+        return (
+            deepcopy(self._asset_identification_snapshot)
+            if self._asset_identification_snapshot is not None
+            else None
+        )
 
     @property
     def planned_start_at(self) -> datetime | None:
@@ -308,16 +332,34 @@ class RentalOrderItem:
         )
 
     @property
+    def seal_verification_snapshot(self) -> list[dict[str, object]] | None:
+        """Return the immutable seal observations recorded during return."""
+        return (
+            [dict(value) for value in self._seal_verification_snapshot]
+            if self._seal_verification_snapshot is not None
+            else None
+        )
+
+    @property
     def status(self) -> RentalOrderItemStatus:
         """Return the current item lifecycle state."""
         return self._status
 
-    def _issue(self, issued_at: datetime) -> None:
+    def _issue(
+        self,
+        issued_at: datetime,
+        asset_identification_snapshot: dict[str, object] | None = None,
+    ) -> None:
         """Transition a prepared item as part of aggregate issue."""
         if self._status is not RentalOrderItemStatus.PREPARED:
             raise InvalidRentalOrderItemStateError
         self._issued_at = issued_at
         self._due_at = self.due_at_for_issue(issued_at)
+        self._asset_identification_snapshot = (
+            deepcopy(asset_identification_snapshot)
+            if asset_identification_snapshot is not None
+            else None
+        )
         self._status = RentalOrderItemStatus.ISSUED
 
     def due_at_for_issue(self, issued_at: datetime) -> datetime | None:
@@ -346,6 +388,7 @@ class RentalOrderItem:
         damage_charge: Decimal | None = None,
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
+        seal_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete an issued item as physically returned."""
         self._complete(
@@ -360,6 +403,7 @@ class RentalOrderItem:
             damage_charge=damage_charge,
             deposit_applied=deposit_applied,
             return_calculation_snapshot=return_calculation_snapshot,
+            seal_verification_snapshot=seal_verification_snapshot,
         )
 
     def _mark_lost(
@@ -374,6 +418,7 @@ class RentalOrderItem:
         overdue_minutes: int | None = None,
         overdue_charge: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
+        seal_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete an issued item as lost without implying physical return."""
         self._complete(
@@ -388,6 +433,7 @@ class RentalOrderItem:
             damage_charge=damage_charge,
             deposit_applied=deposit_applied,
             return_calculation_snapshot=return_calculation_snapshot,
+            seal_verification_snapshot=seal_verification_snapshot,
         )
 
     def _cancel(self) -> None:
@@ -410,6 +456,7 @@ class RentalOrderItem:
         damage_charge: Decimal | None = None,
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
+        seal_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Record one terminal outcome from the issued state."""
         if self._status is not RentalOrderItemStatus.ISSUED:
@@ -427,6 +474,11 @@ class RentalOrderItem:
         self._return_calculation_snapshot = (
             dict(return_calculation_snapshot) if return_calculation_snapshot is not None else None
         )
+        self._seal_verification_snapshot = (
+            [dict(value) for value in seal_verification_snapshot]
+            if seal_verification_snapshot is not None
+            else None
+        )
 
 
 @dataclass(slots=True, init=False)
@@ -443,7 +495,7 @@ class RentalOrder:
     _planned_return_at: datetime
     _issued_at: datetime | None
     _closed_at: datetime | None
-    _deposit_amount: Decimal
+    _deposit_amount: Decimal | None
     _note: str | None
     _items: list[RentalOrderItem]
 
@@ -460,7 +512,7 @@ class RentalOrder:
         planned_return_at: datetime,
         issued_at: datetime | None,
         closed_at: datetime | None,
-        deposit_amount: Decimal,
+        deposit_amount: Decimal | None,
         note: str | None,
         items: list[RentalOrderItem] | None = None,
     ) -> None:
@@ -475,7 +527,11 @@ class RentalOrder:
         self._planned_return_at = planned_return_at
         self._issued_at = issued_at
         self._closed_at = closed_at
-        self._deposit_amount = deposit_amount
+        self._deposit_amount = (
+            self._require_non_negative_money(deposit_amount)
+            if deposit_amount is not None
+            else None
+        )
         self._note = note
         self._items = list(items or [])
 
@@ -490,7 +546,7 @@ class RentalOrder:
         customer_phone_snapshot: str,
         planned_start_at: datetime,
         planned_return_at: datetime,
-        deposit_amount: Decimal,
+        deposit_amount: Decimal | None = None,
         note: str | None = None,
     ) -> RentalOrder:
         """Create a valid empty draft order with immutable customer snapshots."""
@@ -498,7 +554,11 @@ class RentalOrder:
         cls._require_text(customer_name_snapshot)
         cls._require_text(customer_phone_snapshot)
         cls._require_period(planned_start_at, planned_return_at)
-        normalized_deposit = cls._require_non_negative_money(deposit_amount)
+        normalized_deposit = (
+            cls._require_non_negative_money(deposit_amount)
+            if deposit_amount is not None
+            else None
+        )
         return cls(
             id=order_id,
             order_number=order_number.strip(),
@@ -565,9 +625,19 @@ class RentalOrder:
         return self._closed_at
 
     @property
-    def deposit_amount(self) -> Decimal:
-        """Return the non-revenue deposit fixed for the order."""
+    def deposit_amount(self) -> Decimal | None:
+        """Return the confirmed receipt using the legacy API name."""
         return self._deposit_amount
+
+    @property
+    def deposit_received(self) -> Decimal | None:
+        """Return actual money explicitly confirmed as received from the customer."""
+        return self._deposit_amount
+
+    @property
+    def deposit_received_confirmed(self) -> bool:
+        """Distinguish an explicit zero receipt from an unconfirmed receipt."""
+        return self._deposit_amount is not None
 
     @property
     def note(self) -> str | None:
@@ -648,14 +718,14 @@ class RentalOrder:
     @property
     def deposit_to_refund(self) -> Decimal | None:
         """Return the final refundable deposit only after all items are completed."""
-        if not self.deposit_settlement_finalized:
+        if not self.deposit_settlement_finalized or self._deposit_amount is None:
             return None
         return quantize_money(max(self._deposit_amount - self.deposit_applied_total, Decimal("0")))
 
     @property
     def remaining_amount_due(self) -> Decimal | None:
         """Return final uncovered return liabilities only after order completion."""
-        if not self.deposit_settlement_finalized:
+        if not self.deposit_settlement_finalized or self._deposit_amount is None:
             return None
         liabilities = self.overdue_charge_total + self.damage_charge_total
         return quantize_money(max(liabilities - self.deposit_applied_total, Decimal("0")))
@@ -708,10 +778,23 @@ class RentalOrder:
         self._planned_start_at = planned_start_at
         self._planned_return_at = planned_return_at
 
-    def set_deposit(self, deposit_amount: Decimal) -> None:
-        """Change the actual/agreed order deposit before physical issue."""
-        self._require_editable()
-        self._deposit_amount = self._require_non_negative_money(deposit_amount)
+    def set_deposit_received(self, deposit_received: Decimal | None) -> None:
+        """Confirm or clear the actual receipt independently of contractual terms."""
+        if self._status not in {
+            RentalOrderStatus.DRAFT,
+            RentalOrderStatus.READY,
+            RentalOrderStatus.ISSUED,
+        }:
+            raise InvalidRentalOrderStateError
+        self._deposit_amount = (
+            self._require_non_negative_money(deposit_received)
+            if deposit_received is not None
+            else None
+        )
+
+    def set_deposit(self, deposit_amount: Decimal | None) -> None:
+        """Keep the legacy command as an alias for explicit receipt confirmation."""
+        self.set_deposit_received(deposit_amount)
 
     def update_note(self, note: str | None) -> None:
         """Change or clear the internal note before physical issue."""
@@ -868,7 +951,12 @@ class RentalOrder:
         """Normalize SQLite-rehydrated naive datetimes for comparisons."""
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
-    def issue(self, *, issued_at: datetime | None = None) -> None:
+    def issue(
+        self,
+        *,
+        issued_at: datetime | None = None,
+        identification_by_item: dict[UUIDv7, dict[str, object]] | None = None,
+    ) -> None:
         """Issue every prepared item exactly once."""
         if self._status not in {RentalOrderStatus.DRAFT, RentalOrderStatus.READY}:
             raise InvalidRentalOrderStateError
@@ -889,7 +977,7 @@ class RentalOrder:
             ):
                 raise ExpiredRentalSlotError
         for item in self._items:
-            item._issue(timestamp)
+            item._issue(timestamp, (identification_by_item or {}).get(item.id))
         self._status = RentalOrderStatus.ISSUED
         self._issued_at = timestamp
         self._refresh_summary_boundaries()
@@ -918,6 +1006,7 @@ class RentalOrder:
         damage_charge: Decimal | None = None,
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
+        seal_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete one issued item as returned and close when it is the last."""
         self._require_status(RentalOrderStatus.ISSUED)
@@ -945,6 +1034,7 @@ class RentalOrder:
                 else None
             ),
             return_calculation_snapshot=return_calculation_snapshot,
+            seal_verification_snapshot=seal_verification_snapshot,
         )
         self.close_if_completed(closed_at=returned_at)
 
@@ -961,6 +1051,7 @@ class RentalOrder:
         overdue_minutes: int | None = None,
         overdue_charge: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
+        seal_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete one issued item as lost and close when it is the last."""
         self._require_status(RentalOrderStatus.ISSUED)
@@ -987,6 +1078,7 @@ class RentalOrder:
                 else None
             ),
             return_calculation_snapshot=return_calculation_snapshot,
+            seal_verification_snapshot=seal_verification_snapshot,
         )
         self.close_if_completed(closed_at=completed_at)
 

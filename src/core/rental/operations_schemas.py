@@ -104,6 +104,7 @@ class CatalogVariantCardRead(PydanticBaseModel):
     id: UUIDv7
     title: str | None
     sku: str
+    sort_order: int | None = None
     is_archived: bool
     current_retail_price: Decimal | None
     retail_currency: str | None
@@ -155,6 +156,7 @@ class CatalogVariantOperationsRead(PydanticBaseModel):
     barcode: str
     barcode_source: BarcodeSource
     attributes: dict[str, str | int | bool]
+    sort_order: int | None = None
     is_active: bool
     is_archived: bool
     physical_quantity: Decimal

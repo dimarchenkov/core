@@ -21,10 +21,19 @@ from core.rental.agreement_models import (
     RentalAgreementSettingsRecord,
     RentalAgreementTemplateVersionRecord,
 )
-from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
+from core.rental.enums import (
+    AssetCondition,
+    AssetPurpose,
+    RentalAvailability,
+    RentalSealStatus,
+    RentalSealVerificationResult,
+)
 from core.rental.exceptions import RentalDomainError
+from core.rental.lifecycle_schemas import RentalAssetSealCreate
+from core.rental.lifecycle_service import RentalLifecycleService
 from core.rental.models import (
     RentalAssetRecord,
+    RentalAssetSealRecord,
     RentalDamageRecord,
     RentalOrderItemRecord,
     RentalOrderRecord,
@@ -42,6 +51,7 @@ from core.rental.order_exceptions import (
     InvalidRentalOrderStateError,
 )
 from core.rental.order_schemas import (
+    RentalDepositReceivedUpdate,
     RentalItemReturnDraft,
     RentalItemsReturn,
     RentalOrderCreate,
@@ -50,9 +60,11 @@ from core.rental.order_schemas import (
     RentalOrderRead,
     RentalOrderTariffConfigure,
     RentalOrderUpdate,
+    RentalSealVerificationDraft,
 )
 from core.rental.order_service import (
     RentalAgreementRequiredError,
+    RentalDepositUnconfirmedError,
     RentalOrderService,
     RentalTariffUnavailableError,
     RentalTariffVariantMismatchError,
@@ -84,6 +96,7 @@ def session() -> Generator[Session]:
             CatalogVariant.__table__,
             CatalogVariantBarcode.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetSealRecord.__table__,
             RentalTariffRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
@@ -171,6 +184,37 @@ def _draft(session: Session, customer: Customer) -> RentalOrderRecord:
     return record
 
 
+def _ready_without_agreement(
+    session: Session,
+    customer: Customer,
+    variant: CatalogVariant,
+    asset: RentalAssetRecord,
+    *,
+    name: str,
+) -> RentalOrder:
+    """Prepare one issueable order for identification snapshot tests."""
+    tariff = RentalTariffService(session).create(
+        variant.id,
+        RentalTariffCreate(
+            name=name,
+            type=RentalTariffType.DURATION,
+            price="350.00",
+            duration_minutes=180,
+            deposit_amount="0.00",
+            requires_agreement=False,
+            valid_from=TODAY,
+        ),
+    )
+    return RentalOrderService(session).add_tariff_item(
+        _draft(session, customer).id,
+        RentalOrderTariffConfigure(
+            rental_asset_id=asset.id,
+            tariff_id=tariff.id,
+            rental_date=TODAY,
+        ),
+    )
+
+
 def test_client_first_draft_uses_existing_customer_and_stays_incomplete(
     session: Session, customer: Customer
 ) -> None:
@@ -180,22 +224,13 @@ def test_client_first_draft_uses_existing_customer_and_stays_incomplete(
     assert order.status is RentalOrderStatus.DRAFT
     assert order.items == ()
     assert order.rental_total == Decimal("0.00")
+    assert order.deposit_received is None
+    assert order.deposit_received_confirmed is False
     assert order.recommended_deposit_total == Decimal("0.00")
 
 
-@pytest.mark.parametrize(
-    ("deposits", "expected"),
-    [
-        (["5000"], "5000.00"),
-        (["5000", "2000"], "7000.00"),
-        (["5000", "2000", "1000"], "8000.00"),
-        (["0", "5000"], "5000.00"),
-    ],
-)
-def test_required_deposit_total_sums_every_item_tariff_snapshot(
-    deposits: list[str], expected: str
-) -> None:
-    """Contractual deposit is an exact snapshot sum, never an order-level default."""
+def _order_with_snapshot_deposits(deposits: list[str]) -> RentalOrder:
+    """Build a tariff-snapshot order without confirming physical receipt."""
     now = datetime.now(UTC)
     order = RentalOrder.create(
         order_id=generate_uuid_v7(),
@@ -205,7 +240,7 @@ def test_required_deposit_total_sums_every_item_tariff_snapshot(
         customer_phone_snapshot="+79990000000",
         planned_start_at=now,
         planned_return_at=now + timedelta(hours=3),
-        deposit_amount=Decimal("0"),
+        deposit_amount=None,
     )
     for index, deposit in enumerate(deposits):
         order.add_configured_item(
@@ -227,10 +262,45 @@ def test_required_deposit_total_sums_every_item_tariff_snapshot(
                 "deposit_amount": deposit,
             },
         )
+    return order
+
+
+@pytest.mark.parametrize(
+    ("deposits", "expected"),
+    [
+        (["2000"], "2000.00"),
+        (["2000", "2000"], "4000.00"),
+        (["2000", "3000", "5000"], "10000.00"),
+        (["0", "5000"], "5000.00"),
+    ],
+)
+def test_required_deposit_total_sums_every_item_tariff_snapshot(
+    deposits: list[str], expected: str
+) -> None:
+    """Contractual deposit is an exact snapshot sum, never an order-level default."""
+    order = _order_with_snapshot_deposits(deposits)
 
     assert order.required_deposit_total == Decimal(expected)
     assert order.recommended_deposit_total == Decimal(expected)
     assert RentalOrderRead.model_validate(order).required_deposit_total == Decimal(expected)
+
+
+@pytest.mark.parametrize("received", ["4000", "2000", "0"])
+def test_actual_deposit_confirmation_accepts_suggested_custom_and_zero(
+    received: str,
+) -> None:
+    """Operator confirmation persists the exact receipt, including explicit zero."""
+    order = _order_with_snapshot_deposits(["2000", "2000"])
+
+    assert order.required_deposit_total == Decimal("4000.00")
+    assert order.deposit_received is None
+    assert order.deposit_received_confirmed is False
+
+    order.set_deposit_received(Decimal(received))
+    response = RentalOrderRead.model_validate(order)
+
+    assert response.deposit_received == Decimal(received).quantize(Decimal("0.01"))
+    assert response.deposit_received_confirmed is True
 
 
 def test_duration_ready_persists_date_without_starting_rental_clock(
@@ -258,7 +328,8 @@ def test_duration_ready_persists_date_without_starting_rental_clock(
     assert item.rental_tariff_id == duration.id
     assert item.rental_tariff_version == 1
     assert item.recommended_deposit == Decimal("5000.00")
-    assert ready.deposit_amount == Decimal("0.00")
+    assert ready.deposit_received is None
+    assert ready.deposit_received_confirmed is False
     assert ready.required_deposit_total == Decimal("5000.00")
     assert ready.recommended_deposit_total == Decimal("5000.00")
     assert ready.rental_total == Decimal("1900.00")
@@ -393,7 +464,7 @@ def test_service_issue_uses_server_time_is_idempotent_and_audited(
             type=RentalTariffType.DURATION,
             price="350.00",
             duration_minutes=180,
-            deposit_amount="2000.00",
+            deposit_amount="5000.00",
             requires_agreement=False,
             valid_from=TODAY,
         ),
@@ -436,12 +507,12 @@ def test_service_issue_uses_server_time_is_idempotent_and_audited(
     assert repeated.items[0].issued_at.replace(tzinfo=UTC) == issued.items[0].issued_at
 
 
-def test_return_preview_exposes_contractual_deposit_separately_from_zero_received(
+def test_return_preview_exposes_unconfirmed_receipt_without_assuming_required_total(
     session: Session,
     customer: Customer,
     rental_setup: tuple[CatalogVariant, RentalAssetRecord, RentalTariffRecord, RentalTariffRecord],
 ) -> None:
-    """Return DTO keeps the snapshot requirement even when no receipt was recorded."""
+    """Return DTO keeps NULL distinct from an explicit zero receipt."""
     variant, asset, _, _ = rental_setup
     tariff = RentalTariffService(session).create(
         variant.id,
@@ -478,11 +549,37 @@ def test_return_preview_exposes_contractual_deposit_separately_from_zero_receive
         ),
     )
 
-    assert issued.deposit_amount == Decimal("0.00")
+    assert issued.deposit_received is None
     assert issued.required_deposit_total == Decimal("5000.00")
     assert preview.required_deposit_total == Decimal("5000.00")
-    assert preview.deposit_received == Decimal("0.00")
-    assert preview.deposit_to_refund == Decimal("0.00")
+    assert preview.deposit_received is None
+    assert preview.deposit_received_confirmed is False
+    assert preview.provisional_deposit_remaining is None
+    assert preview.deposit_to_refund is None
+
+    command = RentalItemsReturn(
+        items=[
+            RentalItemReturnDraft(
+                item_id=issued.items[0].id,
+                condition=RentalReturnCondition.GOOD,
+            )
+        ]
+    )
+    with pytest.raises(RentalDepositUnconfirmedError):
+        service.return_items(issued.id, command)
+
+    still_issued = service.get(issued.id)
+    assert still_issued.status is RentalOrderStatus.ISSUED
+    assert still_issued.items[0].status is RentalOrderItemStatus.ISSUED
+
+    explicitly_zero = service.confirm_deposit_received(
+        issued.id,
+        RentalDepositReceivedUpdate(deposit_received=Decimal("0")),
+    )
+    assert explicitly_zero.deposit_received == Decimal("0.00")
+    assert explicitly_zero.deposit_received_confirmed is True
+    completed = service.return_items(issued.id, command)
+    assert completed.status is RentalOrderStatus.CLOSED
 
 
 def test_manual_issue_override_sets_duration_due_from_actual_time(
@@ -623,7 +720,7 @@ def test_item_returns_are_server_calculated_partial_atomic_and_historical(
             price="300.00",
             duration_minutes=180,
             grace_minutes=30,
-            deposit_amount="5000.00",
+            deposit_amount="2000.00",
             requires_agreement=False,
             valid_from=TODAY,
         ),
@@ -646,7 +743,7 @@ def test_item_returns_are_server_calculated_partial_atomic_and_historical(
     draft = _draft(session, customer)
     service.update_draft(
         draft.id,
-        RentalOrderUpdate(deposit_amount=Decimal("500")),
+        RentalOrderUpdate(deposit_received=Decimal("2000")),
     )
     service.add_tariff_item(
         draft.id,
@@ -664,8 +761,8 @@ def test_item_returns_are_server_calculated_partial_atomic_and_historical(
             rental_date=TODAY,
         ),
     )
-    assert ready.required_deposit_total == Decimal("7000.00")
-    assert ready.deposit_amount == Decimal("500.00")
+    assert ready.required_deposit_total == Decimal("4000.00")
+    assert ready.deposit_received == Decimal("2000.00")
     issued = service.issue(ready.id)
     item_records = {item.id: session.get(RentalOrderItemRecord, item.id) for item in issued.items}
     for record in item_records.values():
@@ -686,22 +783,23 @@ def test_item_returns_are_server_calculated_partial_atomic_and_historical(
     partial = service.return_items(issued.id, first_command)
 
     assert preview.is_partial is True
-    assert preview.required_deposit_total == Decimal("7000.00")
-    assert preview.deposit_received == Decimal("500.00")
-    assert repeated_preview.required_deposit_total == Decimal("7000.00")
+    assert preview.required_deposit_total == Decimal("4000.00")
+    assert preview.deposit_received == Decimal("2000.00")
+    assert repeated_preview.required_deposit_total == Decimal("4000.00")
     assert preview.items[0].overdue_charge == Decimal("300.00")
     assert preview.items[0].deposit_applied == Decimal("300.00")
     assert preview.deposit_to_refund is None
     assert partial.status is RentalOrderStatus.ISSUED
     assert partial.items[0].status is RentalOrderItemStatus.RETURNED
     assert partial.items[1].status is RentalOrderItemStatus.ISSUED
-    assert partial.required_deposit_total == Decimal("7000.00")
+    assert partial.required_deposit_total == Decimal("4000.00")
     assert partial.deposit_applied_total == Decimal("300.00")
     session.refresh(first_asset)
     assert first_asset.availability is RentalAvailability.AVAILABLE
 
+    tariff.deposit_amount = Decimal("5000.00")
     second_tariff.price = Decimal("999.00")
-    second_tariff.deposit_amount = Decimal("10000.00")
+    second_tariff.deposit_amount = Decimal("5000.00")
     second_tariff.grace_minutes = 0
     session.commit()
     second_command = RentalItemsReturn(
@@ -718,20 +816,20 @@ def test_item_returns_are_server_calculated_partial_atomic_and_historical(
     repeated_final_preview = service.preview_return(issued.id, second_command)
     completed = service.return_items(issued.id, second_command)
 
-    assert final_preview.required_deposit_total == Decimal("7000.00")
-    assert final_preview.deposit_received == Decimal("500.00")
-    assert repeated_final_preview.required_deposit_total == Decimal("7000.00")
+    assert final_preview.required_deposit_total == Decimal("4000.00")
+    assert final_preview.deposit_received == Decimal("2000.00")
+    assert repeated_final_preview.required_deposit_total == Decimal("4000.00")
     assert final_preview.items[0].billing_unit_price == Decimal("300.00")
     assert final_preview.items[0].overdue_charge == Decimal("300.00")
     assert final_preview.items[0].damage_charge == Decimal("100.00")
-    assert final_preview.deposit_applied_by_return == Decimal("200.00")
-    assert final_preview.deposit_to_refund == Decimal("0.00")
-    assert final_preview.remaining_amount_due == Decimal("200.00")
+    assert final_preview.deposit_applied_by_return == Decimal("400.00")
+    assert final_preview.deposit_to_refund == Decimal("1300.00")
+    assert final_preview.remaining_amount_due == Decimal("0.00")
     assert completed.status is RentalOrderStatus.CLOSED
-    assert completed.required_deposit_total == Decimal("7000.00")
+    assert completed.required_deposit_total == Decimal("4000.00")
     assert completed.deposit_settlement_finalized is True
-    assert completed.deposit_to_refund == Decimal("0.00")
-    assert completed.remaining_amount_due == Decimal("200.00")
+    assert completed.deposit_to_refund == Decimal("1300.00")
+    assert completed.remaining_amount_due == Decimal("0.00")
     session.refresh(second_asset)
     assert second_asset.availability is RentalAvailability.MAINTENANCE
     assert second_asset.condition is AssetCondition.DAMAGED
@@ -1034,3 +1132,145 @@ def test_incomplete_legacy_sibling_prevents_ready(
     assert order.status is RentalOrderStatus.DRAFT
     ready = service.remove_item(draft.id, incomplete.items[0].id)
     assert ready.status is RentalOrderStatus.READY
+
+
+@pytest.mark.parametrize(
+    ("serial_number", "seal_count"),
+    [(None, 0), ("SN-001", 0), (None, 1), ("SN-003", 3)],
+)
+def test_issue_freezes_optional_serial_and_active_seals(
+    session: Session,
+    customer: Customer,
+    rental_setup: tuple[CatalogVariant, RentalAssetRecord, RentalTariffRecord, RentalTariffRecord],
+    serial_number: str | None,
+    seal_count: int,
+) -> None:
+    """Issue accepts empty identification and snapshots every active seal when present."""
+    variant, asset, _, _ = rental_setup
+    asset.serial_number = serial_number
+    session.add_all(
+        [
+            RentalAssetSealRecord(
+                rental_asset_id=asset.id,
+                location=f"Точка {index + 1}",
+                seal_number=f"00184{index}",
+                status=RentalSealStatus.ACTIVE,
+                installed_at=datetime.now(UTC),
+            )
+            for index in range(seal_count)
+        ]
+    )
+    session.commit()
+    ready = _ready_without_agreement(
+        session, customer, variant, asset, name=f"Снимок {seal_count}"
+    )
+
+    issued = RentalOrderService(session).issue(ready.id)
+    snapshot = issued.items[0].asset_identification_snapshot
+
+    assert snapshot is not None
+    assert snapshot["asset_code"] == asset.asset_number
+    assert snapshot["serial_number"] == serial_number
+    assert len(snapshot["seals"]) == seal_count
+
+
+@pytest.mark.parametrize(
+    ("verification_result", "verification_note"),
+    [
+        (RentalSealVerificationResult.OK, None),
+        (RentalSealVerificationResult.MISMATCH, "На месте установлена другая пломба"),
+    ],
+)
+def test_replaced_seal_preserves_history_and_old_issue_snapshot_drives_return(
+    session: Session,
+    customer: Customer,
+    rental_setup: tuple[CatalogVariant, RentalAssetRecord, RentalTariffRecord, RentalTariffRecord],
+    verification_result: RentalSealVerificationResult,
+    verification_note: str | None,
+) -> None:
+    """Later asset edits cannot rewrite expected identification or return evidence."""
+    variant, asset, _, _ = rental_setup
+    actor = User(
+        email="seal-operator@example.com",
+        full_name="Оператор пломб",
+        password_hash="not-used",
+    )
+    session.add(actor)
+    asset.serial_number = "SERIAL-OLD"
+    session.commit()
+    lifecycle = RentalLifecycleService(session)
+    old_seal = lifecycle.add_seal(
+        asset.id,
+        RentalAssetSealCreate(location="Корпус", seal_number="001842"),
+        actor_id=actor.id,
+    )
+    ready = _ready_without_agreement(
+        session, customer, variant, asset, name="История пломб"
+    )
+    orders = RentalOrderService(session)
+    orders.update_draft(
+        ready.id,
+        RentalOrderUpdate(deposit_received=Decimal("0")),
+    )
+    issued = orders.issue(ready.id)
+
+    asset.serial_number = "SERIAL-NEW"
+    session.commit()
+    new_seal = lifecycle.add_seal(
+        asset.id,
+        RentalAssetSealCreate(location="Корпус", seal_number="009999"),
+        actor_id=actor.id,
+    )
+    session.expire_all()
+    old_record = session.get(RentalAssetSealRecord, old_seal.id)
+
+    assert old_record is not None
+    assert old_record.status is RentalSealStatus.REMOVED
+    assert old_record.removed_at is not None
+    assert new_seal.status is RentalSealStatus.ACTIVE
+    persisted = orders.get(issued.id)
+    assert persisted.items[0].asset_identification_snapshot == {
+        "asset_code": asset.asset_number,
+        "serial_number": "SERIAL-OLD",
+        "seals": [{"location": "Корпус", "seal_number": "001842"}],
+    }
+
+    command = RentalItemsReturn(
+        items=[
+            RentalItemReturnDraft(
+                item_id=issued.items[0].id,
+                condition=RentalReturnCondition.GOOD,
+                seal_verifications=[
+                    RentalSealVerificationDraft(
+                        location="Корпус",
+                        seal_number="001842",
+                        result=verification_result,
+                        note=verification_note,
+                    )
+                ],
+            )
+        ]
+    )
+    preview = orders.preview_return(issued.id, command)
+    returned = orders.return_items(issued.id, command)
+
+    assert preview.items[0].asset_identification_snapshot["serial_number"] == "SERIAL-OLD"
+    assert preview.items[0].seal_verifications == [
+        {
+            "location": "Корпус",
+            "expected_seal_number": "001842",
+            "result": verification_result.value,
+            "note": verification_note,
+        }
+    ]
+    assert returned.items[0].seal_verification_snapshot == preview.items[0].seal_verifications
+
+
+def test_seal_problem_requires_note() -> None:
+    """A non-OK seal observation cannot be submitted without operator context."""
+    with pytest.raises(ValueError, match="note is required"):
+        RentalSealVerificationDraft(
+            location="Корпус",
+            seal_number="001842",
+            result=RentalSealVerificationResult.MISMATCH,
+        )

@@ -22,7 +22,12 @@ from core.labels.service import RentalAssetLabelService
 from core.main import create_app
 from core.pricing.models import Price
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
-from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
+from core.rental.models import (
+    RentalAssetRecord,
+    RentalAssetSealRecord,
+    RentalOrderItemRecord,
+    RentalOrderRecord,
+)
 from core.rental.repository import RentalAssetRepository
 from core.shared.db import Base
 
@@ -44,6 +49,7 @@ def session() -> Generator[Session]:
             CatalogVariantBarcode.__table__,
             Price.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetSealRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
         ],

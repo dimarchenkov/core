@@ -195,15 +195,15 @@ def test_update_draft_period_deposit_and_note() -> None:
 
 
 def test_issued_order_rejects_draft_detail_changes() -> None:
-    """Issued contractual details cannot be rewritten."""
+    """Issued contractual details stay locked while the receipt can still be confirmed."""
     order = create_order()
     add_first_item(order)
     order.issue(issued_at=START_AT)
 
     with pytest.raises(InvalidRentalOrderStateError):
         order.change_period(START_AT, RETURN_AT)
-    with pytest.raises(InvalidRentalOrderStateError):
-        order.set_deposit(Decimal("0"))
+    order.set_deposit_received(Decimal("0"))
+    assert order.deposit_received == Decimal("0.00")
     with pytest.raises(InvalidRentalOrderStateError):
         order.update_note(None)
 

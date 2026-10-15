@@ -16,7 +16,12 @@ from core.rental.agreement_service import (
     RentalAgreementTermsLockedError,
 )
 from core.rental.asset import RentalAsset
-from core.rental.enums import AssetCondition
+from core.rental.enums import (
+    AssetCondition,
+    RentalSealStatus,
+    RentalSealVerificationResult,
+)
+from core.rental.exceptions import RentalDomainError
 from core.rental.mapper import (
     rental_asset_from_record,
     rental_order_from_record,
@@ -25,7 +30,7 @@ from core.rental.mapper import (
     update_rental_order_record,
 )
 from core.rental.models import RentalAssetRecord, RentalDamageRecord, RentalOrderRecord
-from core.rental.order import RentalOrder
+from core.rental.order import RentalOrder, RentalOrderItem
 from core.rental.order_enums import (
     RentalOrderItemStatus,
     RentalOrderStatus,
@@ -33,15 +38,16 @@ from core.rental.order_enums import (
     RentalTimingSource,
 )
 from core.rental.order_exceptions import (
-    InvalidRentalMoneyError,
     InvalidRentalOrderItemStateError,
     InvalidRentalOrderStateError,
     RentalOrderItemNotFoundError,
 )
 from core.rental.order_number import RentalOrderNumberGenerator
 from core.rental.order_schemas import (
+    RentalDepositReceivedUpdate,
     RentalIssuePreview,
     RentalIssuePreviewItem,
+    RentalItemReturnDraft,
     RentalItemsReturn,
     RentalOrderCreate,
     RentalOrderIssue,
@@ -101,6 +107,14 @@ class RentalIssueTimeError(Exception):
     """Raised when a manual actual issue timestamp is operationally implausible."""
 
 
+class RentalSealVerificationError(RentalDomainError):
+    """Raised when return seal observations do not match the issue snapshot."""
+
+
+class RentalDepositUnconfirmedError(RentalDomainError):
+    """Raised when return settlement has no confirmed actual deposit receipt."""
+
+
 class RentalOrderService:
     """Application workflows coordinating RentalOrder and related aggregates."""
 
@@ -137,7 +151,7 @@ class RentalOrderService:
             customer_phone_snapshot=customer.phone,
             planned_start_at=planned_start_at,
             planned_return_at=planned_return_at,
-            deposit_amount=data.deposit_amount,
+            deposit_amount=data.deposit_received,
             note=data.note,
         )
         self._orders.add(rental_order_to_record(order, actor_id=actor_id))
@@ -268,19 +282,32 @@ class RentalOrderService:
         """Change approved mutable details through aggregate commands."""
         record, order = self._load_order(order_id, for_update=True)
         changes = data.model_dump(exclude_unset=True)
-        if {"planned_start_at", "planned_return_at", "deposit_amount"} & changes.keys():
+        if {"planned_start_at", "planned_return_at"} & changes.keys():
             self._ensure_agreement_terms_editable(order_id)
         if "planned_start_at" in changes or "planned_return_at" in changes:
             order.change_period(
                 data.planned_start_at or order.planned_start_at,
                 data.planned_return_at or order.planned_return_at,
             )
-        if "deposit_amount" in changes:
-            if data.deposit_amount is None:
-                raise InvalidRentalMoneyError
-            order.set_deposit(data.deposit_amount)
+        if "deposit_received" in changes:
+            order.set_deposit_received(data.deposit_received)
         if "note" in changes:
             order.update_note(data.note)
+        update_rental_order_record(record, order, actor_id=actor_id)
+        self._orders.save(record)
+        self._commit()
+        return order
+
+    def confirm_deposit_received(
+        self,
+        order_id: UUIDv7,
+        data: RentalDepositReceivedUpdate,
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> RentalOrder:
+        """Persist the exact operator-confirmed receipt without changing contract terms."""
+        record, order = self._load_order(order_id, for_update=True)
+        order.set_deposit_received(data.deposit_received)
         update_rental_order_record(record, order, actor_id=actor_id)
         self._orders.save(record)
         self._commit()
@@ -356,16 +383,24 @@ class RentalOrderService:
             ).has_valid_agreement(order_id):
                 raise RentalAgreementRequiredError
             actual_issue_at = self._resolve_issue_time(data.issued_at if data else None)
-            asset_pairs: list[tuple[RentalAssetRecord, RentalAsset]] = []
+            asset_pairs: list[tuple[UUIDv7, RentalAssetRecord, RentalAsset]] = []
+            identification_by_item: dict[UUIDv7, dict[str, object]] = {}
             for item in sorted(order.items, key=lambda candidate: str(candidate.rental_asset_id)):
                 asset_record = self._assets.get_for_update(item.rental_asset_id)
                 if asset_record is None:
                     raise RentalAssetNotFoundError
-                asset_pairs.append((asset_record, rental_asset_from_record(asset_record)))
-            for _, asset in asset_pairs:
+                asset = rental_asset_from_record(asset_record)
+                asset_pairs.append((item.id, asset_record, asset))
+                identification_by_item[item.id] = self._asset_identification_snapshot(
+                    asset_record
+                )
+            for _, _, asset in asset_pairs:
                 asset.checkout()
-            order.issue(issued_at=actual_issue_at)
-            for asset_record, asset in asset_pairs:
+            order.issue(
+                issued_at=actual_issue_at,
+                identification_by_item=identification_by_item,
+            )
+            for _, asset_record, asset in asset_pairs:
                 update_rental_asset_record(asset_record, asset)
                 asset_record.updated_by_id = actor_id
             update_rental_order_record(record, order, actor_id=actor_id)
@@ -492,6 +527,10 @@ class RentalOrderService:
             record, order = self._load_order(order_id, for_update=True)
             returned_at = datetime.now(UTC)
             preview = self._build_return_preview(order, data, returned_at=returned_at)
+            if not preview.deposit_received_confirmed:
+                raise RentalDepositUnconfirmedError(
+                    "Фактическое получение обеспечительного платежа не было подтверждено."
+                )
             commands = {command.item_id: command for command in data.items}
             preview_items = {item.item_id: item for item in preview.items}
             order_items = {item.id: item for item in order.items}
@@ -528,6 +567,7 @@ class RentalOrderService:
                         damage_charge=calculation.damage_charge,
                         deposit_applied=calculation.deposit_applied,
                         return_calculation_snapshot=calculation_snapshot,
+                        seal_verification_snapshot=calculation.seal_verifications,
                     )
                 else:
                     asset_condition = (
@@ -548,6 +588,7 @@ class RentalOrderService:
                         damage_charge=calculation.damage_charge,
                         deposit_applied=calculation.deposit_applied,
                         return_calculation_snapshot=calculation_snapshot,
+                        seal_verification_snapshot=calculation.seal_verifications,
                     )
                 update_rental_asset_record(asset_records[item_id], asset)
                 asset_records[item_id].updated_by_id = actor_id
@@ -603,7 +644,12 @@ class RentalOrderService:
                 raise RentalOrderItemNotFoundError
             raise InvalidRentalOrderItemStateError
 
-        remaining_deposit = max(order.deposit_amount - order.deposit_applied_total, Decimal("0"))
+        deposit_received = order.deposit_received
+        available_deposit = deposit_received or Decimal("0")
+        remaining_deposit = max(
+            available_deposit - order.deposit_applied_total,
+            Decimal("0"),
+        )
         preview_items: list[RentalReturnPreviewItem] = []
         deposit_applied_by_return = Decimal("0")
         new_liabilities = Decimal("0")
@@ -625,6 +671,7 @@ class RentalOrderService:
             deposit_applied_by_return += deposit_applied
             new_liabilities += liabilities
             snapshot = item.tariff_snapshot
+            seal_verifications = self._normalized_seal_verifications(item, command)
             preview_items.append(
                 RentalReturnPreviewItem(
                     item_id=item.id,
@@ -647,6 +694,8 @@ class RentalOrderService:
                     damage_charge=calculation.damage_charge,
                     total_charge=calculation.total_charge,
                     deposit_applied=deposit_applied,
+                    asset_identification_snapshot=item.asset_identification_snapshot,
+                    seal_verifications=seal_verifications,
                 )
             )
 
@@ -659,14 +708,21 @@ class RentalOrderService:
             is_partial=not final_after_return,
             settlement_final_after_return=final_after_return,
             required_deposit_total=order.required_deposit_total,
-            deposit_received=order.deposit_amount,
+            deposit_received=deposit_received,
+            deposit_received_confirmed=order.deposit_received_confirmed,
             deposit_applied_before=order.deposit_applied_total,
             deposit_applied_by_return=quantize_money(deposit_applied_by_return),
-            provisional_deposit_remaining=remaining_deposit,
-            deposit_to_refund=(remaining_deposit if final_after_return else None),
+            provisional_deposit_remaining=(
+                remaining_deposit if order.deposit_received_confirmed else None
+            ),
+            deposit_to_refund=(
+                remaining_deposit
+                if final_after_return and order.deposit_received_confirmed
+                else None
+            ),
             remaining_amount_due=(
                 quantize_money(max(liabilities_total - applied_total, Decimal("0")))
-                if final_after_return
+                if final_after_return and order.deposit_received_confirmed
                 else None
             ),
             items=preview_items,
@@ -693,6 +749,61 @@ class RentalOrderService:
             "due_at": item.due_at.isoformat(),
             "returned_at": returned_at.isoformat(),
         }
+
+    @staticmethod
+    def _asset_identification_snapshot(record: RentalAssetRecord) -> dict[str, object]:
+        """Freeze current optional serial and active seals for one physical issue."""
+        active_seals = sorted(
+            (seal for seal in record.seals if seal.status is RentalSealStatus.ACTIVE),
+            key=lambda seal: (seal.location.casefold(), seal.seal_number.casefold()),
+        )
+        return {
+            "asset_code": record.asset_number,
+            "serial_number": record.serial_number,
+            "seals": [
+                {"location": seal.location, "seal_number": seal.seal_number}
+                for seal in active_seals
+            ],
+        }
+
+    @staticmethod
+    def _normalized_seal_verifications(
+        item: RentalOrderItem,
+        command: RentalItemReturnDraft,
+    ) -> list[dict[str, object]]:
+        """Validate return observations against the immutable issue snapshot."""
+        identification = item.asset_identification_snapshot or {}
+        raw_expected = identification.get("seals") or []
+        expected = {
+            (str(value.get("location")), str(value.get("seal_number")))
+            for value in raw_expected
+            if isinstance(value, dict) and value.get("seal_number") and value.get("location")
+        }
+        submitted = command.seal_verifications
+        if command.condition is RentalReturnCondition.LOST and expected and not submitted:
+            return [
+                {
+                    "location": location,
+                    "expected_seal_number": seal_number,
+                    "result": RentalSealVerificationResult.MISSING.value,
+                    "note": command.notes,
+                }
+                for location, seal_number in sorted(expected)
+            ]
+        submitted_by_seal = {(value.location, value.seal_number): value for value in submitted}
+        if len(submitted_by_seal) != len(submitted) or set(submitted_by_seal) != expected:
+            raise RentalSealVerificationError(
+                "Проверьте каждую пломбу из снимка выдачи; лишние номера недопустимы."
+            )
+        return [
+            {
+                "location": location,
+                "expected_seal_number": seal_number,
+                "result": submitted_by_seal[(location, seal_number)].result.value,
+                "note": submitted_by_seal[(location, seal_number)].note,
+            }
+            for location, seal_number in sorted(expected)
+        ]
 
     def complete_items(
         self,

@@ -36,8 +36,18 @@ from core.rental.agreement_template import (
     SUPPORTED_AGREEMENT_PLACEHOLDERS,
     SUPPORTED_HANDWRITING_COMPONENTS,
 )
-from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
-from core.rental.models import RentalAssetRecord, RentalOrderItemRecord, RentalOrderRecord
+from core.rental.enums import (
+    AssetCondition,
+    AssetPurpose,
+    RentalAvailability,
+    RentalSealStatus,
+)
+from core.rental.models import (
+    RentalAssetRecord,
+    RentalAssetSealRecord,
+    RentalOrderItemRecord,
+    RentalOrderRecord,
+)
 from core.rental.order_enums import (
     RentalOrderItemStatus,
     RentalOrderStatus,
@@ -59,6 +69,7 @@ def session() -> Generator[Session]:
         tables=[
             User.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetSealRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
             RentalAgreementSettingsRecord.__table__,
@@ -316,6 +327,66 @@ def test_historical_pdf_ignores_later_template_settings_and_order_snapshot_chang
     assert record is not None
     assert "Другой арендодатель" not in record.rendered_markdown
     assert "Переименовано после договора" not in record.rendered_markdown
+
+
+def test_agreement_omits_empty_identification_and_includes_present_serial_and_seals(
+    session: Session,
+) -> None:
+    """Agreement item text stays compact and freezes only identification that exists."""
+    _configure_settings(session)
+    empty_order = _ready_order(session)
+    service = RentalAgreementService(session)
+    empty = service.generate(empty_order.id, actor_id=generate_uuid_v7())
+    empty_record = session.get(RentalAgreementRecord, empty.id)
+    assert empty_record is not None
+    assert "серийный номер" not in empty_record.rendered_markdown.lower()
+    assert "пломбы:" not in empty_record.rendered_markdown.lower()
+    assert empty_record.items_snapshot[0]["asset_identification"] == {
+        "serial_number": None,
+        "seals": [],
+    }
+
+    identified_order = _ready_order(session)
+    item = identified_order.items[0]
+    asset = session.get(RentalAssetRecord, item.rental_asset_id)
+    assert asset is not None
+    asset.serial_number = "SN-PUZZI-42"
+    session.add_all(
+        [
+            RentalAssetSealRecord(
+                rental_asset_id=asset.id,
+                location="Корпус",
+                seal_number="001842",
+                status=RentalSealStatus.ACTIVE,
+                installed_at=datetime.now(UTC),
+            ),
+            RentalAssetSealRecord(
+                rental_asset_id=asset.id,
+                location="Старая точка",
+                seal_number="000111",
+                status=RentalSealStatus.REMOVED,
+                installed_at=datetime.now(UTC) - timedelta(days=1),
+                removed_at=datetime.now(UTC),
+            ),
+        ]
+    )
+    session.commit()
+    identified = service.generate(identified_order.id, actor_id=generate_uuid_v7())
+    identified_record = session.get(RentalAgreementRecord, identified.id)
+
+    assert identified_record is not None
+    assert "серийный номер SN-PUZZI-42" in identified_record.rendered_markdown
+    assert "пломбы: Корпус — 001842" in identified_record.rendered_markdown
+    assert "000111" not in identified_record.rendered_markdown
+    assert "Серийный номер: —" not in identified_record.rendered_markdown
+    assert "Пломбы: —" not in identified_record.rendered_markdown
+
+    _, original_pdf, original_digest = service.pdf(identified.id)
+    asset.serial_number = "SN-CHANGED-LATER"
+    session.commit()
+    _, stored_pdf, stored_digest = service.pdf(identified.id)
+    assert stored_pdf == original_pdf
+    assert stored_digest == original_digest
 
 
 def test_required_agreement_gates_issue_then_allows_existing_atomic_command(

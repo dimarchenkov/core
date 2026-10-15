@@ -19,6 +19,8 @@ _SERVICEABLE_CONDITIONS = frozenset(
         AssetCondition.FAIR,
     }
 )
+
+
 @dataclass(slots=True, init=False)
 class RentalAsset:
     """One individually tracked physical item in the rental lifecycle.
@@ -39,6 +41,7 @@ class RentalAsset:
     _created_at: datetime
     _updated_at: datetime
     _retirement_reason: str | None
+    _serial_number: str | None
 
     def __init__(
         self,
@@ -52,6 +55,7 @@ class RentalAsset:
         created_at: datetime,
         updated_at: datetime,
         retirement_reason: str | None = None,
+        serial_number: str | None = None,
     ) -> None:
         """Initialize state for controlled construction through ``create``."""
         self._id = id
@@ -64,6 +68,7 @@ class RentalAsset:
         self._created_at = created_at
         self._updated_at = updated_at
         self._retirement_reason = retirement_reason
+        self._serial_number = self._normalize_optional_identifier(serial_number)
 
     @property
     def id(self) -> UUID:
@@ -115,6 +120,11 @@ class RentalAsset:
         """Return the recorded terminal retirement reason, when present."""
         return self._retirement_reason
 
+    @property
+    def serial_number(self) -> str | None:
+        """Return the optional manufacturer identity carried by this asset."""
+        return self._serial_number
+
     @classmethod
     def create(
         cls,
@@ -163,6 +173,11 @@ class RentalAsset:
         ):
             self._raise_invalid_state("checkout")
         self._availability = RentalAvailability.RENTED
+        self._touch()
+
+    def set_serial_number(self, serial_number: str | None) -> None:
+        """Set or clear the optional manufacturer serial without changing availability."""
+        self._serial_number = self._normalize_optional_identifier(serial_number)
         self._touch()
 
     def accept_return(self, condition: AssetCondition) -> None:
@@ -279,3 +294,9 @@ class RentalAsset:
     def _touch(self) -> None:
         """Record the time of the latest successful domain transition."""
         self._updated_at = datetime.now(UTC)
+
+    @staticmethod
+    def _normalize_optional_identifier(value: str | None) -> str | None:
+        """Normalize optional physical identifiers without inventing placeholders."""
+        normalized = (value or "").strip()
+        return normalized or None
