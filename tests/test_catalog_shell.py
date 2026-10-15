@@ -9,6 +9,18 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from core.catalog.collection_enums import (
+    CollectionRuleField,
+    CollectionRuleOperator,
+    CollectionType,
+)
+from core.catalog.collection_models import (
+    CatalogCollection,
+    CollectionMembership,
+    CollectionRule,
+)
+from core.catalog.collection_schemas import CollectionCreate, CollectionRuleWrite
+from core.catalog.collection_service import CollectionService
 from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
 from core.catalog.schemas import CategoryUpdate
 from core.catalog.service import CategoryService
@@ -60,6 +72,9 @@ def session() -> Generator[Session]:
             CatalogProduct.__table__,
             CatalogVariant.__table__,
             CatalogVariantBarcode.__table__,
+            CatalogCollection.__table__,
+            CollectionMembership.__table__,
+            CollectionRule.__table__,
             Image.__table__,
             ImageLink.__table__,
             Price.__table__,
@@ -181,13 +196,88 @@ def catalog_data(session: Session) -> dict[str, object]:
         "root": root,
         "supplier": supplier,
         "sale_product": sale_product,
+        "sale_variant": sale_variant,
         "rental_product": rental_product,
+        "rental_variant": rental_variant,
         "inactive_product": inactive_product,
     }
 
 
 def _titles(rows: list[object]) -> list[str]:
     return [row.title for row in rows]
+
+
+def test_static_and_dynamic_collections_filter_existing_catalog_at_variant_level(
+    session: Session,
+    catalog_data: dict[str, object],
+) -> None:
+    product = catalog_data["sale_product"]
+    matching = catalog_data["sale_variant"]
+    nonmatching = CatalogVariant(
+        product_id=product.id,
+        title="Красная",
+        sku="SKU-SALE-RED",
+        barcode="4600000000088",
+    )
+    image = Image(
+        source_key="catalog/filter-source.jpg",
+        original_filename="filter.jpg",
+        mime_type="image/jpeg",
+        size_bytes=100,
+        width=10,
+        height=10,
+        checksum="collection-filter-image",
+    )
+    session.add_all([nonmatching, image])
+    session.flush()
+    session.add_all(
+        [
+            Price(
+                variant_id=nonmatching.id,
+                price_type=PriceType.RETAIL,
+                amount=Decimal("70"),
+                effective_from=datetime.now(UTC),
+            ),
+            ImageLink(
+                image_id=image.id,
+                entity_type=ImageLinkEntityType.CATALOG_PRODUCT,
+                entity_id=product.id,
+                role=ImageLinkRole.PRIMARY,
+            ),
+        ]
+    )
+    collections = CollectionService(session)
+    static = collections.create_collection(
+        CollectionCreate(name="На кассе", type=CollectionType.STATIC)
+    )
+    collections.add_members(static.id, [matching.id])
+    dynamic = collections.create_collection(
+        CollectionCreate(
+            name="Всё за 150",
+            type=CollectionType.DYNAMIC,
+            rules=[
+                CollectionRuleWrite(
+                    field=CollectionRuleField.PRICE,
+                    operator=CollectionRuleOperator.EQ,
+                    value=Decimal("150"),
+                )
+            ],
+        )
+    )
+    session.commit()
+    catalog = RentalOperationsReadService(session)
+
+    for collection_id in (static.id, dynamic.id):
+        rows = catalog.list_products(
+            query="Ручка",
+            mode=CatalogMode.SALE,
+            collection_id=collection_id,
+        )
+        assert [row.id for row in rows] == [product.id]
+        assert [variant.id for variant in rows[0].card_variants] == [matching.id]
+        assert rows[0].primary_image_id == image.id
+
+    assert catalog.list_products(query="SKU-RENT", collection_id=static.id) == []
 
 
 def test_catalog_modes_default_to_sale_and_keep_one_shared_catalog(
@@ -202,6 +292,51 @@ def test_catalog_modes_default_to_sale_and_keep_one_shared_catalog(
         "Набор маркеров",
         "Ручка",
         "Старая ручка",
+    ]
+
+
+def test_catalog_and_product_detail_use_product_local_variant_order(
+    session: Session,
+    catalog_data: dict[str, object],
+) -> None:
+    """Both Catalog cards and Product detail preserve the operator-defined order."""
+    product = catalog_data["sale_product"]
+    existing = catalog_data["sale_variant"]
+    existing.sort_order = 30
+    medium = CatalogVariant(
+        product_id=product.id,
+        title="Средний",
+        sku="SKU-MEDIUM",
+        barcode="4600000000901",
+        sort_order=20,
+    )
+    large = CatalogVariant(
+        product_id=product.id,
+        title="Большой",
+        sku="SKU-LARGE",
+        barcode="4600000000902",
+        sort_order=10,
+    )
+    session.add_all([medium, large])
+    session.flush()
+    service = RentalOperationsReadService(session)
+
+    catalog_product = next(
+        row
+        for row in service.list_products(mode=CatalogMode.ALL)
+        if row.id == product.id
+    )
+    detail = service.get_product(product.id)
+
+    assert [variant.id for variant in catalog_product.card_variants] == [
+        large.id,
+        medium.id,
+        existing.id,
+    ]
+    assert [variant.id for variant in detail.variants] == [
+        large.id,
+        medium.id,
+        existing.id,
     ]
 
 

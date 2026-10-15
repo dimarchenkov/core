@@ -78,6 +78,10 @@ class CatalogVariantProductError(Exception):
     """Raised when a variant product is missing, deleted, or inactive."""
 
 
+class CatalogVariantOrderError(Exception):
+    """Raised when a Product Variant order is incomplete or inconsistent."""
+
+
 class CatalogVariantBarcodeConflictError(Exception):
     """Raised when one barcode is already assigned to another Variant."""
 
@@ -409,6 +413,7 @@ class CatalogVariantService:
     ) -> CatalogVariant:
         """Validate and stage a generated variant for the command owner to commit."""
         self._ensure_product_is_active(data.product_id)
+        sort_order = self._append_sort_order(data.product_id, actor_id=actor_id)
         if (reserved_sku is None) != (reserved_barcode is None):
             raise ValueError("Reserved SKU and barcode must be supplied together.")
         if reserved_sku is None:
@@ -434,6 +439,7 @@ class CatalogVariantService:
             sku=sku,
             barcode=barcode,
             barcode_source=source,
+            sort_order=sort_order,
             **variant_data,
             created_by_id=actor_id,
         )
@@ -535,6 +541,8 @@ class CatalogVariantService:
         changes = data.model_dump(exclude_unset=True)
         if "product_id" in changes:
             self._ensure_product_is_active(data.product_id)
+            if data.product_id != variant.product_id:
+                variant.sort_order = self._append_sort_order(data.product_id, actor_id=actor_id)
         for field, value in changes.items():
             setattr(variant, field, value)
         if actor_id is not None:
@@ -542,6 +550,33 @@ class CatalogVariantService:
 
         self._session.flush()
         return variant
+
+    def reorder_product_variants(
+        self,
+        product_id: UUIDv7,
+        variant_ids: Sequence[UUIDv7],
+        *,
+        actor_id: UUIDv7 | None = None,
+    ) -> Sequence[CatalogVariant]:
+        """Persist one complete Product-local Variant order using spaced values."""
+        product = self._product_repository.get_any_for_update(product_id)
+        if product is None or product.deleted_at is not None or not product.is_active:
+            raise CatalogVariantProductError
+
+        variants = list(self._repository.list_for_product(product_id, for_update=True))
+        requested_ids = list(variant_ids)
+        sibling_ids = {variant.id for variant in variants}
+        if len(requested_ids) != len(set(requested_ids)) or set(requested_ids) != sibling_ids:
+            raise CatalogVariantOrderError
+
+        by_id = {variant.id: variant for variant in variants}
+        for position, variant_id in enumerate(requested_ids, start=1):
+            variant = by_id[variant_id]
+            variant.sort_order = position * 10
+            if actor_id is not None:
+                variant.updated_by_id = actor_id
+        self._session.flush()
+        return self._repository.list_for_product(product_id)
 
     def delete_variant(self, variant_id: UUIDv7, *, actor_id: UUIDv7 | None = None) -> None:
         """Soft-delete a catalog variant while preserving its business history."""
@@ -556,6 +591,24 @@ class CatalogVariantService:
         product = self._product_repository.get(product_id)
         if product is None or not product.is_active:
             raise CatalogVariantProductError
+
+    def _append_sort_order(
+        self,
+        product_id: UUIDv7,
+        *,
+        actor_id: UUIDv7 | None,
+    ) -> int | None:
+        """Append only when this Product already uses explicit manual ordering."""
+        # Serialize sibling appends so concurrent creates cannot claim the same tail position.
+        self._product_repository.get_any_for_update(product_id)
+        variants = list(self._repository.list_for_product(product_id, for_update=True))
+        if not any(variant.sort_order is not None for variant in variants):
+            return None
+        for position, variant in enumerate(variants, start=1):
+            variant.sort_order = position * 10
+            if actor_id is not None:
+                variant.updated_by_id = actor_id
+        return (len(variants) + 1) * 10
 
     def _register_barcode(
         self,

@@ -25,6 +25,7 @@ from core.catalog.schemas import (
     CatalogVariantBarcodeRead,
     CatalogVariantBarcodeReplace,
     CatalogVariantCreate,
+    CatalogVariantOrderUpdate,
     CatalogVariantRead,
     CatalogVariantUpdate,
     CategoryCreate,
@@ -44,6 +45,7 @@ from core.catalog.service import (
     CatalogVariantBarcodeConflictError,
     CatalogVariantBarcodeDeleteError,
     CatalogVariantNotFoundError,
+    CatalogVariantOrderError,
     CatalogVariantProductError,
     CatalogVariantRestoreBarcodeConflictError,
     CatalogVariantRestoreProductError,
@@ -405,6 +407,37 @@ def update_product(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Product category is invalid.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+
+
+@product_router.put("/{product_id}/variant-order", response_model=list[CatalogVariantRead])
+def reorder_product_variants(
+    product_id: UUIDv7,
+    data: CatalogVariantOrderUpdate,
+    service: Annotated[CatalogVariantService, Depends(get_catalog_variant_service)],
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Sequence[CatalogVariant]:
+    """Persist the operator-defined display order for all Variants of one Product."""
+    try:
+        variants = service.reorder_product_variants(
+            product_id,
+            data.variant_ids,
+            actor_id=_actor_id(current_user),
+        )
+        session.commit()
+        return variants
+    except CatalogVariantProductError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail="Товар не найден или недоступен.") from exc
+    except CatalogVariantOrderError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Список вариантов изменился. Обновите карточку товара и повторите.",
         ) from exc
     except Exception:
         session.rollback()

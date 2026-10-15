@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.catalog.barcodes import BarcodeSource
@@ -78,6 +78,13 @@ class CatalogProduct(BaseModel):
     variants: Mapped[list[CatalogVariant]] = relationship(
         "CatalogVariant",
         back_populates="product",
+        order_by=lambda: (
+            CatalogVariant.sort_order.is_(None),
+            CatalogVariant.sort_order,
+            func.lower(CatalogVariant.title),
+            CatalogVariant.title,
+            CatalogVariant.id,
+        ),
     )
 
 
@@ -107,6 +114,7 @@ class CatalogVariant(BaseModel):
         default=dict,
         server_default="{}",
     )
+    sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

@@ -17,8 +17,13 @@ from core.catalog.barcodes import (
     normalize_barcode,
 )
 from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode, Category
+from core.catalog.repository import CatalogVariantRepository
 from core.catalog.schemas import CatalogVariantCreate, CatalogVariantUpdate
-from core.catalog.service import CatalogVariantProductError, CatalogVariantService
+from core.catalog.service import (
+    CatalogVariantOrderError,
+    CatalogVariantProductError,
+    CatalogVariantService,
+)
 from core.catalog.sku import SkuGenerator
 from core.database import get_session
 from core.identity.dependencies import get_current_user
@@ -112,6 +117,7 @@ def test_variant_service_generates_stable_sequential_skus(
         "barcode",
         "barcode_source",
         "attributes",
+        "sort_order",
         "is_active",
         "id",
         "created_at",
@@ -122,6 +128,152 @@ def test_variant_service_generates_stable_sequential_skus(
         "created_by_id",
         "updated_by_id",
     }
+
+
+def test_product_local_order_preserves_legacy_and_appends_after_manual_reorder(
+    session: Session,
+    active_product: CatalogProduct,
+) -> None:
+    """NULL rows stay alphabetical until an operator establishes Product-local order."""
+    service = CatalogVariantService(session)
+    small = service.create_variant(
+        CatalogVariantCreate(product_id=active_product.id, title="Small")
+    )
+    large = service.create_variant(
+        CatalogVariantCreate(product_id=active_product.id, title="Large")
+    )
+    medium = service.create_variant(
+        CatalogVariantCreate(product_id=active_product.id, title="Medium")
+    )
+    repository = CatalogVariantRepository(session)
+
+    assert [variant.title for variant in repository.list_for_product(active_product.id)] == [
+        "Large",
+        "Medium",
+        "Small",
+    ]
+    assert all(variant.sort_order is None for variant in (small, large, medium))
+
+    ordered = service.reorder_product_variants(
+        active_product.id,
+        [small.id, medium.id, large.id],
+    )
+    assert [variant.title for variant in ordered] == ["Small", "Medium", "Large"]
+    assert [variant.sort_order for variant in ordered] == [10, 20, 30]
+
+    appended = service.create_variant(
+        CatalogVariantCreate(product_id=active_product.id, title="Alphabetically first")
+    )
+    assert appended.sort_order == 40
+    effective_ids = [
+        variant.id for variant in repository.list_for_product(active_product.id)
+    ]
+    assert effective_ids[-1] == appended.id
+
+    service.delete_variant(medium.id)
+    assert small.sort_order == 10
+    assert large.sort_order == 30
+    assert appended.sort_order == 40
+
+
+def test_variant_order_is_scoped_per_product_and_has_stable_tie_fallback(
+    session: Session,
+    active_product: CatalogProduct,
+) -> None:
+    """Manual order never leaks across Products and ties remain deterministic."""
+    category_id = active_product.category_id
+    second_product = CatalogProduct(
+        title="Second camera",
+        slug="second-camera",
+        category_id=category_id,
+    )
+    session.add(second_product)
+    session.flush()
+    first_b = CatalogVariant(
+        product_id=active_product.id,
+        title="Beta",
+        sku="SKU-TIE-B",
+        barcode="4600000000101",
+        sort_order=10,
+    )
+    first_a = CatalogVariant(
+        product_id=active_product.id,
+        title="Alpha",
+        sku="SKU-TIE-A",
+        barcode="4600000000102",
+        sort_order=10,
+    )
+    second_z = CatalogVariant(
+        product_id=second_product.id,
+        title="Zulu",
+        sku="SKU-SECOND-Z",
+        barcode="4600000000103",
+    )
+    second_a = CatalogVariant(
+        product_id=second_product.id,
+        title="Alpha",
+        sku="SKU-SECOND-A",
+        barcode="4600000000104",
+    )
+    session.add_all([first_b, first_a, second_z, second_a])
+    session.flush()
+    repository = CatalogVariantRepository(session)
+
+    assert [variant.title for variant in repository.list_for_product(active_product.id)] == [
+        "Alpha",
+        "Beta",
+    ]
+    assert [variant.title for variant in repository.list_for_product(second_product.id)] == [
+        "Alpha",
+        "Zulu",
+    ]
+    assert all(
+        variant.sort_order is None
+        for variant in repository.list_for_product(second_product.id)
+    )
+
+
+def test_reorder_rejects_incomplete_or_cross_product_variant_lists(
+    session: Session,
+    active_product: CatalogProduct,
+) -> None:
+    """The command accepts exactly the complete sibling identity set."""
+    service = CatalogVariantService(session)
+    first = service.create_variant(
+        CatalogVariantCreate(product_id=active_product.id, title="First")
+    )
+    service.create_variant(
+        CatalogVariantCreate(product_id=active_product.id, title="Second")
+    )
+
+    with pytest.raises(CatalogVariantOrderError):
+        service.reorder_product_variants(active_product.id, [first.id])
+    with pytest.raises(CatalogVariantOrderError):
+        service.reorder_product_variants(active_product.id, [first.id, first.id])
+
+
+def test_reorder_route_persists_spaced_values(
+    client: TestClient,
+    active_product: CatalogProduct,
+) -> None:
+    """The Product command persists and returns the effective order."""
+    first = client.post(
+        "/api/catalog/variants",
+        json={"product_id": str(active_product.id), "title": "First"},
+    ).json()
+    second = client.post(
+        "/api/catalog/variants",
+        json={"product_id": str(active_product.id), "title": "Second"},
+    ).json()
+
+    response = client.put(
+        f"/api/catalog/products/{active_product.id}/variant-order",
+        json={"variant_ids": [second["id"], first["id"]]},
+    )
+
+    assert response.status_code == 200
+    assert [variant["id"] for variant in response.json()] == [second["id"], first["id"]]
+    assert [variant["sort_order"] for variant in response.json()] == [10, 20]
 
 
 def test_variant_route_owns_one_commit(

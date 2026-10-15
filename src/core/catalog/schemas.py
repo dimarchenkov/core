@@ -189,6 +189,14 @@ class CatalogVariantUpdate(PydanticBaseModel):
         return normalize_variant_attributes(value) if value is not None else None
 
 
+class CatalogVariantOrderUpdate(PydanticBaseModel):
+    """Complete ordered Variant identity list for one Product."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    variant_ids: list[UUIDv7] = Field(min_length=1)
+
+
 class CatalogVariantBarcodeRead(PydanticBaseModel):
     """One typed barcode registered to a Variant."""
 
@@ -214,6 +222,7 @@ class CatalogVariantRead(CatalogVariantBase):
     sku: str
     barcode: str
     barcode_source: BarcodeSource
+    sort_order: int | None
     created_at: datetime
     updated_at: datetime
     version: int

@@ -110,6 +110,21 @@ def test_variant_search_supports_russian_text_identifiers_price_and_current_barc
     assert service.search_variants("4699999999999", limit=12).items == []
 
 
+def test_broad_variant_search_uses_manual_order_inside_product(
+    session: Session,
+    catalog: tuple[CatalogProduct, CatalogVariant, CatalogVariant],
+) -> None:
+    """Search relevance ties preserve the Product's explicit business order."""
+    _, blue, black = catalog
+    blue.sort_order = 20
+    black.sort_order = 10
+    session.flush()
+
+    results = CatalogSearchService(session).search_variants("ручка", limit=12)
+
+    assert [item.id for item in results.items] == [black.id, blue.id]
+
+
 def test_product_search_resolves_children_deduplicates_and_finds_empty_product(
     session: Session, catalog: tuple[CatalogProduct, CatalogVariant, CatalogVariant]
 ) -> None:

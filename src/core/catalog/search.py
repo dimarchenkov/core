@@ -8,6 +8,7 @@ from sqlalchemy import Select, and_, case, func, select
 from sqlalchemy.orm import Session
 
 from core.catalog.models import CatalogProduct, CatalogVariant
+from core.catalog.ordering import variant_ordering_expressions, variant_ordering_key
 from core.catalog.schemas import (
     CatalogProductSearchPage,
     CatalogProductSearchResult,
@@ -126,8 +127,7 @@ class CatalogSearchService:
                 case((func.lower(CatalogVariant.barcode) == normalized, 0), else_=1),
                 case((func.lower(CatalogVariant.sku) == normalized, 0), else_=1),
                 CatalogProduct.title,
-                CatalogVariant.title,
-                CatalogVariant.id,
+                *variant_ordering_expressions(),
             )
         )
 
@@ -161,8 +161,7 @@ class CatalogSearchService:
                 row[0].barcode.casefold() != normalized,
                 row[0].sku.casefold() != normalized,
                 row[1].title.casefold(),
-                row[0].title.casefold(),
-                str(row[0].id),
+                *variant_ordering_key(row[0]),
             ),
         )
 

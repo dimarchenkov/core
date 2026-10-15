@@ -11,6 +11,7 @@ from core.catalog.models import (
     CatalogVariantBarcode,
     Category,
 )
+from core.catalog.ordering import variant_ordering_expressions
 from core.shared.db import UUIDv7
 
 
@@ -192,6 +193,22 @@ class CatalogVariantRepository:
             .with_for_update(read=True, key_share=True)
         )
         return self._session.scalar(statement)
+
+    def list_for_product(
+        self,
+        product_id: UUIDv7,
+        *,
+        for_update: bool = False,
+    ) -> Sequence[CatalogVariant]:
+        """Return all sibling Variants in their effective Product-local order."""
+        statement = (
+            select(CatalogVariant)
+            .where(CatalogVariant.product_id == product_id)
+            .order_by(*variant_ordering_expressions())
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return self._session.scalars(statement).all()
 
     def list(self) -> Sequence[CatalogVariant]:
         """Return non-deleted catalog variants ordered for display."""
