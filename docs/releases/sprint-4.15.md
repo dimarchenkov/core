@@ -44,8 +44,10 @@ tariff versions or archive operations do not rewrite snapshots.
 ## Derived order facts and READY
 
 `rental_total` is the Decimal sum of item agreed prices minus existing discounts.
-`recommended_deposit_total` is the sum of item snapshot recommendations. `deposit_amount` remains
-the separate order-level actual/agreed deposit fact and is not overwritten by recommendations.
+`required_deposit_total` (with `recommended_deposit_total` as a compatibility alias) is the sum of
+item snapshot recommendations. `deposit_received` remains the separate order-level operational
+fact and is not overwritten by recommendations. It is `NULL` until explicitly confirmed; an
+explicit zero is a confirmed fact, not an unset value.
 `requires_agreement` is true when any item snapshot requires it; it is not a duplicated editable
 flag.
 

@@ -37,7 +37,17 @@ Core
 - Product
 - Variant
 - Category
+- Collection
 - Brand
+
+Category задаёт Product taxonomy. Collection задаёт Variant-level merchandising: STATIC
+Collection хранит явный состав, DYNAMIC Collection вычисляет его из разрешённых live-фактов.
+Collection не заменяет Category и не переносит taxonomy на Variant. Активные Collection
+выступают Variant-level фильтрами существующего операционного Catalog UI.
+
+Product может хранить собственный ручной порядок Variant. Явные позиции идут первыми, а Variant
+без позиции сортируются по name и id; если позиций нет вовсе, исторический алфавитный порядок не
+меняется. Созданный Variant добавляется в конец только у Product, уже использующего ручной порядок.
 
 ---
 

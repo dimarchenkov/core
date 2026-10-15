@@ -12,19 +12,23 @@
 
 ## Current Sprint
 
-**Sprint 4.18 — Rental Return & Overdue**
+**Sprint 4.19 — Rental Asset Identification & Seals**
 
 **Stage: Implemented; physical UAT pending**
 
 ## Current goal and scope
 
-Добавить item-level возврат с серверным временем, производной просрочкой, фиксированными
-тарифными периодами без поминутной пропорции, осмотром, удержанием из залога и безопасным
-закрытием multi-item заказа только после возврата всех позиций.
+Добавить необязательные серийные номера и исторические контрольные пломбы физических
+`RentalAsset`, замораживать их в item-level снимке фактической выдачи и сохранять результат
+проверки пломб при возврате без изменения существующего lifecycle доступности.
 
-Sprint 4.14–4.17 реализованы; оставшийся physical multi-item/iPhone UAT и двусторонняя печать
-не отмечаются принятыми. Sprint 4.18 реализован и ожидает реальную проверку своевременного,
-льготного, просроченного, частичного и проблемного возврата.
+Sprint 4.14–4.18 реализованы; оставшийся physical multi-item/iPhone UAT и двусторонняя печать
+не отмечаются принятыми. Sprint 4.19 реализован и ожидает физическую проверку маркировки,
+замены пломб, выдачи и возврата на реальном оборудовании.
+
+Deposit UX correction отделяет вычисляемый `required_deposit_total` от подтверждаемого
+`deposit_received`: новый draft хранит `NULL`, READY лишь предлагает сумму всех item snapshots,
+явный ноль сохраняется отдельно, а return settlement не подставляет рекомендацию вместо денег.
 
 ## Preserved parallel delivery — Epic 9 Catalog Management
 
@@ -318,6 +322,39 @@ and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_
   заявляются реализованными без подтверждённой provider semantics;
 - automated checks реализованы; controlled live AQSI UAT и наблюдение одного periodic sweep ещё
   предстоят.
+
+### Catalog Collections (implemented, UAT pending)
+
+- Category остаётся Product taxonomy, а новая Collection группирует concrete Variant для
+  merchandising; Product/Variant ownership и Publishing не переработаны;
+- STATIC Collection хранит уникальные explicit memberships с add/remove через поиск Variant;
+  удаление связи не изменяет Variant или Product;
+- DYNAMIC Collection хранит только validated typed rules PRICE/CATEGORY/STOCK/IS_ACTIVE,
+  объединяет их через AND и вычисляет состав live по current retail Price, Product Category и
+  immutable Inventory ledger; materialized membership, OR, nested rules и SQL fragments нет;
+- тип STATIC/DYNAMIC неизменяем после создания; уникальный slug генерируется из имени и скрыт
+  от оператора; inactive Collection скрыта из Catalog sidebar, но остаётся в management UI;
+- `get_collection_variants` образует чистую boundary для будущего storefront/Publishing, однако
+  существующая AQSI/Tilda projection этим slice не меняется;
+- Catalog sidebar получил «Подборки»: активная STATIC/DYNAMIC Collection фильтрует обычные
+  Product cards до совпавших Variant, сохраняя фото, AQSI, остаток и добавление в Sale;
+  «Управление подборками» открывает STATIC member search/add/remove, DYNAMIC rule builder с
+  count preview, enable/disable и безопасное удаление только Collection-owned links; Variant
+  card сохраняет checkboxes/read-only automatic matches;
+- automated backend/UI checks реализованы; physical desktop и iPhone/Safari UAT ещё предстоит
+  выполнить. Подробности: [`docs/23_catalog_collections.md`](../docs/23_catalog_collections.md).
+
+### Manual Variant Ordering (implemented, UAT pending)
+
+- `CatalogVariant.sort_order` хранит nullable integer только в scope родительского Product;
+  существующие `NULL`-значения сохраняют стабильный алфавитный fallback по title/id;
+- Product detail показывает текущий effective order и даёт touch-friendly действия «Выше» /
+  «Ниже» без ручного ввода чисел; сохранение нормализует полный sibling order как `10, 20, 30…`;
+- новый Variant получает следующую позицию только если Product уже использует ручной порядок;
+  удаление Variant не уплотняет оставшиеся значения, поэтому gaps допустимы;
+- Catalog cards, Product detail, Variant search и DYNAMIC Collection results используют один
+  Product-local order. STATIC Collection сохраняет собственный membership order;
+- automated backend/UI checks реализованы; physical desktop и iPhone/Safari UAT остаётся выполнить.
 
 ## Definition of Done
 

@@ -179,6 +179,14 @@ durable checkpoints до внешних вызовов и не импортир�
 
 Сервисы не должны напрямую писать SQL вразнобой.
 
+Catalog Collections следуют той же границе: `CollectionService` валидирует тип коллекции,
+typed rules и команды membership, а `CollectionRepository` компилирует только фиксированный
+набор PRICE/CATEGORY/STOCK/IS_ACTIVE сравнений. Публичная application boundary
+`get_collection_variants(collection_id)` одинакова для STATIC и DYNAMIC Collection и не
+раскрывает будущим publishing clients способ хранения состава.
+Операционный Catalog использует ту же boundary для `collection_id`, после чего строит обычную
+Product projection только из совпавших Variant; отдельной Collection-card projection нет.
+
 ---
 
 ### Integration Layer

@@ -73,9 +73,10 @@ Ready for Sale requires a valid `retail` price.
 Channel-specific prices for AQSI, Tilda, Wildberries and Yandex Market are not part of the initial pricing foundation. AQSI initially receives the current retail price.
 
 These two rental values are catalog defaults, not contractual truth. When an asset is added to a
-draft, the operator may override the proposal and `RentalOrderItem.agreed_price` plus
-`RentalOrder.deposit_amount` preserve the actual deal. Duration-based tariffs, overdue rules and
-other rental calculations remain future Rental concepts.
+draft, `RentalOrderItem.agreed_price` and its immutable tariff snapshot preserve the contractual
+deal. `RentalOrder.required_deposit_total` is derived from all item snapshots, while the separate
+nullable `RentalOrder.deposit_received` records only the amount explicitly confirmed as physically
+received. Later tariff changes rewrite neither fact.
 
 ## Money rules
 

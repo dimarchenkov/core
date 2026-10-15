@@ -13,11 +13,12 @@
 
 ## Current delivery order
 
-1. **Now:** Sprint 4.18 — Rental Return & Overdue (implemented; physical UAT pending).
-2. **Preserved UAT:** Sprint 4.17 — Rental Agreements (physical duplex print pending).
-3. **Preserved UAT:** Sprint 4.16 — Rental Operations Workspace & Issue.
-4. **Preserved physical UAT debt:** Sprint 4.15 — Puzzi + Bosch multi-item/iPhone acceptance.
-5. **Preserved parallel follow-up:** Sprint 7.13 — AQSI Automatic Synchronization.
+1. **Now:** Sprint 4.19 — Rental Asset Identification & Seals (implemented; physical UAT pending).
+2. **Preserved UAT:** Sprint 4.18 — Rental Return & Overdue.
+3. **Preserved UAT:** Sprint 4.17 — Rental Agreements (physical duplex print pending).
+4. **Preserved UAT:** Sprint 4.16 — Rental Operations Workspace & Issue.
+5. **Preserved physical UAT debt:** Sprint 4.15 — Puzzi + Bosch multi-item/iPhone acceptance.
+6. **Preserved parallel follow-up:** Sprint 7.13 — AQSI Automatic Synchronization.
 
 Intake после нескольких real-world UAT операционно достаточно пригоден; его возможный polish не
 должен превращаться в новый redesign. Rental остаётся реализованным первоклассным доменом;
@@ -209,7 +210,9 @@ Sprint 10E — Catalog & Rental Operations UX ✅; Sprint 10F — Rental History
 Sprint 10G — Rental Economics & Business Insights ✅; Sprint 4.14 — Rental Tariffs ✅;
 Sprint 4.15 — Rental Draft & Tariff Snapshot ✅ implementation / physical UAT pending;
 Sprint 4.16 — Rental Operations Workspace & Issue ✅ implementation / physical UAT pending;
-Sprint 4.17 — Rental Agreements ✅ implementation / physical print UAT pending.
+Sprint 4.17 — Rental Agreements ✅ implementation / physical print UAT pending;
+Sprint 4.18 — Rental Return & Overdue ✅ implementation / physical UAT pending;
+Sprint 4.19 — Rental Asset Identification & Seals ✅ implementation / physical UAT pending.
 
 Новая последовательность follow-up использует действующий формат `Epic.Sprint` с глобальным
 номером Sprint. Исторические Sprint 9–10G не переименовываются:
@@ -218,7 +221,8 @@ Sprint 4.17 — Rental Agreements ✅ implementation / physical print UAT pendin
 - Sprint 4.15 — Rental Draft & Tariff Snapshot;
 - Sprint 4.16 — Rental Operations Workspace & Issue;
 - Sprint 4.17 — Rental Agreements;
-- Sprint 4.18 — Rental Return & Overdue.
+- Sprint 4.18 — Rental Return & Overdue;
+- Sprint 4.19 — Rental Asset Identification & Seals.
 
 **Current priority:** demand-driven active follow-up. Реальный спрос появился, и Karcher Puzzi
 10/1 входит в эксплуатацию. Реализованная доменная модель и завершённая работа сохраняются;
@@ -296,6 +300,29 @@ Sprint 4.17 — Rental Agreements ✅ implementation / physical print UAT pendin
 - [ ] Physical UAT: двусторонняя A4 печать, handwritten fields, Puzzi, multi-item, reprint/hash
   и фактическая выдача.
 
+### Sprint 4.18 — Rental Return & Overdue
+
+- [x] Item-level и multi-item возврат используют серверное время и immutable tariff snapshot.
+- [x] Просрочка, grace и начисление следующего полного тарифного периода рассчитываются без
+  поминутной пропорции.
+- [x] Осмотр, компенсация, применение фактически полученного залога и финальный расчёт
+  сохраняются в истории.
+- [ ] Physical UAT: своевременный, льготный, просроченный, частичный и проблемный возврат.
+
+### Sprint 4.19 — Rental Asset Identification & Seals
+
+- [x] У `RentalAsset` есть необязательный серийный номер и append-only история пломб со
+  статусами ACTIVE/REMOVED/BROKEN; отсутствие идентификации не блокирует выдачу.
+- [x] При выдаче в `RentalOrderItem` фиксируются код актива, серийный номер и активные пломбы.
+- [x] Договор выводит только реально заполненную идентификацию и сохраняет её в immutable
+  agreement snapshot.
+- [x] Возврат показывает снимок выдачи, позволяет отметить OK/BROKEN/MISSING/MISMATCH и требует
+  комментарий для проблемного результата.
+- [x] Результат проверки сохраняет ожидаемое место/номер, результат и комментарий; текущие
+  данные `RentalAsset` не используются для пересчёта истории.
+- [ ] Physical UAT: реальные серийные номера, три пломбы, замена одной пломбы, выдача, договор и
+  возврат с нормальным и проблемным результатом на desktop/iPhone.
+
 После первого полноценного пользовательского тестирования ежедневный UX каталога и аренды
 выделен в отдельный Sprint до расширения истории, обслуживания и экономики.
 
@@ -370,6 +397,8 @@ Sprint 4.17 — Rental Agreements ✅ implementation / physical print UAT pendin
 - [x] Operational `/rent`, атомарная выдача и производные item-level таймеры — Sprint 4.16.
 - [x] Rental Agreements/PDF — Sprint 4.17 (physical print UAT pending).
 - [x] Overdue charging сверх snapshotted grace/terms — Sprint 4.18 (physical UAT pending).
+- [x] Optional serial/seal identification, issue snapshot and return verification — Sprint 4.19
+  (physical UAT pending).
 - [ ] Метрики конфликтов доступности, просрочек и ошибок операций аренды.
 
 ### Milestone

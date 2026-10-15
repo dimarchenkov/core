@@ -18,8 +18,13 @@
   Partial return shows a provisional remainder; refund and uncovered amount become final only
   when the order closes.
 - The contractual `required_deposit_total` is derived from every immutable item tariff snapshot.
-  The separately persisted order `deposit_amount` remains the amount actually received and is the
-  only amount available for settlement. A contractual requirement never fabricates a payment.
+  The separately persisted order `deposit_received` (legacy storage column `deposit_amount`)
+  remains the amount actually received and is the only amount available for settlement. A
+  contractual requirement never fabricates a payment.
+- `NULL` means the receipt was not confirmed; explicit `0` means the operator confirmed that no
+  deposit was received. A new draft stays `NULL` until the operator saves the suggested or edited
+  amount. Return mutation is blocked while the receipt is unconfirmed, but its preview remains
+  available with an explicit warning.
 
 ## Interface
 
@@ -37,6 +42,10 @@
 
 `0044_rental_return_overdue` adds explicit return condition, frozen overdue state/minutes/charge,
 damage charge, deposit allocation and the immutable return calculation snapshot.
+
+Correction migration `0048_rental_deposit_confirmation` makes the legacy `deposit_amount` storage
+nullable so unconfirmed receipt is not collapsed into zero. Existing non-null historical values
+are preserved unchanged.
 
 ## Physical UAT pending
 
