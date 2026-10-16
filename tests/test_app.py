@@ -43,6 +43,11 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert script.status_code == 200
     assert "/api/intake/sessions" in script.text
     assert "saveAllItemForms" in script.text
+    assert "/events" in script.text
+    assert "text/event-stream" in script.text
+    assert "expected_intake_version" in script.text
+    assert "Синхронизировано" in script.text
+    assert "25000" in script.text
     assert "missing_retail_price" in script.text
     assert 'name="rental_quantity"' in script.text
     assert "Из них в аренду" in script.text

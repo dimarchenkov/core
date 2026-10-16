@@ -14,6 +14,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from core.catalog.service import CatalogProductCategoryError, CatalogVariantProductError
@@ -50,6 +51,7 @@ from core.intake.draft_service import (
 from core.intake.enums import IntakeSessionStatus
 from core.intake.labels import IntakeDraftLabelNotFoundError, IntakeDraftLabelService
 from core.intake.read_service import IntakeDraftReadService, IntakeSessionNotFoundError
+from core.intake.realtime import IntakeVersionConflictError, stream_intake_events
 from core.intake.schemas import (
     ExistingIntakeItemCreate,
     IntakeAbandon,
@@ -89,6 +91,18 @@ router = APIRouter(
 def _actor_id(current_user: User | None) -> UUIDv7 | None:
     """Return an actor id while allowing existing system-operation test overrides."""
     return current_user.id if current_user is not None else None
+
+
+def _version_conflict(exc: IntakeVersionConflictError) -> HTTPException:
+    """Return one stable optimistic-concurrency response for every Intake command."""
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "stale_intake_version",
+            "message": "Приёмка изменилась на другом устройстве. Показана актуальная версия.",
+            "current_version": exc.current_version,
+        },
+    )
 
 
 def get_intake_service(session: Annotated[Session, Depends(get_session)]) -> IntakeService:
@@ -231,6 +245,27 @@ def get_intake_session(
         raise HTTPException(status_code=404, detail="Intake session not found.") from exc
 
 
+@router.get("/sessions/{session_id}/events")
+def get_intake_session_events(
+    session_id: UUIDv7,
+    service: Annotated[IntakeDraftReadService, Depends(get_intake_draft_read_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> StreamingResponse:
+    """Stream small authenticated change notifications for one owned Intake."""
+    try:
+        service.get_session(session_id, actor_id=current_user.id)
+    except IntakeSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Intake session not found.") from exc
+    return StreamingResponse(
+        stream_intake_events(session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.patch("/sessions/{session_id}", response_model=IntakeSessionRead)
 def update_intake_session(
     session_id: UUIDv7,
@@ -247,6 +282,8 @@ def update_intake_session(
         raise HTTPException(status_code=409, detail="Intake session is not a draft.") from exc
     except IntakeSupplierError as exc:
         raise HTTPException(status_code=400, detail="Intake Supplier is invalid.") from exc
+    except IntakeVersionConflictError as exc:
+        raise _version_conflict(exc) from exc
 
 
 @router.post(
@@ -308,6 +345,8 @@ async def add_new_intake_item(
             status_code=409,
             detail="Barcode already identifies an existing Variant.",
         ) from exc
+    except IntakeVersionConflictError as exc:
+        raise _version_conflict(exc) from exc
     except IntakeItemFieldError as exc:
         raise HTTPException(
             status_code=400,
@@ -356,6 +395,8 @@ def update_intake_item(
             status_code=409,
             detail="Barcode already identifies a Variant.",
         ) from exc
+    except IntakeVersionConflictError as exc:
+        raise _version_conflict(exc) from exc
 
 
 @router.put(
@@ -368,6 +409,7 @@ async def replace_intake_item_image(
     service: Annotated[IntakeDraftWorkflow, Depends(get_intake_draft_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
     file: Annotated[UploadFile, File(...)],
+    expected_intake_version: Annotated[int | None, Form(ge=1)] = None,
 ) -> IntakeItemDraftRead:
     """Replace a Product or Variant draft photo before completion."""
     content = await file.read(ImageService.max_source_size_bytes + 1)
@@ -378,6 +420,7 @@ async def replace_intake_item_image(
             file.filename or "upload",
             content,
             actor_id=current_user.id,
+            expected_intake_version=expected_intake_version,
         )
     except (IntakeSessionNotFoundError, IntakeItemNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Intake item not found.") from exc
@@ -387,6 +430,8 @@ async def replace_intake_item_image(
         raise HTTPException(status_code=413, detail="Image file exceeds the 15 MB limit.") from exc
     except UnsupportedImageError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
+    except IntakeVersionConflictError as exc:
+        raise _version_conflict(exc) from exc
 
 
 @router.post(
@@ -407,6 +452,7 @@ def abandon_intake_item(
             item_id,
             data.reason,
             actor_id=current_user.id,
+            expected_intake_version=data.expected_intake_version,
         )
     except (IntakeSessionNotFoundError, IntakeItemNotFoundError) as exc:
         raise HTTPException(status_code=404, detail="Intake item not found.") from exc
@@ -417,6 +463,8 @@ def abandon_intake_item(
             status_code=409,
             detail="Remove this draft Product's additional Variants first.",
         ) from exc
+    except IntakeVersionConflictError as exc:
+        raise _version_conflict(exc) from exc
 
 
 @router.post("/sessions/{session_id}/abandon", response_model=IntakeSessionRead)
@@ -432,11 +480,14 @@ def abandon_intake_session(
             session_id,
             data.reason,
             actor_id=current_user.id,
+            expected_intake_version=data.expected_intake_version,
         )
     except IntakeSessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Intake session not found.") from exc
     except IntakeSessionNotDraftError as exc:
         raise HTTPException(status_code=409, detail="Intake session is not a draft.") from exc
+    except IntakeVersionConflictError as exc:
+        raise _version_conflict(exc) from exc
 
 
 @router.post("/sessions/{session_id}/complete", response_model=IntakeCompletionRead)
@@ -444,10 +495,15 @@ def complete_intake_session(
     session_id: UUIDv7,
     service: Annotated[CompleteIntakeWorkflow, Depends(get_complete_intake_workflow)],
     current_user: Annotated[User, Depends(get_current_user)],
+    expected_intake_version: Annotated[int | None, Query(ge=1)] = None,
 ) -> IntakeCompletionRead:
     """Atomically materialize catalog facts, post Receipt, and complete the session."""
     try:
-        return service.complete(session_id, actor_id=current_user.id)
+        return service.complete(
+            session_id,
+            actor_id=current_user.id,
+            expected_intake_version=expected_intake_version,
+        )
     except IntakeCompletionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Intake session not found.") from exc
     except IntakeCompletionAbandonedError as exc:
@@ -459,6 +515,8 @@ def complete_intake_session(
             status_code=409,
             detail="Intake session has inconsistent completion state; no changes were applied.",
         ) from exc
+    except IntakeVersionConflictError as exc:
+        raise _version_conflict(exc) from exc
 
 
 @router.get(

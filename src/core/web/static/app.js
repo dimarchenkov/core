@@ -6,9 +6,21 @@ let zxingLoader = null;
 let intakeSearchTimer = null;
 let scannerService = null;
 let salesProgressTimer = null;
+let intakeRealtimeController = null;
+let intakeRealtimeSessionId = null;
+let intakeRealtimeReconnectTimer = null;
+let intakeRealtimePollTimer = null;
+let intakeRealtimeRefreshTimer = null;
+let intakeRealtimeRefreshInFlight = null;
+let intakeRealtimePendingVersion = 0;
+let intakeRealtimeForceRefresh = false;
+let intakeRealtimeRetryMs = 1000;
+let intakeRealtimeStatus = "connecting";
+let intakeWriteChain = Promise.resolve();
 
 function recordRoute(name, data = {}) {
   if (name !== "intake") scannerService?.clearLocalHandler();
+  if (name !== "intake") stopIntakeRealtime();
   const route = { name, ...data };
   if (restoringHistory) return;
   if (window.history.state?.coreRoute?.name === name
@@ -418,15 +430,172 @@ async function api(path, options = {}) {
     try {
       const payload = await response.json();
       responseDetail = payload.detail;
-      detail = typeof payload.detail === "string" ? payload.detail : detail;
+      detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.message || detail;
     } catch { /* response is not JSON */ }
     const error = new Error(detail);
     error.status = response.status;
     error.detail = responseDetail;
+    if (response.status === 409 && responseDetail?.code === "stale_intake_version") {
+      scheduleIntakeRefresh(responseDetail.current_version, true);
+    }
     throw error;
   }
   if (response.status === 204) return null;
   return response.json();
+}
+
+function serializeIntakeWrite(action) {
+  const next = intakeWriteChain.then(action, action);
+  intakeWriteChain = next.catch(() => {});
+  return next;
+}
+
+function updateIntakeRealtimeStatus(status) {
+  intakeRealtimeStatus = status;
+  const indicator = document.querySelector("#intake-sync-status");
+  if (!indicator) return;
+  indicator.classList.toggle("connected", status === "connected");
+  indicator.textContent = status === "connected" ? "● Синхронизировано" : "● Переподключение…";
+}
+
+function startIntakeRealtime(sessionId) {
+  stopIntakeRealtime();
+  intakeRealtimeSessionId = sessionId;
+  intakeRealtimeRetryMs = 1000;
+  updateIntakeRealtimeStatus("connecting");
+  connectIntakeRealtime();
+}
+
+function stopIntakeRealtime() {
+  intakeRealtimeController?.abort();
+  intakeRealtimeController = null;
+  intakeRealtimeSessionId = null;
+  clearTimeout(intakeRealtimeReconnectTimer);
+  clearTimeout(intakeRealtimeRefreshTimer);
+  clearInterval(intakeRealtimePollTimer);
+  intakeRealtimeReconnectTimer = null;
+  intakeRealtimeRefreshTimer = null;
+  intakeRealtimePollTimer = null;
+  intakeRealtimePendingVersion = 0;
+  intakeRealtimeForceRefresh = false;
+}
+
+function startIntakeFallbackPolling() {
+  if (intakeRealtimePollTimer) return;
+  intakeRealtimePollTimer = setInterval(() => scheduleIntakeRefresh(null, true), 25000);
+}
+
+async function connectIntakeRealtime() {
+  const sessionId = intakeRealtimeSessionId;
+  if (!sessionId || !state.token) return;
+  const controller = new AbortController();
+  intakeRealtimeController = controller;
+  let connected = false;
+  try {
+    const response = await fetch(`/api/intake/sessions/${sessionId}/events`, {
+      headers: { Authorization: `Bearer ${state.token}`, Accept: "text/event-stream" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (response.status === 401) {
+      logout();
+      return;
+    }
+    if (!response.ok || !response.body) throw new Error(`SSE ${response.status}`);
+    connected = true;
+    intakeRealtimeRetryMs = 1000;
+    clearInterval(intakeRealtimePollTimer);
+    intakeRealtimePollTimer = null;
+    updateIntakeRealtimeStatus("connected");
+    scheduleIntakeRefresh(null, true);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (intakeRealtimeSessionId === sessionId) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replaceAll("\r\n", "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = block.split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) {
+          try {
+            const event = JSON.parse(data);
+            if (event.intake_id === sessionId && event.version > (state.session?.version || 0)) {
+              scheduleIntakeRefresh(event.version);
+            }
+          } catch { /* malformed transport notification is ignored */ }
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+  } catch (error) {
+    if (error.name === "AbortError") return;
+  } finally {
+    if (intakeRealtimeSessionId !== sessionId || controller.signal.aborted) return;
+    intakeRealtimeController = null;
+    updateIntakeRealtimeStatus("reconnecting");
+    startIntakeFallbackPolling();
+    const delay = connected ? 1000 : intakeRealtimeRetryMs;
+    intakeRealtimeRetryMs = Math.min(intakeRealtimeRetryMs * 2, 15000);
+    intakeRealtimeReconnectTimer = setTimeout(connectIntakeRealtime, delay);
+  }
+}
+
+function scheduleIntakeRefresh(version = null, force = false) {
+  if (!intakeRealtimeSessionId) return;
+  if (!force && version !== null && version <= (state.session?.version || 0)) return;
+  if (version !== null) intakeRealtimePendingVersion = Math.max(intakeRealtimePendingVersion, version);
+  intakeRealtimeForceRefresh ||= force;
+  clearTimeout(intakeRealtimeRefreshTimer);
+  intakeRealtimeRefreshTimer = setTimeout(() => refreshIntakeFromServer(), 180);
+}
+
+async function refreshIntakeFromServer() {
+  if (intakeRealtimeRefreshInFlight) return intakeRealtimeRefreshInFlight;
+  const sessionId = intakeRealtimeSessionId;
+  if (!sessionId || state.session?.id !== sessionId) return;
+  intakeRealtimePendingVersion = 0;
+  intakeRealtimeForceRefresh = false;
+  intakeRealtimeRefreshInFlight = (async () => {
+    try {
+      const latest = await api(`/api/intake/sessions/${sessionId}`);
+      const changed = latest.version > (state.session?.version || 0)
+        || latest.status !== state.session?.status;
+      state.session = latest;
+      if (!changed) return;
+      await loadItemDisplays();
+      if (latest.status === "completed") {
+        state.result = await api(`/api/intake/sessions/${sessionId}/complete`);
+        stopIntakeRealtime();
+        await loadIntakeAqsi();
+        renderResult();
+        return;
+      }
+      if (latest.status !== "draft") stopIntakeRealtime();
+      renderWorkspace();
+    } catch (error) {
+      if (error.status === 404) {
+        stopIntakeRealtime();
+        state.session = null;
+        await loadHome();
+        showToast("Приёмка удалена на другом устройстве");
+      }
+    } finally {
+      intakeRealtimeRefreshInFlight = null;
+      if (intakeRealtimeSessionId === sessionId && (
+        intakeRealtimeForceRefresh
+        || intakeRealtimePendingVersion > (state.session?.version || 0)
+      )) scheduleIntakeRefresh(intakeRealtimePendingVersion, intakeRealtimeForceRefresh);
+    }
+  })();
+  return intakeRealtimeRefreshInFlight;
 }
 
 async function openAuthenticatedFile(path, print = false) {
@@ -449,6 +618,7 @@ async function openAuthenticatedFile(path, print = false) {
 }
 
 function logout() {
+  stopIntakeRealtime();
   sessionStorage.removeItem("core.token");
   state.token = null;
   state.user = null;
@@ -1379,6 +1549,7 @@ async function openSession(id) {
     state.result = null;
     await loadItemDisplays();
     renderWorkspace();
+    startIntakeRealtime(id);
   } catch (error) { showToast(error.message, true); }
 }
 
@@ -1413,6 +1584,7 @@ async function loadItemDisplays() {
 
 function renderWorkspace() {
   if (state.result) return renderResult();
+  if (state.session.status !== "draft") return renderClosedIntake();
   const activeItems = state.session.items.filter((item) => !item.abandoned_at);
   const productGroups = groupIntakeItems(activeItems);
   const productCount = productGroups.length;
@@ -1420,7 +1592,7 @@ function renderWorkspace() {
   root.innerHTML = `
     <div class="shell">
       ${topbar(true)}
-      <p class="eyebrow">Черновик сохраняется по шагам</p>
+      <div class="intake-workspace-status"><p class="eyebrow">Черновик сохраняется по шагам</p><span id="intake-sync-status" class="intake-sync-status ${intakeRealtimeStatus === "connected" ? "connected" : ""}">${intakeRealtimeStatus === "connected" ? "● Синхронизировано" : "● Переподключение…"}</span></div>
       <h1>Что приехало?</h1>
       <p class="muted">Отсканируйте знакомый товар или сразу сфотографируйте новый.</p>
       <div class="actions">
@@ -1501,6 +1673,21 @@ function renderWorkspace() {
     void handleIntakeScanner(value);
     return true;
   });
+}
+
+function renderClosedIntake() {
+  const abandoned = state.session.status === "abandoned";
+  root.innerHTML = `<div class="shell">
+    ${topbar()}
+    <section class="card" style="margin-top:36px">
+      <p class="eyebrow">Приёмка закрыта</p>
+      <h1>${abandoned ? "Приёмка отменена" : "Приёмка проведена"}</h1>
+      <p class="muted">Редактирование больше недоступно. Состояние обновлено с сервера.</p>
+      <button class="button full" id="closed-intake-home" type="button">На рабочее место</button>
+    </section>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#closed-intake-home")?.addEventListener("click", loadHome);
 }
 
 function bindCatalogSearch(kind) {
@@ -2030,7 +2217,10 @@ async function abandonDraftItem(itemId) {
     await flushProductAutosaves();
     await api(`/api/intake/sessions/${state.session.id}/items/${itemId}/abandon`, {
       method: "POST",
-      body: JSON.stringify({ reason: "Удалено оператором из черновика" }),
+      body: JSON.stringify({
+        reason: "Удалено оператором из черновика",
+        expected_intake_version: state.session.version,
+      }),
     });
     await refreshSession();
     showToast("Позиция удалена из черновика");
@@ -2044,6 +2234,7 @@ async function replaceDraftImage(input) {
   data.append("file", file);
   try {
     await flushProductAutosaves();
+    data.append("expected_intake_version", String(state.session.version));
     await api(`/api/intake/sessions/${state.session.id}/items/${input.dataset.replaceItemImage}/image`, { method: "PUT", body: data });
     await refreshSession();
     showToast("Фото обновлено");
@@ -2120,7 +2311,9 @@ window.addEventListener("beforeunload", (event) => {
 });
 
 async function flushProductAutosaves() {
-  await Promise.all([...document.querySelectorAll("[data-product-form]")].map(persistProductForm));
+  for (const form of document.querySelectorAll("[data-product-form]")) {
+    await persistProductForm(form);
+  }
 }
 
 function nullableText(value) {
@@ -2177,38 +2370,47 @@ async function persistProductForm(form) {
 }
 
 async function sendProductForm(form) {
-  const item = state.session.items.find((value) => value.id === form.dataset.productForm);
-  if (!item) return;
-  const data = new FormData(form);
-  const updated = await api(`/api/intake/sessions/${state.session.id}/items/${item.id}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      category_id: nullableText(data.get("category_id")),
-      product_title: nullableText(data.get("product_title")),
-      product_description: nullableText(data.get("product_description")),
-    }),
+  return serializeIntakeWrite(async () => {
+    const item = state.session.items.find((value) => value.id === form.dataset.productForm);
+    if (!item) return;
+    const data = new FormData(form);
+    const updated = await api(`/api/intake/sessions/${state.session.id}/items/${item.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        category_id: nullableText(data.get("category_id")),
+        product_title: nullableText(data.get("product_title")),
+        product_description: nullableText(data.get("product_description")),
+        expected_intake_version: state.session.version,
+      }),
+    });
+    state.session.version = updated.intake_version ?? state.session.version;
+    state.session.items = state.session.items.map((value) => value.id === updated.id ? updated : value);
+    // Refresh only backend-derived hints: never replace unsaved Variant form inputs.
+    updateItemRequirements(updated);
   });
-  state.session.items = state.session.items.map((value) => value.id === updated.id ? updated : value);
-  // Refresh only backend-derived hints: never replace unsaved Variant form inputs.
-  updateItemRequirements(updated);
 }
 
 async function persistItemForm(form) {
-  const item = state.session.items.find((value) => value.id === form.dataset.itemForm);
-  if (!item) return;
-  const updated = await api(`/api/intake/sessions/${state.session.id}/items/${item.id}`, {
-    method: "PATCH",
-    body: JSON.stringify(buildItemPayload(form, item)),
+  return serializeIntakeWrite(async () => {
+    const item = state.session.items.find((value) => value.id === form.dataset.itemForm);
+    if (!item) return;
+    const payload = buildItemPayload(form, item);
+    payload.expected_intake_version = state.session.version;
+    const updated = await api(`/api/intake/sessions/${state.session.id}/items/${item.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    state.session.version = updated.intake_version ?? state.session.version;
+    state.session.items = state.session.items.map((value) => value.id === updated.id ? updated : value);
   });
-  state.session.items = state.session.items.map((value) => value.id === updated.id ? updated : value);
 }
 
 async function saveAllItemForms() {
   if (!state.session || state.session.status !== "draft") return;
   const productForms = [...document.querySelectorAll("[data-product-form]")];
   const forms = [...document.querySelectorAll("[data-item-form]")];
-  await Promise.all(productForms.map(persistProductForm));
-  await Promise.all(forms.map(persistItemForm));
+  for (const form of productForms) await persistProductForm(form);
+  for (const form of forms) await persistItemForm(form);
 }
 
 async function saveSupplier(event) {
@@ -2217,7 +2419,10 @@ async function saveSupplier(event) {
     await saveAllItemForms();
     state.session = await api(`/api/intake/sessions/${state.session.id}`, {
       method: "PATCH",
-      body: JSON.stringify({ supplier_id: supplierId }),
+      body: JSON.stringify({
+        supplier_id: supplierId,
+        expected_intake_version: state.session.version,
+      }),
     });
     renderWorkspace();
   } catch (error) { showToast(error.message, true); }
@@ -2235,8 +2440,11 @@ async function completeSession() {
   try {
     state.session = await api(`/api/intake/sessions/${sessionId}`);
     if (state.session.status === "draft") await saveAllItemForms();
-    state.result = await api(`/api/intake/sessions/${sessionId}/complete`, { method: "POST" });
+    const expectedVersion = state.session.version;
+    state.result = await api(`/api/intake/sessions/${sessionId}/complete?expected_intake_version=${expectedVersion}`, { method: "POST" });
     state.session.status = "completed";
+    state.session.version = state.result.intake_version;
+    stopIntakeRealtime();
     await loadIntakeAqsi();
     renderResult();
   } catch (error) {
@@ -2259,6 +2467,8 @@ async function recoverCompletedIntake(sessionId) {
     if (current.status !== "completed") return false;
     state.session = current;
     state.result = await api(`/api/intake/sessions/${sessionId}/complete`, { method: "POST" });
+    state.session.version = state.result.intake_version;
+    stopIntakeRealtime();
     await loadIntakeAqsi();
     renderResult();
     return true;

@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from core.intake.enums import IntakeSessionStatus
+from core.intake.realtime import stage_intake_event
 from core.intake.repository import IntakeSessionRepository
 from core.media.service import ImageService
 from core.shared.db import UUIDv7
@@ -50,5 +51,12 @@ class DeleteIntakeDraftWorkflow:
             self._session.flush()
         for image_id in image_ids:
             self._images.delete_image(image_id, actor_id=actor_id)
+        deleted_version = intake.version + 1
+        stage_intake_event(
+            self._session,
+            session_id,
+            deleted_version,
+            event_type="intake.deleted",
+        )
         self._session.delete(intake)
         self._session.commit()

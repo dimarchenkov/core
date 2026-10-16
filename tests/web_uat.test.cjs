@@ -26,6 +26,8 @@ function setup() {
     URLSearchParams,
     setTimeout(fn, ms) { const id = ++sequence; timers.set(id, { fn, ms }); return id; },
     clearTimeout(id) { timers.delete(id); },
+    setInterval(fn, ms) { const id = ++sequence; timers.set(id, { fn, ms }); return id; },
+    clearInterval(id) { timers.delete(id); },
     FormData: class { constructor() {} get(key) { return inputs[key].value; } },
   });
   vm.runInContext(source, context);
@@ -105,7 +107,7 @@ test('Input during an in-flight save is serialized and latest value wins', async
   s.inputs.product_title.value = 'First';
   s.inputs.product_title.handlers.input();
   const saving = s.context.persistProductForm(s.form);
-  await Promise.resolve();
+  while (!release) await new Promise(resolve => setImmediate(resolve));
   s.inputs.product_title.value = 'Latest';
   s.inputs.product_title.handlers.input();
   assert.notEqual(s.status.textContent, 'Сохранено');
@@ -123,14 +125,14 @@ test('Intake completion coalesces double submit and skips stale saves after comp
   s.context.document.querySelectorAll = () => [];
   s.context.loadIntakeAqsi = async () => {};
   s.context.renderResult = () => {};
-  vm.runInContext('state.session = {id:"intake", status:"draft", items:[]}; state.result = null;', s.context);
+  vm.runInContext('state.session = {id:"intake", version:1, status:"draft", items:[]}; state.result = null;', s.context);
   let releaseCompletion;
   const calls = [];
   s.context.api = async (url, options = {}) => {
     calls.push({url, method:options.method || 'GET'});
-    if (!options.method) return {id:'intake', status:'draft', items:[]};
+    if (!options.method) return {id:'intake', version:1, status:'draft', items:[]};
     await new Promise(resolve => { releaseCompletion = resolve; });
-    return {items:[], readiness:[], receipt:{id:'receipt'}};
+    return {intake_version:2, items:[], readiness:[], receipt:{id:'receipt'}};
   };
 
   const first = s.context.completeSession();
@@ -150,19 +152,19 @@ test('Stale Intake screen detects completed server state before saving item form
   s.context.document.querySelectorAll = () => { throw new Error('stale forms must not be read'); };
   s.context.loadIntakeAqsi = async () => {};
   s.context.renderResult = () => {};
-  vm.runInContext('state.session = {id:"intake", status:"draft", items:[]}; state.result = null;', s.context);
+  vm.runInContext('state.session = {id:"intake", version:1, status:"draft", items:[]}; state.result = null;', s.context);
   const calls = [];
   s.context.api = async (url, options = {}) => {
     calls.push({url, method:options.method || 'GET'});
-    if (!options.method) return {id:'intake', status:'completed', items:[]};
-    return {items:[], readiness:[], receipt:{id:'receipt'}};
+    if (!options.method) return {id:'intake', version:2, status:'completed', items:[]};
+    return {intake_version:2, items:[], readiness:[], receipt:{id:'receipt'}};
   };
 
   await s.context.completeSession();
 
   assert.deepEqual(calls, [
     {url:'/api/intake/sessions/intake', method:'GET'},
-    {url:'/api/intake/sessions/intake/complete', method:'POST'},
+    {url:'/api/intake/sessions/intake/complete?expected_intake_version=2', method:'POST'},
   ]);
   assert.equal(vm.runInContext('state.session.status', s.context), 'completed');
 });

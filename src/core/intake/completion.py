@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ from core.catalog.schemas import CatalogProductCreate, CatalogVariantCreate
 from core.catalog.service import CatalogProductService, CatalogVariantService
 from core.intake.enums import IntakeItemKind, IntakeSessionStatus
 from core.intake.models import IntakeItemDraft, IntakeSession
+from core.intake.realtime import commit_intake_change, ensure_expected_version
 from core.intake.repository import IntakeSessionRepository
 from core.intake.schemas import (
     IntakeCompletionItemRead,
@@ -35,6 +37,8 @@ from core.receipt.service import ReceiptItemService, ReceiptService
 from core.rental.service import RentalAssetService
 from core.shared.db import UUIDv7, generate_uuid_v7
 from core.supplier.repository import SupplierRepository
+
+logger = logging.getLogger(__name__)
 
 
 class IntakeCompletionNotFoundError(Exception):
@@ -77,18 +81,32 @@ class CompleteIntakeWorkflow:
         self._price_service = PriceService(session)
         self._activity = ActivityEventService(session)
 
-    def complete(self, session_id: UUIDv7, *, actor_id: UUIDv7) -> IntakeCompletionRead:
+    def complete(
+        self,
+        session_id: UUIDv7,
+        *,
+        actor_id: UUIDv7,
+        expected_intake_version: int | None = None,
+    ) -> IntakeCompletionRead:
         """Complete once and return stable mappings with current readiness on retries."""
         try:
             intake_session = self._sessions.get_owned_for_update(session_id, actor_id)
             if intake_session is None:
                 raise IntakeCompletionNotFoundError
             if intake_session.status is IntakeSessionStatus.COMPLETED:
+                logger.info(
+                    "Returning idempotent Intake finalization result",
+                    extra={
+                        "intake_id": str(intake_session.id),
+                        "intake_version": intake_session.version,
+                    },
+                )
                 result = self._build_existing_result(intake_session)
                 self._session.commit()
                 return result
             if intake_session.status is IntakeSessionStatus.ABANDONED:
                 raise IntakeCompletionAbandonedError
+            ensure_expected_version(intake_session, expected_intake_version)
 
             active_items = [item for item in intake_session.items if item.abandoned_at is None]
             active_items.sort(key=lambda item: item.kind is not IntakeItemKind.NEW_PRODUCT)
@@ -175,6 +193,7 @@ class CompleteIntakeWorkflow:
 
             result = IntakeCompletionRead(
                 session_id=intake_session.id,
+                intake_version=intake_session.version + 1,
                 receipt=ReceiptRead.model_validate(receipt),
                 items=completed_items,
                 readiness=[
@@ -182,7 +201,11 @@ class CompleteIntakeWorkflow:
                     for item in completed_items
                 ],
             )
-            self._session.commit()
+            commit_intake_change(
+                self._session,
+                intake_session,
+                event_type="intake.finalized",
+            )
             return result
         except Exception:
             self._session.rollback()
@@ -377,6 +400,7 @@ class CompleteIntakeWorkflow:
             )
         return IntakeCompletionRead(
             session_id=intake_session.id,
+            intake_version=intake_session.version,
             receipt=ReceiptRead.model_validate(receipt),
             items=items,
             readiness=[self._readiness_service.check_variant(item.variant_id) for item in items],

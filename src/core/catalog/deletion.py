@@ -9,6 +9,7 @@ from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBa
 from core.catalog.schemas import CatalogDeletionDependency, CatalogDeletionPreflight
 from core.intake.enums import IntakeSessionStatus
 from core.intake.models import IntakeItemDraft, IntakeSession
+from core.intake.realtime import stage_intake_event
 from core.integrations.aqsi.models import Publication, PublicationAttempt
 from core.inventory.models import StockMovement
 from core.media.enums import ImageLinkEntityType
@@ -219,10 +220,24 @@ class CatalogHardDeleteService:
 
     def _delete_draft_references(self, scope: _DeleteScope) -> None:
         """Remove only mutable draft rows that point at the deleted Catalog scope."""
-        intake_ids = tuple(
-            row.id for row in self._intake_rows(scope) if row.status is IntakeSessionStatus.DRAFT
-        )
+        rows = self._intake_rows(scope)
+        draft_rows = [row for row in rows if row.status is IntakeSessionStatus.DRAFT]
+        intake_ids = tuple(row.id for row in draft_rows)
         if intake_ids:
+            session_ids = {row.session_id for row in draft_rows}
+            sessions = self._session.scalars(
+                select(IntakeSession)
+                .where(IntakeSession.id.in_(session_ids))
+                .with_for_update()
+            ).all()
+            for intake in sessions:
+                intake.version += 1
+                stage_intake_event(
+                    self._session,
+                    intake.id,
+                    intake.version,
+                    event_type="intake.changed",
+                )
             self._session.execute(delete(IntakeItemDraft).where(IntakeItemDraft.id.in_(intake_ids)))
         receipt_ids = tuple(
             row.id for row in self._receipt_rows(scope) if row.status is ReceiptStatus.DRAFT
@@ -233,7 +248,11 @@ class CatalogHardDeleteService:
     def _intake_rows(self, scope: _DeleteScope, *, lock: bool = False) -> list[object]:
         """Return linked Intake rows paired with their owning session status."""
         statement = (
-            select(IntakeItemDraft.id, IntakeSession.status)
+            select(
+                IntakeItemDraft.id,
+                IntakeSession.status,
+                IntakeSession.id.label("session_id"),
+            )
             .join(IntakeSession, IntakeSession.id == IntakeItemDraft.session_id)
             .where(self._catalog_reference_condition(scope))
         )

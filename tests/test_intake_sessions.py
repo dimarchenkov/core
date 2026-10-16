@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Generator
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import BytesIO
@@ -25,6 +25,7 @@ from core.intake.draft_service import IntakeDraftWorkflow
 from core.intake.enums import IntakeSessionStatus
 from core.intake.labels import IntakeDraftLabelService
 from core.intake.models import IntakeItemDraft, IntakeSession
+from core.intake.realtime import commit_intake_change
 from core.intake.routes import get_intake_draft_workflow
 from core.inventory.models import StockMovement
 from core.labels.renderer import LabelProfile
@@ -167,6 +168,120 @@ def _create_session(client: TestClient) -> dict[str, object]:
     response = client.post("/api/intake/sessions")
     assert response.status_code == 201
     return response.json()
+
+
+def test_intake_version_rejects_stale_absolute_write(
+    client: tuple[TestClient, User, User, Path],
+    catalog: tuple[Category, CatalogProduct, CatalogVariant],
+) -> None:
+    """Absolute item edits cannot silently overwrite a newer device's value."""
+    test_client, _, _, _ = client
+    _, _, variant = catalog
+    intake = _create_session(test_client)
+    assert intake["version"] == 1
+    item = test_client.post(
+        f"/api/intake/sessions/{intake['id']}/items/existing",
+        json={"variant_id": str(variant.id), "quantity": 1},
+    ).json()
+    current = test_client.get(f"/api/intake/sessions/{intake['id']}").json()
+    assert current["version"] == 2
+    assert item["intake_version"] == 2
+
+    updated = test_client.patch(
+        f"/api/intake/sessions/{intake['id']}/items/{item['id']}",
+        json={"quantity": 2, "expected_intake_version": 2},
+    )
+    stale = test_client.patch(
+        f"/api/intake/sessions/{intake['id']}/items/{item['id']}",
+        json={"quantity": 99, "expected_intake_version": 2},
+    )
+    unchanged = test_client.patch(
+        f"/api/intake/sessions/{intake['id']}/items/{item['id']}",
+        json={"quantity": 2, "expected_intake_version": 3},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["intake_version"] == 3
+    assert stale.status_code == 409
+    assert stale.json()["detail"] == {
+        "code": "stale_intake_version",
+        "message": "Приёмка изменилась на другом устройстве. Показана актуальная версия.",
+        "current_version": 3,
+    }
+    assert unchanged.status_code == 200
+    assert unchanged.json()["intake_version"] == 3
+    refreshed = test_client.get(f"/api/intake/sessions/{intake['id']}").json()
+    assert refreshed["version"] == 3
+    assert refreshed["items"][0]["quantity"] == 2
+
+
+def test_intake_event_is_published_only_after_commit(
+    session: Session,
+    users: tuple[User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Realtime notification ordering follows the durable transaction boundary."""
+    first, _ = users
+    intake = IntakeSession(owner_id=first.id, created_by_id=first.id)
+    session.add(intake)
+    session.commit()
+    sequence: list[str] = []
+    original_commit = session.commit
+
+    def observed_commit() -> None:
+        sequence.append("commit")
+        original_commit()
+
+    def observed_publish(*args: object, **kwargs: object) -> None:
+        sequence.append("publish")
+
+    monkeypatch.setattr(session, "commit", observed_commit)
+    monkeypatch.setattr("core.intake.realtime.publish_intake_event", observed_publish)
+
+    assert commit_intake_change(session, intake) == 2
+    assert sequence == ["commit", "publish"]
+
+    def failed_commit() -> None:
+        sequence.append("failed_commit")
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(session, "commit", failed_commit)
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        commit_intake_change(session, intake)
+    assert sequence == ["commit", "publish", "failed_commit"]
+    session.rollback()
+
+
+def test_sse_endpoint_is_scoped_to_owned_intake(
+    client: tuple[TestClient, User, User, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stream authenticates ownership and carries notification metadata only."""
+    test_client, first, second, _ = client
+    intake = _create_session(test_client)
+
+    async def finite_stream(session_id: UUID) -> AsyncIterator[str]:
+        yield (
+            "event: intake.changed\n"
+            f'data: {{"intake_id":"{session_id}","version":2,'
+            '"event_type":"intake.changed"}\n\n'
+        )
+
+    monkeypatch.setattr("core.intake.routes.stream_intake_events", finite_stream)
+    response = test_client.get(f"/api/intake/sessions/{intake['id']}/events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert "intake.changed" in response.text
+    assert '"version":2' in response.text
+    assert "items" not in response.text
+
+    app = test_client.app
+    app.dependency_overrides[get_current_user] = lambda: second
+    forbidden = test_client.get(f"/api/intake/sessions/{intake['id']}/events")
+    app.dependency_overrides[get_current_user] = lambda: first
+    assert forbidden.status_code == 404
 
 
 def test_test_product_promotes_empty_intake_and_blocks_mixed_production_items(

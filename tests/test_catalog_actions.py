@@ -456,7 +456,9 @@ def test_draft_intake_and_receipt_lines_are_safe_owned_cleanup(
     assert response.status_code == 204
     assert session.get(IntakeItemDraft, intake_item_id) is None
     assert session.get(ReceiptItem, receipt_item_id) is None
-    assert session.get(IntakeSession, intake.id) is not None
+    retained_intake = session.get(IntakeSession, intake.id)
+    assert retained_intake is not None
+    assert retained_intake.version == 2
     assert session.get(Receipt, receipt.id) is not None
 
 
@@ -628,6 +630,7 @@ def test_legacy_graph_requires_explicit_classification_then_purges_atomically(
     preflight = client.get(f"/api/catalog/products/{product_id}/test-data-preflight").json()
 
     assert classified.status_code == 204
+    assert session.get(IntakeSession, intake_id).version == 2
     assert preflight["is_test"] is True
     assert preflight["can_purge"] is True
     counts = {item["code"]: item["count"] for item in preflight["dependencies"]}

@@ -44,6 +44,7 @@ class IntakeSessionUpdate(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
 
     supplier_id: UUIDv7 | None = None
+    expected_intake_version: int | None = Field(default=None, ge=1)
 
 
 class ExistingIntakeItemCreate(PydanticBaseModel):
@@ -97,6 +98,7 @@ class IntakeItemDraftUpdate(PydanticBaseModel):
     rental_quantity: int | None = Field(default=None, ge=0)
     purchase_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
     retail_price: Decimal | None = Field(default=None, max_digits=12, ge=0)
+    expected_intake_version: int | None = Field(default=None, ge=1)
 
     @field_validator("purchase_price", "retail_price", mode="before")
     @classmethod
@@ -125,6 +127,7 @@ class IntakeAbandon(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str = Field(min_length=1, max_length=1000)
+    expected_intake_version: int | None = Field(default=None, ge=1)
 
     @field_validator("reason")
     @classmethod
@@ -166,6 +169,7 @@ class IntakeItemDraftRead(PydanticBaseModel):
     updated_at: datetime
     created_by_id: UUIDv7 | None
     updated_by_id: UUIDv7 | None
+    intake_version: int | None = None
     missing_requirements: list[IntakeItemRequirement] = Field(default_factory=list)
 
 
@@ -176,6 +180,7 @@ class IntakeSessionRead(PydanticBaseModel):
 
     id: UUIDv7
     owner_id: UUIDv7
+    version: int
     status: IntakeSessionStatus
     is_test: bool
     supplier_id: UUIDv7 | None
@@ -201,6 +206,7 @@ class IntakeCompletionRead(PydanticBaseModel):
     """Result of an atomic IntakeSession completion command."""
 
     session_id: UUIDv7
+    intake_version: int
     receipt: ReceiptRead
     items: list[IntakeCompletionItemRead]
     readiness: list[ReadyForSaleRead]

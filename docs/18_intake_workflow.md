@@ -44,6 +44,7 @@ One employee-owned, resumable intake workspace.
 Fields:
 
 - `id`;
+- monotonically increasing `version`, used as the Intake-wide concurrency token;
 - `status`: `draft`, `completed` or `abandoned`;
 - nullable `supplier_id`;
 - nullable `receipt_id`, assigned only after successful completion;
@@ -174,6 +175,44 @@ Ready for Sale results and marks the session completed in one transaction.
 Completion is idempotent: retrying an already completed session returns its original Receipt and
 Variant mappings. A failure at any point rolls back catalog, Receipt and ledger changes while the
 persisted draft, its source photos and entered data remain available for correction and retry.
+
+## Realtime synchronization
+
+The database remains the only source of truth. Normal writes continue to use authenticated HTTP
+commands. Every meaningful draft mutation increments `IntakeSession.version` in the same locked
+transaction as the change. Only after that transaction commits does Core publish a small Redis
+notification containing `intake_id`, `version` and `event_type`. Notifications are staged in the
+SQLAlchemy session and released by its `after_commit` hook; rollback discards them. The aggregate is never
+transported as canonical state through the event channel.
+
+An open client subscribes to authenticated
+`GET /api/intake/sessions/{session_id}/events`. The endpoint uses SSE and one Redis Pub/Sub channel
+per Intake. Redis is already shared by the API and worker deployment, so subscribers and mutations
+may be served by different API processes without relying on process-local memory. Pub/Sub is a
+notification transport rather than a durable event log: a reconnect always performs an immediate
+authoritative refetch, and a disconnected client polls every 25 seconds until SSE returns. The
+server sends a heartbeat every 15 seconds and intentionally closes streams after five minutes so
+reconnect revalidates the bearer token and current account access.
+
+The browser ignores duplicate or stale event versions. A newer version is coalesced for 180 ms and
+causes one Intake refetch. SSE failures do not block HTTP commands. The UI shows a subtle
+`Синхронизировано` / `Переподключение…` state and automatically switches to the completed,
+abandoned or deleted state reported by the server.
+
+Absolute edits (typed quantities and prices, Product/Variant fields, Supplier, images,
+abandonment and first-time completion) carry `expected_intake_version`. Under the Intake row lock,
+Core rejects a stale token with `409 stale_intake_version`; the client refetches instead of silently
+overwriting the newer value. Adding a new position remains naturally additive and does not require
+a strict token. The current UI has absolute quantity fields rather than `+1`/`-1` actions, so no
+artificial delta command was introduced.
+
+Completion uses the same row lock. The first caller creates and posts inventory exactly once,
+increments the Intake version and publishes `intake.finalized`. A duplicate or simultaneous caller
+that observes the completed status reconstructs the original result without another Receipt,
+movement, stock change, version increment or event.
+
+Angie disables buffering and cache only for the Intake SSE route and applies a one-hour upstream
+read timeout. FastAPI emits `X-Accel-Buffering: no` as an additional proxy hint.
 
 Draft mutations are owned by `IntakeDraftWorkflow`. Session list/detail responses and the same
 derived completeness returned after commands are built by `IntakeDraftReadService`; a shared pure

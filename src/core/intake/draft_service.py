@@ -20,6 +20,7 @@ from core.intake.enums import (
 )
 from core.intake.models import IntakeItemDraft, IntakeSession
 from core.intake.read_service import IntakeDraftReadService, IntakeSessionNotFoundError
+from core.intake.realtime import commit_intake_change, ensure_expected_version
 from core.intake.repository import IntakeItemDraftRepository, IntakeSessionRepository
 from core.intake.schemas import (
     ExistingIntakeItemCreate,
@@ -120,11 +121,22 @@ class IntakeDraftWorkflow:
         """Set late administrative fields while the session remains a draft."""
         intake_session = self._get_owned_draft(session_id, actor_id)
         changes = data.model_dump(exclude_unset=True)
+        expected_version = changes.pop("expected_intake_version", None)
+        ensure_expected_version(intake_session, expected_version)
         if "supplier_id" in changes:
             self._ensure_supplier_is_active(data.supplier_id)
-            intake_session.supplier_id = data.supplier_id
-        intake_session.updated_by_id = actor_id
-        self._session.commit()
+        changes = {
+            field: value
+            for field, value in changes.items()
+            if getattr(intake_session, field) != value
+        }
+        if changes:
+            for field, value in changes.items():
+                setattr(intake_session, field, value)
+            intake_session.updated_by_id = actor_id
+            commit_intake_change(self._session, intake_session)
+        else:
+            self._session.commit()
         return self._reads.get_session(session_id, actor_id=actor_id)
 
     def add_existing_item(
@@ -175,7 +187,7 @@ class IntakeDraftWorkflow:
             kind=item.kind.value,
             actor_id=actor_id,
         )
-        self._session.commit()
+        commit_intake_change(self._session, intake_session)
         self._session.refresh(item)
         return self._reads.build_item_read(item)
 
@@ -248,7 +260,7 @@ class IntakeDraftWorkflow:
                 kind=item.kind.value,
                 actor_id=actor_id,
             )
-            self._session.commit()
+            commit_intake_change(self._session, intake_session)
             committed = True
             self._session.refresh(item)
             return self._reads.build_item_read(item)
@@ -267,9 +279,11 @@ class IntakeDraftWorkflow:
         actor_id: UUIDv7,
     ) -> IntakeItemDraftRead:
         """Persist progressive item data without creating catalog or stock records."""
-        self._get_owned_draft(session_id, actor_id)
+        intake_session = self._get_owned_draft(session_id, actor_id)
         item = self._get_draft_item(session_id, item_id)
         changes = data.model_dump(exclude_unset=True)
+        expected_version = changes.pop("expected_intake_version", None)
+        ensure_expected_version(intake_session, expected_version)
         self._ensure_fields_match_kind(item.kind, changes)
         self._ensure_rental_quantity_is_valid(item, changes)
         if "manufacturer_barcode" in changes:
@@ -291,10 +305,18 @@ class IntakeDraftWorkflow:
             changes["purchase_price"] = quantize_money(data.purchase_price)
         if "retail_price" in changes and data.retail_price is not None:
             changes["retail_price"] = quantize_money(data.retail_price)
-        for field, value in changes.items():
-            setattr(item, field, value)
-        item.updated_by_id = actor_id
-        self._session.commit()
+        changes = {
+            field: value
+            for field, value in changes.items()
+            if getattr(item, field) != value
+        }
+        if changes:
+            for field, value in changes.items():
+                setattr(item, field, value)
+            item.updated_by_id = actor_id
+            commit_intake_change(self._session, intake_session)
+        else:
+            self._session.commit()
         self._session.refresh(item)
         return self._reads.build_item_read(item)
 
@@ -306,9 +328,11 @@ class IntakeDraftWorkflow:
         content: bytes,
         *,
         actor_id: UUIDv7,
+        expected_intake_version: int | None = None,
     ) -> IntakeItemDraftRead:
         """Replace a draft photo through Media without changing Catalog or Inventory facts."""
-        self._get_owned_draft(session_id, actor_id)
+        intake_session = self._get_owned_draft(session_id, actor_id)
+        ensure_expected_version(intake_session, expected_intake_version)
         item = self._get_draft_item(session_id, item_id)
         previous_image_id = item.image_id
         image: Image | None = None
@@ -323,7 +347,7 @@ class IntakeDraftWorkflow:
             item.updated_by_id = actor_id
             if previous_image_id is not None:
                 self._image_service.delete_image(previous_image_id, actor_id=actor_id)
-            self._session.commit()
+            commit_intake_change(self._session, intake_session)
             committed = True
             self._session.refresh(item)
             return self._reads.build_item_read(item)
@@ -340,9 +364,11 @@ class IntakeDraftWorkflow:
         reason: str,
         *,
         actor_id: UUIDv7,
+        expected_intake_version: int | None = None,
     ) -> IntakeItemDraftRead:
         """Explicitly abandon one unfinished position without deleting evidence."""
-        self._get_owned_draft(session_id, actor_id)
+        intake_session = self._get_owned_draft(session_id, actor_id)
+        ensure_expected_version(intake_session, expected_intake_version)
         item = self._get_draft_item(session_id, item_id)
         if self._items.has_active_dependents(session_id, item_id):
             raise IntakeItemHasDependentsError
@@ -355,7 +381,7 @@ class IntakeDraftWorkflow:
             reason=reason,
             actor_id=actor_id,
         )
-        self._session.commit()
+        commit_intake_change(self._session, intake_session)
         self._session.refresh(item)
         return self._reads.build_item_read(item)
 
@@ -365,9 +391,11 @@ class IntakeDraftWorkflow:
         reason: str,
         *,
         actor_id: UUIDv7,
+        expected_intake_version: int | None = None,
     ) -> IntakeSessionRead:
         """Explicitly close unfinished work while preserving it for history."""
         intake_session = self._get_owned_draft(session_id, actor_id)
+        ensure_expected_version(intake_session, expected_intake_version)
         abandoned_at = datetime.now(UTC)
         intake_session.status = IntakeSessionStatus.ABANDONED
         intake_session.abandoned_at = abandoned_at
@@ -380,7 +408,11 @@ class IntakeDraftWorkflow:
             actor_id=actor_id,
             occurred_at=abandoned_at,
         )
-        self._session.commit()
+        commit_intake_change(
+            self._session,
+            intake_session,
+            event_type="intake.cancelled",
+        )
         return self._reads.get_session(session_id, actor_id=actor_id)
 
     def _get_owned_session(self, session_id: UUIDv7, actor_id: UUIDv7) -> IntakeSession:
@@ -392,7 +424,9 @@ class IntakeDraftWorkflow:
 
     def _get_owned_draft(self, session_id: UUIDv7, actor_id: UUIDv7) -> IntakeSession:
         """Return an owned mutable session."""
-        intake_session = self._get_owned_session(session_id, actor_id)
+        intake_session = self._sessions.get_owned_for_update(session_id, actor_id)
+        if intake_session is None:
+            raise IntakeSessionNotFoundError
         if intake_session.status is not IntakeSessionStatus.DRAFT:
             raise IntakeSessionNotDraftError
         return intake_session

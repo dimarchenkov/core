@@ -85,6 +85,7 @@ class IntakeDraftReadService:
         """Attach deterministic completeness information to one persisted item."""
         return IntakeItemDraftRead.model_validate(item).model_copy(
             update={
+                "intake_version": item.session.version,
                 "missing_requirements": derive_item_requirements(
                     item,
                     availability[item.id],

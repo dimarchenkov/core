@@ -10,6 +10,7 @@ from core.activity.models import ActivityEvent
 from core.catalog.models import CatalogProduct, CatalogVariant, CatalogVariantBarcode
 from core.catalog.schemas import CatalogDeletionDependency, CatalogTestDataPreflight
 from core.intake.models import IntakeItemDraft, IntakeSession
+from core.intake.realtime import stage_intake_event
 from core.integrations.aqsi.models import Publication, PublicationAttempt
 from core.inventory.enums import SourceType
 from core.inventory.models import StockMovement
@@ -95,6 +96,13 @@ class CatalogTestDataService:
         graph.product.is_test = True
         for intake in graph.intake_sessions:
             intake.is_test = True
+            intake.version += 1
+            stage_intake_event(
+                self._session,
+                intake.id,
+                intake.version,
+                event_type="intake.changed",
+            )
         for receipt in graph.receipt_rows:
             receipt.is_test = True
         self._session.flush()
@@ -411,6 +419,13 @@ class CatalogTestDataService:
 
     def _delete_graph(self, graph: _TestGraph) -> None:
         """Delete the verified graph in foreign-key order inside the caller transaction."""
+        for intake in graph.intake_sessions:
+            stage_intake_event(
+                self._session,
+                intake.id,
+                intake.version + 1,
+                event_type="intake.deleted",
+            )
         self._delete_by_ids(ActivityEvent, graph.activity_event_ids)
         self._delete_by_foreign_ids(
             PublicationAttempt,
