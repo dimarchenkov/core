@@ -37,6 +37,14 @@ function routeUrl(route) {
   if (route.name === "order") return `${window.location.pathname}#order/${route.orderId}`;
   if (route.name === "intake") return `${window.location.pathname}#intake/${route.sessionId}`;
   if (route.name === "sale") return `${window.location.pathname}#sale${route.saleId ? `/${route.saleId}` : ""}`;
+  if (route.name === "analytics") {
+    const params = new URLSearchParams();
+    params.set("period", route.period || "today");
+    if (route.startDate) params.set("start_date", route.startDate);
+    if (route.endDate) params.set("end_date", route.endDate);
+    if (route.ranking && route.ranking !== "revenue") params.set("ranking", route.ranking);
+    return `${window.location.pathname}#analytics?${params.toString()}`;
+  }
   if (route.name === "catalog") {
     const params = catalogUrlParams(normalizeCatalogState(route), false);
     const query = params.toString();
@@ -54,6 +62,16 @@ function routeFromLocation() {
   if (name === "order" && id) return { name, orderId: id };
   if (name === "intake" && id) return { name, sessionId: id };
   if (name === "sale") return { name, saleId: id || undefined };
+  if (name === "analytics") {
+    const params = new URLSearchParams(queryString);
+    return {
+      name,
+      period: params.get("period") || "today",
+      startDate: params.get("start_date") || undefined,
+      endDate: params.get("end_date") || undefined,
+      ranking: params.get("ranking") || "revenue",
+    };
+  }
   if (name === "catalog") {
     const params = new URLSearchParams(queryString);
     return {
@@ -85,6 +103,7 @@ async function restoreRoute(route) {
     else if (route.name === "rental") await openRentalHub();
     else if (route.name === "settings") await openSettings();
     else if (route.name === "sale") await openSalesWorkspace(route.saleId);
+    else if (route.name === "analytics") await openSalesAnalytics(route);
     else if (route.name === "customer") await selectRentalCustomer(route.customerId);
     else if (route.name === "order") await openRentalOrder(route.orderId);
     else if (route.name === "intake") await openSession(route.sessionId);
@@ -722,6 +741,7 @@ function renderHome(activity) {
         <button class="action-card" id="open-intake"><span class="action-icon">＋</span><strong>Приёмка</strong><span class="muted small">Принять товар</span></button>
         <button class="action-card" id="open-catalog"><span class="action-icon">▦</span><strong>Каталог</strong><span class="muted small">Товары и варианты</span></button>
         <button class="action-card" id="open-rental"><span class="action-icon">↔</span><strong>Аренда</strong><span class="muted small">Активные, выдача и возврат</span></button>
+        <button class="action-card" id="open-analytics"><span class="action-icon">↗</span><strong>Аналитика</strong><span class="muted small">Выручка и продажи</span></button>
         ${state.user?.is_admin || state.user?.is_superuser ? '<button class="action-card" id="open-settings"><span class="action-icon">⚙</span><strong>Настройки</strong><span class="muted small">Интеграции и доступы</span></button>' : ""}
       </div>
       <section id="intake-home" class="hidden">
@@ -740,6 +760,7 @@ function renderHome(activity) {
   });
   document.querySelector("#open-catalog").addEventListener("click", () => openOperationsCatalog());
   document.querySelector("#open-rental").addEventListener("click", () => openRentalHub());
+  document.querySelector("#open-analytics").addEventListener("click", () => openSalesAnalytics());
   document.querySelector("#open-settings")?.addEventListener("click", () => openSettings());
   document.querySelector("#start-session").addEventListener("click", () => startSession());
   document.querySelectorAll("[data-resume]").forEach((button) => {
@@ -1095,6 +1116,129 @@ function bindTopbar() {
       await saveAllItemForms();
       await logicalParent();
     } catch (error) { showToast(error.message, true); }
+  });
+}
+
+function analyticsQuery(filters) {
+  const params = new URLSearchParams({
+    period: filters.period || "today",
+    ranking: filters.ranking || "revenue",
+  });
+  if (filters.period === "custom" && filters.startDate && filters.endDate) {
+    params.set("start_date", filters.startDate);
+    params.set("end_date", filters.endDate);
+  }
+  return params.toString();
+}
+
+async function openSalesAnalytics(options = {}) {
+  const filters = {
+    period: options.period || "today",
+    startDate: options.startDate,
+    endDate: options.endDate,
+    ranking: options.ranking || "revenue",
+  };
+  recordRoute("analytics", filters);
+  logicalParent = () => loadHome();
+  root.innerHTML = `<div class="shell analytics-shell">${topbar(true)}<section class="analytics-loading"><strong>Собираем аналитику продаж…</strong></section></div>`;
+  bindTopbar();
+  try {
+    const report = await api(`/api/analytics/sales?${analyticsQuery(filters)}`);
+    renderSalesAnalytics(report, {
+      ...filters,
+      startDate: report.summary.period.start_date,
+      endDate: report.summary.period.end_date,
+    });
+  } catch (error) {
+    showToast(error.message, true);
+    root.innerHTML = `<div class="shell analytics-shell">${topbar(true)}<section class="empty"><strong>Не удалось загрузить аналитику</strong><p>${escapeHtml(error.message)}</p><button class="button" id="analytics-retry" type="button">Повторить</button></section></div>`;
+    bindTopbar();
+    document.querySelector("#analytics-retry")?.addEventListener("click", () => openSalesAnalytics(filters));
+  }
+}
+
+function analyticsPeriodLabel(period) {
+  if (period.start_date === period.end_date) return formatAnalyticsDate(period.start_date);
+  return `${formatAnalyticsDate(period.start_date)} — ${formatAnalyticsDate(period.end_date)}`;
+}
+
+function formatAnalyticsDate(value, options = {}) {
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: options.short ? "short" : "2-digit",
+    ...(options.year === false ? {} : { year: "numeric" }),
+  }).format(new Date(`${value}T12:00:00`));
+}
+
+function renderAnalyticsBars(rows, valueKey, formatter, emptyLabel) {
+  const maximum = Math.max(...rows.map((row) => Number(row[valueKey])), 0);
+  if (!maximum) return `<div class="analytics-chart-empty">${emptyLabel}</div>`;
+  return `<div class="analytics-chart" role="img" aria-label="${escapeHtml(emptyLabel)}">${rows.map((row) => {
+    const value = Number(row[valueKey]);
+    const height = value ? Math.max(6, Math.round((value / maximum) * 100)) : 2;
+    return `<div class="analytics-bar-column" title="${formatAnalyticsDate(row.date)}: ${escapeHtml(formatter(value))}" aria-label="${formatAnalyticsDate(row.date)}: ${escapeHtml(formatter(value))}">
+      <span class="analytics-bar-value">${escapeHtml(formatter(value))}</span>
+      <span class="analytics-bar-track"><span class="analytics-bar" style="height:${height}%"></span></span>
+      <span class="analytics-bar-date">${formatAnalyticsDate(row.date, { short: true, year: false })}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderSalesAnalytics(report, filters) {
+  const summary = report.summary;
+  const periodPresets = [
+    ["today", "Сегодня"],
+    ["7_days", "7 дней"],
+    ["30_days", "30 дней"],
+    ["this_month", "Этот месяц"],
+  ];
+  const presetButtons = periodPresets.map(([value, label]) => `<button class="filter-chip ${filters.period === value ? "active" : ""}" data-analytics-period="${value}" type="button">${label}</button>`).join("");
+  const productRows = report.top_products.length
+    ? report.top_products.map((item, index) => `<tr><td><span class="analytics-rank">${index + 1}</span>${escapeHtml(item.product_title)}</td><td>${item.units}</td><td>${formatMoney(item.revenue)}</td></tr>`).join("")
+    : '<tr><td colspan="3" class="muted">Нет продаж товаров за период</td></tr>';
+  const variantRows = report.top_variants.length
+    ? report.top_variants.map((item, index) => `<tr><td><span class="analytics-rank">${index + 1}</span><strong>${escapeHtml(item.display_label)}</strong><small>${escapeHtml(item.sku || "Без SKU")}</small></td><td>${item.units}</td><td>${formatMoney(item.revenue)}</td></tr>`).join("")
+    : '<tr><td colspan="3" class="muted">Нет продаж вариантов за период</td></tr>';
+  const freeSaleRows = report.top_free_sale_items.length
+    ? report.top_free_sale_items.map((item, index) => `<tr><td><span class="analytics-rank">${index + 1}</span>${escapeHtml(item.display_name)}</td><td>${item.units}</td><td>${formatMoney(item.revenue)}</td></tr>`).join("")
+    : '<tr><td colspan="3" class="muted">Нет свободных продаж за период</td></tr>';
+  const weekdayRows = report.weekdays.map((item) => `<tr><td><strong>${escapeHtml(item.label)}</strong><small>${item.observed_days} ${item.observed_days === 1 ? "день" : "дн."}</small></td><td>${formatMoney(item.revenue)}<small>в среднем ${formatMoney(item.average_revenue)}</small></td><td>${item.receipt_count}<small>средний чек ${formatMoney(item.average_receipt)}</small></td></tr>`).join("");
+  const dailyRows = report.daily.map((item) => `<tr><td>${formatAnalyticsDate(item.date)}</td><td>${formatMoney(item.revenue)}</td><td>${item.receipt_count}</td><td>${item.items_sold}</td><td>${formatMoney(item.average_receipt)}</td></tr>`).join("");
+  const payments = report.payment_methods.length
+    ? `<section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Оплата</p><h2>Способы оплаты</h2></div></div><div class="payment-breakdown">${report.payment_methods.map((item) => `<article class="card"><span>${escapeHtml(item.label)}</span><strong>${formatMoney(item.revenue)}</strong><small>${item.receipt_count} чек.</small></article>`).join("")}</div></section>`
+    : "";
+  root.innerHTML = `<div class="shell analytics-shell">
+    ${topbar(true)}
+    <header class="analytics-heading"><div><p class="eyebrow">Аналитика · Продажи</p><h1>Выручка и продажи</h1><p class="muted">${analyticsPeriodLabel(summary.period)} · ${escapeHtml(summary.period.timezone)}</p></div><button class="button secondary compact" id="analytics-refresh" type="button">Обновить</button></header>
+    <nav class="filter-bar analytics-presets" aria-label="Период аналитики">${presetButtons}<button class="filter-chip ${filters.period === "custom" ? "active" : ""}" id="analytics-custom-toggle" type="button">Произвольный</button></nav>
+    <form class="analytics-custom ${filters.period === "custom" ? "" : "hidden"}" id="analytics-custom-form"><label>С<input name="start_date" type="date" value="${filters.startDate || summary.period.start_date}" required></label><label>По<input name="end_date" type="date" value="${filters.endDate || summary.period.end_date}" required></label><button class="button" type="submit">Показать</button></form>
+    <section class="analytics-kpis" aria-label="Основные показатели">
+      <article class="analytics-kpi"><span>Выручка</span><strong>${formatMoney(summary.revenue)}</strong></article>
+      <article class="analytics-kpi"><span>Количество чеков</span><strong>${summary.receipt_count}</strong></article>
+      <article class="analytics-kpi"><span>Средний чек</span><strong>${formatMoney(summary.average_receipt)}</strong></article>
+      <article class="analytics-kpi"><span>Продано единиц</span><strong>${summary.items_sold}</strong></article>
+    </section>
+    <section class="analytics-section analytics-sources"><div class="analytics-section-head"><div><p class="eyebrow">Состав продаж</p><h2>Продажи по источнику</h2></div><strong class="free-sale-share">Доля свободной продажи по выручке: ${formatPercent(summary.free_sale_revenue_share)}</strong></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Источник</th><th>Выручка</th><th>Единиц</th></tr></thead><tbody><tr><td><strong>Всего</strong></td><td><strong>${formatMoney(summary.revenue)}</strong></td><td><strong>${summary.items_sold}</strong></td></tr><tr><td>Каталог</td><td>${formatMoney(summary.catalog_revenue)}</td><td>${summary.catalog_units}</td></tr><tr><td>Свободная продажа</td><td>${formatMoney(summary.free_sale_revenue)}</td><td>${summary.free_sale_units}</td></tr></tbody></table></div><p class="muted small source-share-note">Доля свободной продажи по единицам: ${formatPercent(summary.free_sale_units_share)}</p></section>
+    ${summary.receipt_count === 0 ? '<section class="empty analytics-empty"><strong>В выбранном периоде продаж нет</strong><p>Все показатели равны нулю. Выберите другой период или обновите данные после продажи.</p></section>' : ""}
+    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Динамика</p><h2>Выручка по дням</h2></div></div>${renderAnalyticsBars(report.timeline, "revenue", (value) => formatMoney(value), "Нет выручки за выбранный период")}</section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><h2>Количество чеков</h2><p class="muted small">Завершённые продажи по локальным календарным дням</p></div></div>${renderAnalyticsBars(report.timeline, "receipt_count", (value) => `${value} чек.`, "Нет завершённых чеков за выбранный период")}</section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Лидеры</p><h2>Товары</h2></div><div class="analytics-ranking" aria-label="Сортировка лидеров"><button class="filter-chip ${filters.ranking === "units" ? "active" : ""}" data-analytics-ranking="units" type="button">По штукам</button><button class="filter-chip ${filters.ranking === "revenue" ? "active" : ""}" data-analytics-ranking="revenue" type="button">По выручке</button></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Товар</th><th>Шт.</th><th>Выручка</th></tr></thead><tbody>${productRows}</tbody></table></div></section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><h2>Варианты</h2><p class="muted small">Цвет, размер и тип сохраняют отдельную идентичность</p></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Product · Variant / SKU</th><th>Шт.</th><th>Выручка</th></tr></thead><tbody>${variantRows}</tbody></table></div></section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><h2>Топ свободной продажи</h2><p class="muted small">Группировка только по регистру и пробелам; с Catalog по названию не объединяется</p></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Наименование</th><th>Продано</th><th>Выручка</th></tr></thead><tbody>${freeSaleRows}</tbody></table></div></section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Дни недели</p><h2>Средняя и общая эффективность</h2><p class="muted small">Среднее считается по всем наблюдаемым дням, включая дни без продаж.</p></div></div><div class="analytics-table-wrap"><table class="analytics-table weekday-table"><thead><tr><th>День</th><th>Выручка</th><th>Чеки</th></tr></thead><tbody>${weekdayRows}</tbody></table></div></section>
+    ${payments}
+    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Точные данные</p><h2>По дням</h2></div></div><div class="analytics-table-wrap"><table class="analytics-table daily-table"><thead><tr><th>Дата</th><th>Выручка</th><th>Чеки</th><th>Единицы</th><th>Средний чек</th></tr></thead><tbody>${dailyRows}</tbody></table></div></section>
+    <aside class="analytics-limitations"><strong>Границы первой версии</strong>${report.limitations.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</aside>
+  </div>`;
+  bindTopbar();
+  document.querySelector("#analytics-refresh")?.addEventListener("click", () => openSalesAnalytics(filters));
+  document.querySelectorAll("[data-analytics-period]").forEach((button) => button.addEventListener("click", () => openSalesAnalytics({ period: button.dataset.analyticsPeriod, ranking: filters.ranking })));
+  document.querySelectorAll("[data-analytics-ranking]").forEach((button) => button.addEventListener("click", () => openSalesAnalytics({ ...filters, ranking: button.dataset.analyticsRanking })));
+  document.querySelector("#analytics-custom-toggle")?.addEventListener("click", () => document.querySelector("#analytics-custom-form")?.classList.toggle("hidden"));
+  document.querySelector("#analytics-custom-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    void openSalesAnalytics({ period: "custom", startDate: data.get("start_date"), endDate: data.get("end_date"), ranking: filters.ranking });
   });
 }
 

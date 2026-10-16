@@ -1384,3 +1384,26 @@ test('Moving a Variant persists the complete Product-local identity order', asyn
   assert.match(styles, /\.variant-order-actions \{[^}]*grid-column: 1 \/ -1/);
   assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.variant-order-actions \.button \{[^}]*min-height: 44px/);
 });
+
+test('Sales Analytics exposes calendar periods, exact tables and mobile KPI layout', () => {
+  const s = setup();
+  const bars = s.context.renderAnalyticsBars([
+    {date:'2026-10-15', revenue:'1250.00'},
+    {date:'2026-10-16', revenue:'750.00'},
+  ], 'revenue', value => `${value} RUB`, 'Нет выручки');
+
+  assert.match(source, /id="open-analytics"[\s\S]*Аналитика/);
+  assert.match(source, /Сегодня[\s\S]*7 дней[\s\S]*30 дней[\s\S]*Этот месяц[\s\S]*Произвольный/);
+  assert.match(source, /\/api\/analytics\/sales\?\$\{analyticsQuery\(filters\)\}/);
+  assert.match(source, /Выручка[\s\S]*Количество чеков[\s\S]*Средний чек[\s\S]*Продано единиц/);
+  assert.match(source, /Продажи по источнику[\s\S]*Каталог[\s\S]*Свободная продажа/);
+  assert.match(source, /Доля свободной продажи по выручке/);
+  assert.match(source, /Product · Variant \/ SKU/);
+  assert.match(source, /Топ свободной продажи[\s\S]*Группировка только по регистру и пробелам/);
+  assert.match(source, /Среднее считается по всем наблюдаемым дням/);
+  assert.match(source, /Точные данные[\s\S]*Средний чек/);
+  assert.match(bars, /15\.10\.2026[\s\S]*1250 RUB/);
+  assert.match(styles, /\.analytics-kpis \{[^}]*grid-template-columns: repeat\(4/);
+  assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.analytics-kpis \{[^}]*grid-template-columns: 1fr 1fr/);
+  assert.match(styles, /\.analytics-table-wrap \{[^}]*overflow-x: auto/);
+});

@@ -410,13 +410,29 @@ Sprint 4.19 — Rental Asset Identification & Seals ✅ implementation / physica
 
 ## Epic 5 — Sales
 
-**Status: ⏳ Planned**
+**Status: 🚧 In Progress — Sales/POS and revenue analytics implemented; returns remain planned**
 
 Цель Epic — проводить продажу через Core и связывать её со складским ledger и кассой. Продажи,
 возвраты и исправления должны сохранять проверяемую историю без прямого изменения остатка.
 
-**Sprints:** Sales Foundation / POS начинается после Sprint 7.13. Точные номера и границы
-последующих Sales sprint будут определены при design, без ожидания дополнительного Rental UAT.
+**Sprints:** Sprint 5.1 — Sales Workspace; Sprint 5.2 — Checkout, Discount, Payment &
+Fiscalization; Sprint 5.20 — Sales Analytics: Revenue Dashboard. Returns/refunds остаются
+следующим отдельным безопасным slice.
+
+### Sprint 5.20 — Sales Analytics: Revenue Dashboard
+
+- [x] Revenue, receipt count, average receipt и units sold только по `COMPLETED Sale`.
+- [x] Business-local Today / 7 / 30 / this month / custom calendar periods.
+- [x] SQL daily aggregation, revenue/receipt charts и точная daily table.
+- [x] Top Products с агрегацией Variant и отдельный Top Variants по units/revenue.
+- [x] Catalog/manual source breakdown, доля свободной продажи и отдельный Top Free Sale по
+  консервативно нормализованному имени без слияния с Catalog.
+- [x] Weekday totals, observed-day averages и надёжный Payment method breakdown.
+- [x] Исторические Sale/SaleItem monetary snapshots вместо current Catalog price.
+- [x] Authenticated reporting API и отдельный mobile-first экран «Аналитика → Продажи».
+- [ ] Real-data сверка Today/new Sale/top lists и desktop/iPad/phone visual UAT.
+- [ ] Refund adjustment после реализации постоянного returns/refunds domain.
+- [ ] COGS / Gross Profit / Margin после отдельного решения historical inventory costing.
 
 Временный AQSI spike физически подтвердил два itemized flow. Pending Order технически работает и
 остаётся вариантом для заранее созданных/remote/pickup orders, но требует навигации по меню AQSI.
@@ -426,32 +442,32 @@ Direct AQSI checkout переводит кассу в card acquiring без та
 
 ### Backend
 
-- [ ] Жизненный цикл Cart и Sale с явными payment/fiscalization states.
-- [ ] SaleItem snapshots: Variant reference, base/current unit price на момент продажи,
+- [x] Жизненный цикл Cart и Sale с явными payment/fiscalization states.
+- [x] SaleItem snapshots: Variant reference, base/current unit price на момент продажи,
   applied discount, final unit price, quantity и line total.
-- [ ] Разрешение текущего Variant по одному current operational barcode; повторный scan того же
+- [x] Разрешение текущего Variant по одному current operational barcode; повторный scan того же
   barcode увеличивает quantity на 1.
-- [ ] Изменение количества и fallback search по тексту, SKU или barcode.
-- [ ] Неизвестный checkout barcode показывает понятную ошибку и никогда автоматически не создаёт
+- [x] Изменение количества и fallback search по тексту, SKU или barcode.
+- [x] Неизвестный checkout barcode показывает понятную ошибку и никогда автоматически не создаёт
   Product/Variant.
-- [ ] Direct AQSI acquiring и itemized fiscal receipt; cash/card/SBP — только где поддержано и
+- [x] Direct AQSI acquiring и itemized fiscal receipt; cash/card/SBP — только где поддержано и
   отдельно спроектировано.
-- [ ] Защита от duplicate payment, unknown payment outcome и сценарий acquiring success +
+- [x] Защита от duplicate payment, unknown payment outcome и сценарий acquiring success +
   fiscalization failure.
 - [ ] Cancellation/refund/reversal design; returns/refunds — последующим безопасным slice.
 - [ ] Открытое решение: поведение без Internet или при недоступности AQSI cloud API. Возможная
   прямая продажа на AQSI пока не является утверждённым fallback.
-- [ ] Проведение Sale создаёт неизменяемые Inventory movements типа `SALE`; Sales является их
+- [x] Проведение Sale создаёт неизменяемые Inventory movements типа `SALE`; Sales является их
   бизнес-источником, Inventory остаётся ledger и не знает деталей оплаты.
 - [ ] Возвраты и корректировки без переписывания истории.
 - [ ] Продажа RentalAsset, выведенного из аренды.
 
 ### UI
 
-- [ ] Отдельное рабочее место POS/Sales, не action и не скрытый workflow внутри Catalog.
-- [ ] 2D hardware barcode scanner как first-class HID/keyboard input: scan → Variant → Cart,
+- [x] Отдельное рабочее место POS/Sales, не action и не скрытый workflow внутри Catalog.
+- [x] 2D hardware barcode scanner как first-class HID/keyboard input: scan → Variant → Cart,
   repeated scan → quantity +1.
-- [ ] Ясная ошибка неизвестного кода и fallback product search.
+- [x] Ясная ошибка неизвестного кода и fallback product search.
 - [ ] Выбор Customer и применение скидки без изменения Catalog/Pricing.
 - [ ] Возврат или корректировка продажи.
 - [ ] История продаж товара и клиента.

@@ -38,6 +38,9 @@ Deposit UX correction отделяет вычисляемый `required_deposit_
 
 **Sprint 5.2 — Checkout, Discount, Payment & Fiscalization: implemented, physical UAT pending.**
 
+**Sprint 5.20 — Sales Analytics: Revenue Dashboard: implemented, real-data and device UAT
+pending.**
+
 This user-requested vertical slice does not replace the active Epic 9 Catalog roadmap. It adds
 operator-owned persistent `DRAFT`/`CANCELLED` Sales, multiple resumable carts, a browser-scoped
 active Sale, global shell indicator, Catalog add actions, a dedicated cart workspace and
@@ -48,6 +51,12 @@ terminal cancellation recovery, AQSI card/QR acquiring, explicit cash receipt/sk
 Customer/Loyalty and refunds/returns remain outside this slice. Architecture
 and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_workspace.md) and
 [`docs/22_checkout_payment_fiscalization.md`](../docs/22_checkout_payment_fiscalization.md).
+Sprint 5.20 adds authenticated read-only Revenue analytics over completed Core Sales: local-date
+periods, KPI, daily trends/table, Product/Variant rankings, weekday metrics and payment-method
+breakdown. Refund adjustment and defensible COGS/profit remain explicitly deferred; definitions
+and UAT are recorded in [`docs/24_sales_analytics.md`](../docs/24_sales_analytics.md).
+Catalog-backed и manual/free-sale SaleItem входят в totals; source breakdown и отдельный Free Sale
+ranking сохраняют различие источников и не создают Catalog identity по совпадению имени.
 
 ### Current operational assessment
 

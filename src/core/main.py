@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from core.activity.routes import router as activity_router
 from core.admin import setup_admin
+from core.analytics.routes import router as sales_analytics_router
 from core.catalog.collection_routes import router as catalog_collection_router
 from core.catalog.routes import product_router, variant_router
 from core.catalog.routes import router as catalog_router
@@ -109,6 +110,7 @@ def create_app() -> FastAPI:
     app.include_router(rental_order_router)
     app.include_router(rental_tariff_router)
     app.include_router(sales_router)
+    app.include_router(sales_analytics_router)
     app.include_router(identity_router)
     app.include_router(activity_router)
     app.include_router(web_router)
