@@ -43,6 +43,7 @@ from core.rental.enums import (
     RentalSealStatus,
 )
 from core.rental.models import (
+    RentalAssetComponentRecord,
     RentalAssetRecord,
     RentalAssetSealRecord,
     RentalOrderItemRecord,
@@ -69,6 +70,7 @@ def session() -> Generator[Session]:
         tables=[
             User.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetComponentRecord.__table__,
             RentalAssetSealRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
@@ -344,6 +346,7 @@ def test_agreement_omits_empty_identification_and_includes_present_serial_and_se
     assert empty_record.items_snapshot[0]["asset_identification"] == {
         "serial_number": None,
         "seals": [],
+        "components": [],
     }
 
     identified_order = _ready_order(session)
@@ -353,6 +356,20 @@ def test_agreement_omits_empty_identification_and_includes_present_serial_and_se
     asset.serial_number = "SN-PUZZI-42"
     session.add_all(
         [
+            RentalAssetComponentRecord(
+                rental_asset_id=asset.id,
+                name="Бак",
+                note=None,
+                sort_order=0,
+                is_active=True,
+            ),
+            RentalAssetComponentRecord(
+                rental_asset_id=asset.id,
+                name="Старая насадка",
+                note=None,
+                sort_order=1,
+                is_active=False,
+            ),
             RentalAssetSealRecord(
                 rental_asset_id=asset.id,
                 location="Корпус",
@@ -377,12 +394,15 @@ def test_agreement_omits_empty_identification_and_includes_present_serial_and_se
     assert identified_record is not None
     assert "серийный номер SN-PUZZI-42" in identified_record.rendered_markdown
     assert "пломбы: Корпус — 001842" in identified_record.rendered_markdown
+    assert "комплект: Бак" in identified_record.rendered_markdown
+    assert "Старая насадка" not in identified_record.rendered_markdown
     assert "000111" not in identified_record.rendered_markdown
     assert "Серийный номер: —" not in identified_record.rendered_markdown
     assert "Пломбы: —" not in identified_record.rendered_markdown
 
     _, original_pdf, original_digest = service.pdf(identified.id)
     asset.serial_number = "SN-CHANGED-LATER"
+    asset.components[0].name = "Бак нового образца"
     session.commit()
     _, stored_pdf, stored_digest = service.pdf(identified.id)
     assert stored_pdf == original_pdf

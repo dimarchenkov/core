@@ -4854,11 +4854,19 @@ function renderOperationsAsset() {
   const asset = state.operations.asset;
   const economics = asset.economics;
   const seals = asset.seals || [];
+  const components = (asset.components || []).filter((component) => component.is_active);
   const sealRows = seals.length ? seals.map((seal) => `
     <article class="session-row asset-seal-row">
       <span><strong>${escapeHtml(seal.location)} — ${escapeHtml(seal.seal_number)}</strong><br><span class="muted small">${escapeHtml(sealStatusLabel(seal.status))} · установлена ${formatDate(seal.installed_at)}${seal.removed_at ? ` · снята ${formatDate(seal.removed_at)}` : ""}</span>${seal.note ? `<br><span class="muted small">${escapeHtml(seal.note)}</span>` : ""}</span>
       ${seal.status === "active" ? `<span class="inline-actions"><button class="button ghost compact" data-seal-status="removed" data-seal-id="${seal.id}">Снять</button><button class="button ghost compact" data-seal-status="broken" data-seal-id="${seal.id}">Отметить повреждение</button></span>` : ""}
     </article>`).join("") : '<div class="empty">Контрольные пломбы не установлены</div>';
+  const componentRows = components.map((component, index) => `
+    <article class="card asset-component-row" data-component-id="${component.id}">
+      <form data-component-form="${component.id}">
+        <div class="field-row"><div class="field"><label>Название</label><input name="name" maxlength="200" value="${escapeHtml(component.name)}" required></div><div class="field"><label>Примечание</label><input name="note" maxlength="2000" value="${escapeHtml(component.note || "")}"></div></div>
+        <div class="inline-actions"><button class="button secondary compact" type="submit">Сохранить</button><button class="button ghost compact" type="button" data-component-move="up" data-component-id="${component.id}" ${index === 0 ? "disabled" : ""}>↑</button><button class="button ghost compact" type="button" data-component-move="down" data-component-id="${component.id}" ${index === components.length - 1 ? "disabled" : ""}>↓</button><button class="button ghost compact" type="button" data-component-remove="${component.id}">Убрать</button></div>
+      </form>
+    </article>`).join("");
   const timeline = asset.timeline.length ? asset.timeline.map((event) => `
     <article class="timeline-row">
       <span class="timeline-dot"></span>
@@ -4903,6 +4911,13 @@ function renderOperationsAsset() {
       <div class="field"><label>Комментарий</label><textarea name="note" maxlength="2000"></textarea></div>
       <button class="button secondary full" type="submit">Добавить пломбу</button>
     </form>
+    ${components.length ? `<div class="section-heading"><h2>Комплектность</h2><span class="muted small">Не отдельные товары или складские остатки</span></div><div class="asset-component-list">${componentRows}</div>` : ""}
+    <details class="card asset-component-add"><summary>+ Добавить элемент комплектности</summary>
+      <form id="asset-component-form">
+        <div class="field-row"><div class="field"><label>Название</label><input name="name" maxlength="200" required placeholder="Например, Шланг"></div><div class="field"><label>Примечание</label><input name="note" maxlength="2000" placeholder="Необязательно"></div></div>
+        <button class="button secondary full" type="submit">Добавить элемент</button>
+      </form>
+    </details>
     <div class="section-heading"><h2>Экономика</h2><span class="chips">${economics.flags.map(efficiencyChip).join("")}</span></div>
     <section class="card order-facts">
       <div><span class="muted small">Стоимость приобретения</span><strong>${economics.acquisition_cost === null ? "Не зафиксирована" : formatMoney(economics.acquisition_cost)}</strong></div>
@@ -4948,6 +4963,10 @@ function renderOperationsAsset() {
   document.querySelector("#asset-identification-form").addEventListener("submit", updateAssetIdentification);
   document.querySelector("#asset-seal-form").addEventListener("submit", addAssetSeal);
   document.querySelectorAll("[data-seal-status]").forEach((button) => button.addEventListener("click", updateAssetSealStatus));
+  document.querySelector("#asset-component-form").addEventListener("submit", addAssetComponent);
+  document.querySelectorAll("[data-component-form]").forEach((form) => form.addEventListener("submit", updateAssetComponent));
+  document.querySelectorAll("[data-component-remove]").forEach((button) => button.addEventListener("click", deactivateAssetComponent));
+  document.querySelectorAll("[data-component-move]").forEach((button) => button.addEventListener("click", moveAssetComponent));
   document.querySelectorAll("[data-passport-order]").forEach((button) => button.addEventListener("click", () => openRentalReturnOrder(button.dataset.passportOrder)));
   document.querySelectorAll("[data-passport-customer]").forEach((button) => button.addEventListener("click", () => selectRentalCustomer(button.dataset.passportCustomer)));
   document.querySelector("#asset-maintenance-form").addEventListener("submit", addAssetMaintenance);
@@ -5005,6 +5024,64 @@ async function updateAssetSealStatus(event) {
     });
     await openOperationsAsset(state.operations.asset.id);
     showToast(status === "broken" ? "Повреждение пломбы сохранено." : "Пломба снята.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function addAssetComponent(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/components`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: String(data.get("name") || "").trim(),
+        note: nullableText(data.get("note")),
+      }),
+    });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast("Элемент комплектности добавлен.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function updateAssetComponent(event) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const componentId = event.currentTarget.dataset.componentForm;
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/components/${componentId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name: String(data.get("name") || "").trim(),
+        note: nullableText(data.get("note")),
+      }),
+    });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast("Комплектность обновлена. Старые выдачи не изменены.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function deactivateAssetComponent(event) {
+  const componentId = event.currentTarget.dataset.componentRemove;
+  if (!window.confirm("Убрать элемент из будущих выдач? Старые снимки сохранятся.")) return;
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/components/${componentId}`, { method: "DELETE" });
+    await openOperationsAsset(state.operations.asset.id);
+    showToast("Элемент убран из будущих выдач.");
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function moveAssetComponent(event) {
+  const active = (state.operations.asset.components || []).filter((component) => component.is_active);
+  const index = active.findIndex((component) => component.id === event.currentTarget.dataset.componentId);
+  const target = event.currentTarget.dataset.componentMove === "up" ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= active.length) return;
+  [active[index], active[target]] = [active[target], active[index]];
+  try {
+    await api(`/api/operations/rental/assets/${state.operations.asset.id}/components/order`, {
+      method: "PUT",
+      body: JSON.stringify({ component_ids: active.map((component) => component.id) }),
+    });
+    await openOperationsAsset(state.operations.asset.id);
   } catch (error) { showToast(error.message, true); }
 }
 
@@ -5906,7 +5983,7 @@ async function openRentalReturnOrder(orderId, focusItemId = null) {
     state.rental.returnPreview = state.rental.returnItemIds.length
       ? await requestRentalReturnPreview(state.rental.returnItemIds.map((item_id) => {
         const item = state.rental.order.items.find((candidate) => candidate.id === item_id);
-        return { item_id, condition: "good", damage_charge: "0", notes: null, seal_verifications: defaultSealVerifications(item) };
+        return { item_id, condition: "good", damage_charge: "0", notes: null, seal_verifications: defaultSealVerifications(item), component_verifications: defaultComponentVerifications(item) };
       }))
       : null;
     state.rental.agreement = await api(`/rental/orders/${orderId}/agreement`);
@@ -5983,8 +6060,9 @@ function renderRentalReturnOrder() {
   document.querySelectorAll("[data-return-select]").forEach((checkbox) => {
     checkbox.addEventListener("change", updateReturnSelection);
   });
-  document.querySelectorAll("[data-return-condition], [data-return-damage-charge], [data-return-note], [data-return-seal-result], [data-return-seal-note]").forEach((input) => input.addEventListener("change", refreshRentalReturnPreview));
+  document.querySelectorAll("[data-return-condition], [data-return-damage-charge], [data-return-note], [data-return-seal-result], [data-return-seal-note], [data-return-component-result], [data-return-component-note]").forEach((input) => input.addEventListener("change", refreshRentalReturnPreview));
   document.querySelectorAll("[data-return-seals-ok]").forEach((button) => button.addEventListener("click", markAllReturnSealsOk));
+  document.querySelectorAll("[data-return-components-ok]").forEach((button) => button.addEventListener("click", markAllReturnComponentsPresent));
   document.querySelectorAll("[data-return-open-asset]").forEach((button) => {
     button.addEventListener("click", () => openOperationsAsset(button.dataset.returnOpenAsset));
   });
@@ -6005,10 +6083,20 @@ function defaultSealVerifications(item) {
   }));
 }
 
+function defaultComponentVerifications(item) {
+  return (item?.asset_identification_snapshot?.components || []).map((component) => ({
+    component_id: component.component_id,
+    name: component.name,
+    result: "present",
+    note: null,
+  }));
+}
+
 function renderReturnIdentification(item, preview) {
   const identification = item.asset_identification_snapshot || {};
   const seals = identification.seals || [];
-  if (!identification.serial_number && !seals.length) return "";
+  const components = identification.components || [];
+  if (!identification.serial_number && !seals.length && !components.length) return "";
   const verificationByNumber = new Map((preview?.seal_verifications || []).map((verification) => [verification.expected_seal_number, verification]));
   const sealRows = seals.map((seal) => {
     const verification = verificationByNumber.get(seal.seal_number) || { result: "ok", note: null };
@@ -6023,11 +6111,28 @@ function renderReturnIdentification(item, preview) {
       <div class="field"><label>Комментарий при проблеме</label><input data-return-seal-note="${item.id}" data-seal-number="${escapeHtml(seal.seal_number)}" value="${escapeHtml(verification.note || "")}" placeholder="Что обнаружено"></div>
     </div>`;
   }).join("");
+  const verificationByComponent = new Map((preview?.component_verifications || []).map((verification) => [verification.component_id, verification]));
+  const componentRows = components.map((component) => {
+    const verification = verificationByComponent.get(component.component_id) || { result: "present", note: null };
+    return `<div class="return-component-row ${verification.result === "present" ? "" : "component-problem"}">
+      <div><strong>${escapeHtml(component.name)}</strong>${component.note ? `<small class="muted">${escapeHtml(component.note)}</small>` : ""}</div>
+      <div class="field"><label>Проверка</label><select data-return-component-result="${item.id}" data-component-id="${component.component_id}" data-component-name="${escapeHtml(component.name)}">
+        <option value="present" ${verification.result === "present" ? "selected" : ""}>PRESENT</option>
+        <option value="missing" ${verification.result === "missing" ? "selected" : ""}>MISSING</option>
+        <option value="damaged" ${verification.result === "damaged" ? "selected" : ""}>DAMAGED</option>
+      </select></div>
+      <div class="field"><label>Комментарий при проблеме</label><input data-return-component-note="${item.id}" data-component-id="${component.component_id}" value="${escapeHtml(verification.note || "")}" placeholder="Что отсутствует или повреждено"></div>
+    </div>`;
+  }).join("");
   return `<section class="return-identification">
-    <div class="section-heading"><strong>Идентификация при выдаче</strong>${seals.length ? `<button class="button ghost compact" type="button" data-return-seals-ok="${item.id}">Все соответствуют</button>` : ""}</div>
+    <div class="section-heading"><strong>Идентификация и комплектность при выдаче</strong></div>
     ${identification.serial_number ? `<p>Ожидаемый серийный номер: <strong>${escapeHtml(identification.serial_number)}</strong></p>` : ""}
+    ${seals.length ? `<div class="section-heading"><strong>Пломбы</strong><button class="button ghost compact" type="button" data-return-seals-ok="${item.id}">Все соответствуют</button></div>` : ""}
     ${(preview?.seal_verifications || []).some((verification) => verification.result !== "ok") ? '<p class="seal-warning"><strong>Есть расхождение по пломбам — проверьте комментарий перед возвратом.</strong></p>' : ""}
     ${sealRows}
+    ${components.length ? `<div class="section-heading"><strong>Комплектность</strong><button class="button ghost compact" type="button" data-return-components-ok="${item.id}">Все элементы на месте</button></div>` : ""}
+    ${(preview?.component_verifications || []).some((verification) => verification.result !== "present") ? '<p class="seal-warning"><strong>Есть проблема с комплектностью — возврат будет отмечен как INCOMPLETE или DAMAGED.</strong></p>' : ""}
+    ${componentRows}
   </section>`;
 }
 
@@ -6035,6 +6140,13 @@ function markAllReturnSealsOk(event) {
   const itemId = event.currentTarget.dataset.returnSealsOk;
   document.querySelectorAll(`[data-return-seal-result="${itemId}"]`).forEach((select) => { select.value = "ok"; });
   document.querySelectorAll(`[data-return-seal-note="${itemId}"]`).forEach((input) => { input.value = ""; });
+  refreshRentalReturnPreview();
+}
+
+function markAllReturnComponentsPresent(event) {
+  const itemId = event.currentTarget.dataset.returnComponentsOk;
+  document.querySelectorAll(`[data-return-component-result="${itemId}"]`).forEach((select) => { select.value = "present"; });
+  document.querySelectorAll(`[data-return-component-note="${itemId}"]`).forEach((input) => { input.value = ""; });
   refreshRentalReturnPreview();
 }
 
@@ -6093,6 +6205,7 @@ function renderCompletedRentalItem(item) {
     lost: "Утрачено",
   }[item.return_condition] || itemStatusLabel(item.status);
   const verificationRows = (item.seal_verification_snapshot || []).map((verification) => `<span class="${verification.result === "ok" ? "" : "seal-warning"}">${escapeHtml(verification.location)} — ${escapeHtml(verification.expected_seal_number)} <strong>${escapeHtml(String(verification.result).toUpperCase())}</strong>${verification.note ? ` · ${escapeHtml(verification.note)}` : ""}</span>`).join("");
+  const componentRows = (item.component_verification_snapshot || []).map((verification) => `<span class="${verification.result === "present" ? "" : "seal-warning"}">${escapeHtml(verification.name)} <strong>${escapeHtml(String(verification.result).toUpperCase())}</strong>${verification.note ? ` · ${escapeHtml(verification.note)}` : ""}</span>`).join("");
   return `<div class="return-history-breakdown">
     <div class="chips"><span class="chip ${item.status === "lost" ? "warn" : "good"}">${escapeHtml(condition)}</span><span class="chip">${item.returned_at ? formatDate(item.returned_at) : "—"}</span></div>
     <span>Базовая аренда <strong>${formatMoney(Number(item.agreed_price) - Number(item.discount))}</strong></span>
@@ -6100,6 +6213,7 @@ function renderCompletedRentalItem(item) {
     <span>Повреждение / компенсация <strong>${formatMoney(Number(item.damage_charge || 0))}</strong></span>
     <span>Удержано из залога <strong>${formatMoney(Number(item.deposit_applied || 0))}</strong></span>
     ${verificationRows ? `<div class="return-verification-history"><strong>Проверка пломб при возврате</strong>${verificationRows}</div>` : ""}
+    ${componentRows ? `<div class="return-verification-history"><strong>Проверка комплектности при возврате</strong>${componentRows}</div>` : ""}
     ${item.return_note ? `<p>${escapeHtml(item.return_note)}</p>` : ""}
   </div>`;
 }
@@ -6124,12 +6238,20 @@ function buildReturnCompletion(itemId) {
     result: select.value,
     note: nullableText(sealNotes[index]?.value),
   }));
+  const componentNotes = new Map([...document.querySelectorAll(`[data-return-component-note="${itemId}"]`)].map((input) => [input.dataset.componentId, input]));
+  const componentVerifications = [...document.querySelectorAll(`[data-return-component-result="${itemId}"]`)].map((select) => ({
+    component_id: select.dataset.componentId,
+    name: select.dataset.componentName,
+    result: select.value,
+    note: nullableText(componentNotes.get(select.dataset.componentId)?.value),
+  }));
   return {
     item_id: itemId,
     condition: document.querySelector(`[data-return-condition="${itemId}"]`).value,
     damage_charge: document.querySelector(`[data-return-damage-charge="${itemId}"]`).value,
     notes: nullableText(document.querySelector(`[data-return-note="${itemId}"]`).value),
     seal_verifications: sealVerifications,
+    component_verifications: componentVerifications,
   };
 }
 

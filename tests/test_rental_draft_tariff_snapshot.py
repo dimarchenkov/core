@@ -25,13 +25,19 @@ from core.rental.enums import (
     AssetCondition,
     AssetPurpose,
     RentalAvailability,
+    RentalComponentVerificationResult,
     RentalSealStatus,
     RentalSealVerificationResult,
 )
 from core.rental.exceptions import RentalDomainError
-from core.rental.lifecycle_schemas import RentalAssetSealCreate
+from core.rental.lifecycle_schemas import (
+    RentalAssetComponentCreate,
+    RentalAssetComponentUpdate,
+    RentalAssetSealCreate,
+)
 from core.rental.lifecycle_service import RentalLifecycleService
 from core.rental.models import (
+    RentalAssetComponentRecord,
     RentalAssetRecord,
     RentalAssetSealRecord,
     RentalDamageRecord,
@@ -51,6 +57,7 @@ from core.rental.order_exceptions import (
     InvalidRentalOrderStateError,
 )
 from core.rental.order_schemas import (
+    RentalComponentVerificationDraft,
     RentalDepositReceivedUpdate,
     RentalItemReturnDraft,
     RentalItemsReturn,
@@ -96,6 +103,7 @@ def session() -> Generator[Session]:
             CatalogVariant.__table__,
             CatalogVariantBarcode.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetComponentRecord.__table__,
             RentalAssetSealRecord.__table__,
             RentalTariffRecord.__table__,
             RentalOrderRecord.__table__,
@@ -1233,6 +1241,7 @@ def test_replaced_seal_preserves_history_and_old_issue_snapshot_drives_return(
         "asset_code": asset.asset_number,
         "serial_number": "SERIAL-OLD",
         "seals": [{"location": "Корпус", "seal_number": "001842"}],
+        "components": [],
     }
 
     command = RentalItemsReturn(
@@ -1274,3 +1283,153 @@ def test_seal_problem_requires_note() -> None:
             seal_number="001842",
             result=RentalSealVerificationResult.MISMATCH,
         )
+
+
+def test_issue_freezes_ordered_components_and_all_present_return_uses_snapshot(
+    session: Session,
+    customer: Customer,
+    rental_setup: tuple[CatalogVariant, RentalAssetRecord, RentalTariffRecord, RentalTariffRecord],
+) -> None:
+    """Later additions and removals cannot change the checklist of an issued rental."""
+    variant, asset, _, _ = rental_setup
+    actor = User(
+        email="components@example.com",
+        full_name="Оператор комплектности",
+        password_hash="not-used",
+    )
+    session.add(actor)
+    session.commit()
+    lifecycle = RentalLifecycleService(session)
+    tank = lifecycle.add_component(
+        asset.id, RentalAssetComponentCreate(name="Бак"), actor_id=actor.id
+    )
+    hose = lifecycle.add_component(
+        asset.id,
+        RentalAssetComponentCreate(name="Шланг", note="Синий"),
+        actor_id=actor.id,
+    )
+    orders = RentalOrderService(session)
+    ready = _ready_without_agreement(
+        session, customer, variant, asset, name="Комплектность"
+    )
+    orders.update_draft(ready.id, RentalOrderUpdate(deposit_received=Decimal("0")))
+    issued = orders.issue(ready.id)
+
+    lifecycle.add_component(
+        asset.id, RentalAssetComponentCreate(name="Новая насадка"), actor_id=actor.id
+    )
+    lifecycle.deactivate_component(asset.id, tank.id, actor_id=actor.id)
+    persisted = orders.get(issued.id)
+    snapshot = persisted.items[0].asset_identification_snapshot
+
+    assert snapshot is not None
+    assert snapshot["components"] == [
+        {"component_id": str(tank.id), "name": "Бак", "note": None},
+        {"component_id": str(hose.id), "name": "Шланг", "note": "Синий"},
+    ]
+
+    command = RentalItemsReturn(
+        items=[
+            RentalItemReturnDraft(
+                item_id=issued.items[0].id,
+                condition=RentalReturnCondition.GOOD,
+                component_verifications=[
+                    RentalComponentVerificationDraft(
+                        component_id=component["component_id"],
+                        name=component["name"],
+                        result=RentalComponentVerificationResult.PRESENT,
+                    )
+                    for component in snapshot["components"]
+                ],
+            )
+        ]
+    )
+    preview = orders.preview_return(issued.id, command)
+    returned = orders.return_items(issued.id, command)
+
+    assert preview.items[0].condition is RentalReturnCondition.GOOD
+    assert all(
+        value["result"] == RentalComponentVerificationResult.PRESENT.value
+        for value in preview.items[0].component_verifications
+    )
+    assert returned.items[0].component_verification_snapshot == (
+        preview.items[0].component_verifications
+    )
+
+
+def test_missing_component_requires_note_and_maps_to_existing_incomplete_flow(
+    session: Session,
+    customer: Customer,
+    rental_setup: tuple[CatalogVariant, RentalAssetRecord, RentalTariffRecord, RentalTariffRecord],
+) -> None:
+    """Missing checklist parts reuse INCOMPLETE and preserve immutable return evidence."""
+    variant, asset, _, _ = rental_setup
+    actor = User(
+        email="missing-component@example.com",
+        full_name="Оператор возврата",
+        password_hash="not-used",
+    )
+    session.add(actor)
+    session.commit()
+    lifecycle = RentalLifecycleService(session)
+    nozzle = lifecycle.add_component(
+        asset.id,
+        RentalAssetComponentCreate(name="Насадка для пола"),
+        actor_id=actor.id,
+    )
+    orders = RentalOrderService(session)
+    ready = _ready_without_agreement(
+        session, customer, variant, asset, name="Неполный комплект"
+    )
+    orders.update_draft(ready.id, RentalOrderUpdate(deposit_received=Decimal("0")))
+    issued = orders.issue(ready.id)
+
+    with pytest.raises(ValueError, match="note is required"):
+        RentalComponentVerificationDraft(
+            component_id=nozzle.id,
+            name="Насадка для пола",
+            result=RentalComponentVerificationResult.MISSING,
+        )
+
+    command = RentalItemsReturn(
+        items=[
+            RentalItemReturnDraft(
+                item_id=issued.items[0].id,
+                condition=RentalReturnCondition.GOOD,
+                component_verifications=[
+                    RentalComponentVerificationDraft(
+                        component_id=nozzle.id,
+                        name="Насадка для пола",
+                        result=RentalComponentVerificationResult.MISSING,
+                        note="Клиент не вернул насадку",
+                    )
+                ],
+            )
+        ]
+    )
+    preview = orders.preview_return(issued.id, command)
+    returned = orders.return_items(issued.id, command)
+    lifecycle.update_component(
+        asset.id,
+        nozzle.id,
+        RentalAssetComponentUpdate(name="Переименованная насадка"),
+        actor_id=actor.id,
+    )
+    historical = orders.get(issued.id).items[0]
+
+    assert preview.items[0].condition is RentalReturnCondition.INCOMPLETE
+    assert preview.items[0].notes == "Насадка для пола: Клиент не вернул насадку"
+    assert returned.items[0].return_condition is RentalReturnCondition.INCOMPLETE
+    assert asset.availability is RentalAvailability.MAINTENANCE
+    assert historical.asset_identification_snapshot["components"][0]["name"] == (
+        "Насадка для пола"
+    )
+    assert historical.component_verification_snapshot == [
+        {
+            "component_id": str(nozzle.id),
+            "name": "Насадка для пола",
+            "expected_note": None,
+            "result": "missing",
+            "note": "Клиент не вернул насадку",
+        }
+    ]

@@ -16,7 +16,11 @@ from pydantic import (
     BaseModel as PydanticBaseModel,
 )
 
-from core.rental.enums import AssetCondition, RentalSealVerificationResult
+from core.rental.enums import (
+    AssetCondition,
+    RentalComponentVerificationResult,
+    RentalSealVerificationResult,
+)
 from core.rental.order_enums import (
     RentalOrderItemStatus,
     RentalOrderStatus,
@@ -247,6 +251,28 @@ class RentalSealVerificationDraft(PydanticBaseModel):
         return self
 
 
+class RentalComponentVerificationDraft(PydanticBaseModel):
+    """Operator verification of one component expected from the issue snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    component_id: UUIDv7
+    name: str = Field(min_length=1, max_length=200)
+    result: RentalComponentVerificationResult
+    note: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_problem_note(self) -> RentalComponentVerificationDraft:
+        """Require an explanation for a missing or damaged component."""
+        self.name = self.name.strip()
+        self.note = self.note.strip() if self.note else None
+        if not self.name:
+            raise ValueError("component name is required")
+        if self.result is not RentalComponentVerificationResult.PRESENT and not self.note:
+            raise ValueError("note is required for a component problem")
+        return self
+
+
 class RentalItemReturnDraft(PydanticBaseModel):
     """Operator-entered inspection facts; timing and overdue money remain server-owned."""
 
@@ -257,6 +283,9 @@ class RentalItemReturnDraft(PydanticBaseModel):
     damage_charge: Decimal = Field(default=Decimal("0"), max_digits=12, ge=0)
     notes: str | None = Field(default=None, max_length=4000)
     seal_verifications: list[RentalSealVerificationDraft] = Field(default_factory=list)
+    component_verifications: list[RentalComponentVerificationDraft] = Field(
+        default_factory=list
+    )
 
     @field_validator("damage_charge", mode="before")
     @classmethod
@@ -316,6 +345,7 @@ class RentalReturnPreviewItem(PydanticBaseModel):
     deposit_applied: Decimal
     asset_identification_snapshot: dict[str, object] | None
     seal_verifications: list[dict[str, object]]
+    component_verifications: list[dict[str, object]]
 
 
 class RentalReturnPreview(PydanticBaseModel):
@@ -368,6 +398,7 @@ class RentalOrderItemRead(PydanticBaseModel):
     deposit_applied: Decimal | None
     return_calculation_snapshot: dict[str, str | int | bool | None] | None
     seal_verification_snapshot: list[dict[str, object]] | None
+    component_verification_snapshot: list[dict[str, object]] | None
     status: RentalOrderItemStatus
 
     @computed_field

@@ -408,7 +408,7 @@ class RentalAgreementService:
         """Capture current optional asset identity inside the immutable agreement artifact."""
         asset = self._session.get(RentalAssetRecord, asset_id)
         if asset is None:
-            return {"serial_number": None, "seals": []}
+            return {"serial_number": None, "seals": [], "components": []}
         active_seals = sorted(
             (seal for seal in asset.seals if seal.status is RentalSealStatus.ACTIVE),
             key=lambda seal: (seal.location.casefold(), seal.seal_number.casefold()),
@@ -418,6 +418,17 @@ class RentalAgreementService:
             "seals": [
                 {"location": seal.location, "seal_number": seal.seal_number}
                 for seal in active_seals
+            ],
+            "components": [
+                {
+                    "component_id": str(component.id),
+                    "name": component.name,
+                    "note": component.note,
+                }
+                for component in sorted(
+                    (value for value in asset.components if value.is_active),
+                    key=lambda value: (value.sort_order, value.created_at),
+                )
             ],
         }
 
@@ -435,6 +446,11 @@ class RentalAgreementService:
                 + ", ".join(
                     f"{seal['location']} — {seal['seal_number']}" for seal in seals
                 )
+            )
+        components = identification.get("components") or []
+        if components:
+            parts.append(
+                "комплект: " + "; ".join(str(component["name"]) for component in components)
             )
         return f"; {'; '.join(parts)}" if parts else ""
 

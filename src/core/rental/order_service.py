@@ -18,6 +18,7 @@ from core.rental.agreement_service import (
 from core.rental.asset import RentalAsset
 from core.rental.enums import (
     AssetCondition,
+    RentalComponentVerificationResult,
     RentalSealStatus,
     RentalSealVerificationResult,
 )
@@ -109,6 +110,10 @@ class RentalIssueTimeError(Exception):
 
 class RentalSealVerificationError(RentalDomainError):
     """Raised when return seal observations do not match the issue snapshot."""
+
+
+class RentalComponentVerificationError(RentalDomainError):
+    """Raised when return component observations do not match the issue snapshot."""
 
 
 class RentalDepositUnconfirmedError(RentalDomainError):
@@ -555,12 +560,12 @@ class RentalOrderService:
                     calculation, returned_at=returned_at
                 )
                 if command.condition is RentalReturnCondition.LOST:
-                    asset.mark_lost_during_rental(command.notes or "Утрата при аренде")
+                    asset.mark_lost_during_rental(calculation.notes or "Утрата при аренде")
                     order.mark_item_lost(
                         item_id,
                         charged_amount=calculation.total_charge,
                         completed_at=returned_at,
-                        note=command.notes,
+                        note=calculation.notes,
                         overdue_state=calculation.overdue_state,
                         overdue_minutes=calculation.overdue_minutes,
                         overdue_charge=calculation.overdue_charge,
@@ -568,11 +573,14 @@ class RentalOrderService:
                         deposit_applied=calculation.deposit_applied,
                         return_calculation_snapshot=calculation_snapshot,
                         seal_verification_snapshot=calculation.seal_verifications,
+                        component_verification_snapshot=(
+                            calculation.component_verifications
+                        ),
                     )
                 else:
                     asset_condition = (
                         AssetCondition.GOOD
-                        if command.condition is RentalReturnCondition.GOOD
+                        if calculation.condition is RentalReturnCondition.GOOD
                         else AssetCondition.DAMAGED
                     )
                     asset.accept_return(asset_condition)
@@ -580,8 +588,8 @@ class RentalOrderService:
                         item_id,
                         charged_amount=calculation.total_charge,
                         returned_at=returned_at,
-                        return_note=command.notes,
-                        return_condition=command.condition,
+                        return_note=calculation.notes,
+                        return_condition=calculation.condition,
                         overdue_state=calculation.overdue_state,
                         overdue_minutes=calculation.overdue_minutes,
                         overdue_charge=calculation.overdue_charge,
@@ -589,10 +597,13 @@ class RentalOrderService:
                         deposit_applied=calculation.deposit_applied,
                         return_calculation_snapshot=calculation_snapshot,
                         seal_verification_snapshot=calculation.seal_verifications,
+                        component_verification_snapshot=(
+                            calculation.component_verifications
+                        ),
                     )
                 update_rental_asset_record(asset_records[item_id], asset)
                 asset_records[item_id].updated_by_id = actor_id
-                if command.condition in {
+                if calculation.condition in {
                     RentalReturnCondition.DAMAGED,
                     RentalReturnCondition.INCOMPLETE,
                 }:
@@ -601,10 +612,12 @@ class RentalOrderService:
                             id=generate_uuid_v7(),
                             rental_asset_id=domain_item.rental_asset_id,
                             order_item_id=item_id,
-                            description=command.notes or command.condition.value,
+                            description=(
+                                calculation.notes or calculation.condition.value
+                            ),
                             severity=(
                                 "major"
-                                if command.condition is RentalReturnCondition.DAMAGED
+                                if calculation.condition is RentalReturnCondition.DAMAGED
                                 else "moderate"
                             ),
                             recorded_by_id=actor_id,
@@ -672,6 +685,12 @@ class RentalOrderService:
             new_liabilities += liabilities
             snapshot = item.tariff_snapshot
             seal_verifications = self._normalized_seal_verifications(item, command)
+            component_verifications = self._normalized_component_verifications(
+                item, command
+            )
+            effective_condition, effective_notes = self._effective_return_condition(
+                command, component_verifications
+            )
             preview_items.append(
                 RentalReturnPreviewItem(
                     item_id=item.id,
@@ -682,8 +701,8 @@ class RentalOrderService:
                     issued_at=item.issued_at,
                     due_at=item.due_at,
                     grace_minutes=calculation.rule.grace_minutes,
-                    condition=command.condition,
-                    notes=command.notes,
+                    condition=effective_condition,
+                    notes=effective_notes,
                     overdue_state=calculation.overdue_state,
                     overdue_minutes=calculation.overdue_minutes,
                     overdue_blocks=calculation.overdue_blocks,
@@ -696,6 +715,7 @@ class RentalOrderService:
                     deposit_applied=deposit_applied,
                     asset_identification_snapshot=item.asset_identification_snapshot,
                     seal_verifications=seal_verifications,
+                    component_verifications=component_verifications,
                 )
             )
 
@@ -752,7 +772,7 @@ class RentalOrderService:
 
     @staticmethod
     def _asset_identification_snapshot(record: RentalAssetRecord) -> dict[str, object]:
-        """Freeze current optional serial and active seals for one physical issue."""
+        """Freeze current optional identity and active component checklist."""
         active_seals = sorted(
             (seal for seal in record.seals if seal.status is RentalSealStatus.ACTIVE),
             key=lambda seal: (seal.location.casefold(), seal.seal_number.casefold()),
@@ -763,6 +783,17 @@ class RentalOrderService:
             "seals": [
                 {"location": seal.location, "seal_number": seal.seal_number}
                 for seal in active_seals
+            ],
+            "components": [
+                {
+                    "component_id": str(component.id),
+                    "name": component.name,
+                    "note": component.note,
+                }
+                for component in sorted(
+                    (value for value in record.components if value.is_active),
+                    key=lambda value: (value.sort_order, value.created_at),
+                )
             ],
         }
 
@@ -804,6 +835,83 @@ class RentalOrderService:
             }
             for location, seal_number in sorted(expected)
         ]
+
+    @staticmethod
+    def _normalized_component_verifications(
+        item: RentalOrderItem,
+        command: RentalItemReturnDraft,
+    ) -> list[dict[str, object]]:
+        """Validate completeness observations against the immutable issue snapshot."""
+        identification = item.asset_identification_snapshot or {}
+        raw_expected = identification.get("components") or []
+        expected = {
+            str(value.get("component_id")): value
+            for value in raw_expected
+            if isinstance(value, dict)
+            and value.get("component_id")
+            and value.get("name")
+        }
+        submitted = command.component_verifications
+        if command.condition is RentalReturnCondition.LOST and expected and not submitted:
+            return [
+                {
+                    "component_id": component_id,
+                    "name": str(value["name"]),
+                    "expected_note": value.get("note"),
+                    "result": RentalComponentVerificationResult.MISSING.value,
+                    "note": command.notes,
+                }
+                for component_id, value in expected.items()
+            ]
+        submitted_by_id = {str(value.component_id): value for value in submitted}
+        if len(submitted_by_id) != len(submitted) or set(submitted_by_id) != set(expected):
+            raise RentalComponentVerificationError(
+                "Проверьте каждый элемент комплектности из снимка выдачи."
+            )
+        result: list[dict[str, object]] = []
+        for component_id, value in expected.items():
+            observation = submitted_by_id[component_id]
+            if observation.name != value["name"]:
+                raise RentalComponentVerificationError(
+                    "Название элемента комплектности не совпадает со снимком выдачи."
+                )
+            result.append(
+                {
+                    "component_id": component_id,
+                    "name": str(value["name"]),
+                    "expected_note": value.get("note"),
+                    "result": observation.result.value,
+                    "note": observation.note,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _effective_return_condition(
+        command: RentalItemReturnDraft,
+        component_verifications: list[dict[str, object]],
+    ) -> tuple[RentalReturnCondition, str | None]:
+        """Reuse existing INCOMPLETE/DAMAGED outcomes for component problems."""
+        condition = command.condition
+        if condition is not RentalReturnCondition.LOST:
+            results = {value["result"] for value in component_verifications}
+            if RentalComponentVerificationResult.MISSING.value in results:
+                condition = RentalReturnCondition.INCOMPLETE
+            elif (
+                RentalComponentVerificationResult.DAMAGED.value in results
+                and condition is RentalReturnCondition.GOOD
+            ):
+                condition = RentalReturnCondition.DAMAGED
+        notes = command.notes
+        if condition is not RentalReturnCondition.GOOD and not notes:
+            problems = [
+                f"{value['name']}: {value['note']}"
+                for value in component_verifications
+                if value["result"] != RentalComponentVerificationResult.PRESENT.value
+                and value.get("note")
+            ]
+            notes = "; ".join(problems) or None
+        return condition, notes
 
     def complete_items(
         self,

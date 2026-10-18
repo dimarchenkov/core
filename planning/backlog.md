@@ -309,7 +309,7 @@ Sprint 4.19 — Rental Asset Identification & Seals ✅ implementation / physica
   сохраняются в истории.
 - [ ] Physical UAT: своевременный, льготный, просроченный, частичный и проблемный возврат.
 
-### Sprint 4.19 — Rental Asset Identification & Seals
+### Sprint 4.19 — Rental Asset Identification, Seals & Components
 
 - [x] У `RentalAsset` есть необязательный серийный номер и append-only история пломб со
   статусами ACTIVE/REMOVED/BROKEN; отсутствие идентификации не блокирует выдачу.
@@ -320,6 +320,10 @@ Sprint 4.19 — Rental Asset Identification & Seals ✅ implementation / physica
   комментарий для проблемного результата.
 - [x] Результат проверки сохраняет ожидаемое место/номер, результат и комментарий; текущие
   данные `RentalAsset` не используются для пересчёта истории.
+- [x] Необязательная `RentalAssetComponent` хранит упорядоченную текущую комплектность без
+  Product/Variant/SKU/Inventory; add/edit/deactivate/reorder влияют только на будущие выдачи.
+- [x] Выдача и договор замораживают активный список компонентов, возврат сохраняет
+  PRESENT/MISSING/DAMAGED и использует существующие INCOMPLETE/DAMAGED transitions.
 - [ ] Physical UAT: реальные серийные номера, три пломбы, замена одной пломбы, выдача, договор и
   возврат с нормальным и проблемным результатом на desktop/iPhone.
 
@@ -397,7 +401,7 @@ Sprint 4.19 — Rental Asset Identification & Seals ✅ implementation / physica
 - [x] Operational `/rent`, атомарная выдача и производные item-level таймеры — Sprint 4.16.
 - [x] Rental Agreements/PDF — Sprint 4.17 (physical print UAT pending).
 - [x] Overdue charging сверх snapshotted grace/terms — Sprint 4.18 (physical UAT pending).
-- [x] Optional serial/seal identification, issue snapshot and return verification — Sprint 4.19
+- [x] Optional serial/seal/component identification, issue snapshot and return verification — Sprint 4.19
   (physical UAT pending).
 - [ ] Метрики конфликтов доступности, просрочек и ошибок операций аренды.
 

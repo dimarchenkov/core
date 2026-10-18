@@ -104,6 +104,66 @@ class RentalAssetSealRead(PydanticBaseModel):
     note: str | None
 
 
+class RentalAssetComponentCreate(PydanticBaseModel):
+    """Payload for adding one optional completeness checklist element."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        """Reject whitespace-only component names."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Component name is required.")
+        return normalized
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        """Store blank optional notes as absent."""
+        normalized = (value or "").strip()
+        return normalized or None
+
+
+class RentalAssetComponentUpdate(RentalAssetComponentCreate):
+    """Payload for editing future-issue component configuration."""
+
+
+class RentalAssetComponentOrder(PydanticBaseModel):
+    """Complete active-component order selected by the operator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    component_ids: list[UUIDv7]
+
+    @field_validator("component_ids")
+    @classmethod
+    def require_unique_ids(cls, value: list[UUIDv7]) -> list[UUIDv7]:
+        """Prevent ambiguous duplicate positions."""
+        if len(value) != len(set(value)):
+            raise ValueError("Each component may appear only once.")
+        return value
+
+
+class RentalAssetComponentRead(PydanticBaseModel):
+    """One current or deactivated asset checklist element."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: UUIDv7
+    rental_asset_id: UUIDv7
+    name: str
+    note: str | None
+    sort_order: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class MaintenanceCreate(PydanticBaseModel):
     """Payload for appending one maintenance journal entry."""
 
@@ -232,6 +292,7 @@ class RentalAssetPassportRead(PydanticBaseModel):
     damages: list[DamageRead]
     condition_photos: list[ConditionPhotoRead]
     seals: list[RentalAssetSealRead]
+    components: list[RentalAssetComponentRead]
     economics: RentalAssetEconomicsRead
 
 

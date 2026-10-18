@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -74,6 +75,11 @@ class RentalAssetRecord(BaseModel):
         back_populates="rental_asset",
         order_by="RentalAssetSealRecord.installed_at",
     )
+    components: Mapped[list[RentalAssetComponentRecord]] = relationship(
+        "RentalAssetComponentRecord",
+        back_populates="rental_asset",
+        order_by="RentalAssetComponentRecord.sort_order",
+    )
 
     def soft_delete(self, actor_id: UUIDv7 | None = None) -> None:
         """Reject deletion because RentalAsset identity and history are permanent."""
@@ -115,6 +121,23 @@ class RentalAssetSealRecord(BaseModel):
     def restore(self) -> None:
         """Reject restoration because seal records cannot be deleted."""
         raise RuntimeError("Rental asset seals cannot be restored.")
+
+
+class RentalAssetComponentRecord(BaseModel):
+    """One optional checklist part belonging to a physical rental asset."""
+
+    __tablename__ = "rental_asset_components"
+
+    rental_asset_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("rental_assets.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    rental_asset: Mapped[RentalAssetRecord] = relationship(
+        "RentalAssetRecord", back_populates="components"
+    )
 
 
 class RentalOrderRecord(BaseModel):
@@ -265,6 +288,9 @@ class RentalOrderItemRecord(BaseModel):
         JSON, nullable=True
     )
     seal_verification_snapshot: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    component_verification_snapshot: Mapped[list[dict[str, object]] | None] = mapped_column(
         JSON, nullable=True
     )
     status: Mapped[RentalOrderItemStatus] = mapped_column(

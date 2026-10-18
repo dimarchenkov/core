@@ -66,6 +66,7 @@ class RentalOrderItem:
     _deposit_applied: Decimal | None
     _return_calculation_snapshot: dict[str, str | int | bool | None] | None
     _seal_verification_snapshot: list[dict[str, object]] | None
+    _component_verification_snapshot: list[dict[str, object]] | None
     _status: RentalOrderItemStatus
 
     def __init__(
@@ -98,6 +99,7 @@ class RentalOrderItem:
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
         seal_verification_snapshot: list[dict[str, object]] | None = None,
+        component_verification_snapshot: list[dict[str, object]] | None = None,
         status: RentalOrderItemStatus = RentalOrderItemStatus.PREPARED,
     ) -> None:
         """Initialize entity state for aggregate construction or rehydration."""
@@ -136,6 +138,11 @@ class RentalOrderItem:
         self._seal_verification_snapshot = (
             [dict(value) for value in seal_verification_snapshot]
             if seal_verification_snapshot is not None
+            else None
+        )
+        self._component_verification_snapshot = (
+            [dict(value) for value in component_verification_snapshot]
+            if component_verification_snapshot is not None
             else None
         )
         self._status = status
@@ -341,6 +348,15 @@ class RentalOrderItem:
         )
 
     @property
+    def component_verification_snapshot(self) -> list[dict[str, object]] | None:
+        """Return immutable component observations recorded during return."""
+        return (
+            [dict(value) for value in self._component_verification_snapshot]
+            if self._component_verification_snapshot is not None
+            else None
+        )
+
+    @property
     def status(self) -> RentalOrderItemStatus:
         """Return the current item lifecycle state."""
         return self._status
@@ -389,6 +405,7 @@ class RentalOrderItem:
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
         seal_verification_snapshot: list[dict[str, object]] | None = None,
+        component_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete an issued item as physically returned."""
         self._complete(
@@ -404,6 +421,7 @@ class RentalOrderItem:
             deposit_applied=deposit_applied,
             return_calculation_snapshot=return_calculation_snapshot,
             seal_verification_snapshot=seal_verification_snapshot,
+            component_verification_snapshot=component_verification_snapshot,
         )
 
     def _mark_lost(
@@ -419,6 +437,7 @@ class RentalOrderItem:
         overdue_charge: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
         seal_verification_snapshot: list[dict[str, object]] | None = None,
+        component_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete an issued item as lost without implying physical return."""
         self._complete(
@@ -434,6 +453,7 @@ class RentalOrderItem:
             deposit_applied=deposit_applied,
             return_calculation_snapshot=return_calculation_snapshot,
             seal_verification_snapshot=seal_verification_snapshot,
+            component_verification_snapshot=component_verification_snapshot,
         )
 
     def _cancel(self) -> None:
@@ -457,6 +477,7 @@ class RentalOrderItem:
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
         seal_verification_snapshot: list[dict[str, object]] | None = None,
+        component_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Record one terminal outcome from the issued state."""
         if self._status is not RentalOrderItemStatus.ISSUED:
@@ -477,6 +498,11 @@ class RentalOrderItem:
         self._seal_verification_snapshot = (
             [dict(value) for value in seal_verification_snapshot]
             if seal_verification_snapshot is not None
+            else None
+        )
+        self._component_verification_snapshot = (
+            [dict(value) for value in component_verification_snapshot]
+            if component_verification_snapshot is not None
             else None
         )
 
@@ -1007,6 +1033,7 @@ class RentalOrder:
         deposit_applied: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
         seal_verification_snapshot: list[dict[str, object]] | None = None,
+        component_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete one issued item as returned and close when it is the last."""
         self._require_status(RentalOrderStatus.ISSUED)
@@ -1035,6 +1062,7 @@ class RentalOrder:
             ),
             return_calculation_snapshot=return_calculation_snapshot,
             seal_verification_snapshot=seal_verification_snapshot,
+            component_verification_snapshot=component_verification_snapshot,
         )
         self.close_if_completed(closed_at=returned_at)
 
@@ -1052,6 +1080,7 @@ class RentalOrder:
         overdue_charge: Decimal | None = None,
         return_calculation_snapshot: dict[str, str | int | bool | None] | None = None,
         seal_verification_snapshot: list[dict[str, object]] | None = None,
+        component_verification_snapshot: list[dict[str, object]] | None = None,
     ) -> None:
         """Complete one issued item as lost and close when it is the last."""
         self._require_status(RentalOrderStatus.ISSUED)
@@ -1079,6 +1108,7 @@ class RentalOrder:
             ),
             return_calculation_snapshot=return_calculation_snapshot,
             seal_verification_snapshot=seal_verification_snapshot,
+            component_verification_snapshot=component_verification_snapshot,
         )
         self.close_if_completed(closed_at=completed_at)
 

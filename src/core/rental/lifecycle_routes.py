@@ -20,6 +20,10 @@ from core.rental.lifecycle_schemas import (
     DamageRead,
     MaintenanceCreate,
     MaintenanceRead,
+    RentalAssetComponentCreate,
+    RentalAssetComponentOrder,
+    RentalAssetComponentRead,
+    RentalAssetComponentUpdate,
     RentalAssetIdentificationUpdate,
     RentalAssetPassportRead,
     RentalAssetSealCreate,
@@ -27,6 +31,7 @@ from core.rental.lifecycle_schemas import (
     RentalAssetSealStatusUpdate,
 )
 from core.rental.lifecycle_service import (
+    RentalComponentStateError,
     RentalLifecycleNotFoundError,
     RentalLifecycleReferenceError,
     RentalLifecycleService,
@@ -118,6 +123,88 @@ def update_asset_seal_status(
         raise HTTPException(status_code=404, detail="Rental seal not found.") from exc
     except RentalSealStateError as exc:
         raise HTTPException(status_code=409, detail="Seal is no longer active.") from exc
+
+
+@router.post(
+    "/assets/{asset_id}/components",
+    response_model=RentalAssetComponentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_asset_component(
+    asset_id: UUIDv7,
+    data: RentalAssetComponentCreate,
+    service: Annotated[RentalLifecycleService, Depends(get_lifecycle_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalAssetComponentRead:
+    """Add one optional checklist element to current asset configuration."""
+    try:
+        return service.add_component(asset_id, data, actor_id=current_user.id)
+    except RentalLifecycleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental asset not found.") from exc
+
+
+@router.patch(
+    "/assets/{asset_id}/components/{component_id}",
+    response_model=RentalAssetComponentRead,
+)
+def update_asset_component(
+    asset_id: UUIDv7,
+    component_id: UUIDv7,
+    data: RentalAssetComponentUpdate,
+    service: Annotated[RentalLifecycleService, Depends(get_lifecycle_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalAssetComponentRead:
+    """Edit a component for future issues only."""
+    try:
+        return service.update_component(
+            asset_id, component_id, data, actor_id=current_user.id
+        )
+    except RentalLifecycleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental component not found.") from exc
+    except RentalComponentStateError as exc:
+        raise HTTPException(status_code=409, detail="Rental component is inactive.") from exc
+
+
+@router.delete(
+    "/assets/{asset_id}/components/{component_id}",
+    response_model=RentalAssetComponentRead,
+)
+def deactivate_asset_component(
+    asset_id: UUIDv7,
+    component_id: UUIDv7,
+    service: Annotated[RentalLifecycleService, Depends(get_lifecycle_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> RentalAssetComponentRead:
+    """Deactivate a component without deleting history or old snapshots."""
+    try:
+        return service.deactivate_component(
+            asset_id, component_id, actor_id=current_user.id
+        )
+    except RentalLifecycleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental component not found.") from exc
+    except RentalComponentStateError as exc:
+        raise HTTPException(status_code=409, detail="Rental component is inactive.") from exc
+
+
+@router.put(
+    "/assets/{asset_id}/components/order",
+    response_model=list[RentalAssetComponentRead],
+)
+def reorder_asset_components(
+    asset_id: UUIDv7,
+    data: RentalAssetComponentOrder,
+    service: Annotated[RentalLifecycleService, Depends(get_lifecycle_service)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> list[RentalAssetComponentRead]:
+    """Reorder every active component using one unambiguous command."""
+    try:
+        return service.reorder_components(asset_id, data, actor_id=current_user.id)
+    except RentalLifecycleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Rental asset not found.") from exc
+    except RentalComponentStateError as exc:
+        raise HTTPException(
+            status_code=409, detail="Component order is stale; reload the asset."
+        ) from exc
 
 
 @router.post(

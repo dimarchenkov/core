@@ -42,3 +42,11 @@ class RentalSealVerificationResult(StrEnum):
     BROKEN = "broken"
     MISSING = "missing"
     MISMATCH = "mismatch"
+
+
+class RentalComponentVerificationResult(StrEnum):
+    """Operator observation for one component expected from the issue snapshot."""
+
+    PRESENT = "present"
+    MISSING = "missing"
+    DAMAGED = "damaged"

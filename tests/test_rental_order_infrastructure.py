@@ -44,6 +44,7 @@ from core.rental.exceptions import RentalDomainError
 from core.rental.lifecycle_routes import get_lifecycle_image_service
 from core.rental.mapper import rental_order_from_record, rental_order_to_record
 from core.rental.models import (
+    RentalAssetComponentRecord,
     RentalAssetRecord,
     RentalAssetSealRecord,
     RentalConditionPhotoRecord,
@@ -93,6 +94,7 @@ def session() -> Generator[Session]:
             Publication.__table__,
             StockMovement.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetComponentRecord.__table__,
             RentalAssetSealRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,

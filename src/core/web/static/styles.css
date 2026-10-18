@@ -454,13 +454,17 @@ body.catalog-drawer-open { overflow: hidden; }
 .return-calculation .return-total { padding-top: 8px; border-top: 1px solid var(--line); font-size: 1.05rem; }
 .return-calculation > small { color: var(--muted); }
 .asset-seal-row { align-items: center; }
+.asset-component-list { display: grid; gap: 10px; }
+.asset-component-row form { display: grid; gap: 10px; }
+.asset-component-add summary { cursor: pointer; font-weight: 800; }
+.asset-component-add form { display: grid; gap: 12px; margin-top: 14px; }
 .return-identification { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: #f7f5ef; }
 .return-identification > p { margin: 8px 0 14px; }
-.return-seal-row { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(120px, .7fr) minmax(180px, 1fr); gap: 12px; align-items: end; padding: 12px 0; border-top: 1px solid var(--line); }
-.return-seal-row small, .return-verification-history, .return-verification-history span { display: block; }
+.return-seal-row, .return-component-row { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(120px, .7fr) minmax(180px, 1fr); gap: 12px; align-items: end; padding: 12px 0; border-top: 1px solid var(--line); }
+.return-seal-row small, .return-component-row small, .return-verification-history, .return-verification-history span { display: block; }
 .return-verification-history { grid-column: 1 / -1; padding-top: 8px; }
 .seal-warning { color: var(--danger); }
-.return-seal-row.seal-problem { margin-inline: -8px; padding-inline: 8px; border-radius: 10px; background: #fff0ec; }
+.return-seal-row.seal-problem, .return-component-row.component-problem { margin-inline: -8px; padding-inline: 8px; border-radius: 10px; background: #fff0ec; }
 .return-deposit-preview { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .return-deposit-preview .section-heading { grid-column: 1 / -1; }
 .agreement-settings-card { display: grid; gap: 16px; }
@@ -746,7 +750,7 @@ body.catalog-drawer-open { overflow: hidden; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 520px) {
-  .return-seal-row { grid-template-columns: 1fr; }
+  .return-seal-row, .return-component-row { grid-template-columns: 1fr; }
   .actions, .field-row, .search-row, .order-facts, .rental-actions { grid-template-columns: 1fr; }
   .action-card { min-height: 112px; }
   .catalog-row { grid-template-columns: auto 1fr; }

@@ -22,7 +22,14 @@ from core.labels.service import RentalAssetLabelService
 from core.main import create_app
 from core.pricing.models import Price
 from core.rental.enums import AssetCondition, AssetPurpose, RentalAvailability
+from core.rental.lifecycle_schemas import (
+    RentalAssetComponentCreate,
+    RentalAssetComponentOrder,
+    RentalAssetComponentUpdate,
+)
+from core.rental.lifecycle_service import RentalLifecycleService
 from core.rental.models import (
+    RentalAssetComponentRecord,
     RentalAssetRecord,
     RentalAssetSealRecord,
     RentalOrderItemRecord,
@@ -49,6 +56,7 @@ def session() -> Generator[Session]:
             CatalogVariantBarcode.__table__,
             Price.__table__,
             RentalAssetRecord.__table__,
+            RentalAssetComponentRecord.__table__,
             RentalAssetSealRecord.__table__,
             RentalOrderRecord.__table__,
             RentalOrderItemRecord.__table__,
@@ -245,3 +253,60 @@ def test_historical_asset_remains_searchable_and_printable(
     assert row is not None
     assert row[0].id == asset.id
     assert content.startswith(b"%PDF-")
+
+
+def test_asset_components_are_optional_editable_ordered_and_soft_deactivated(
+    session: Session,
+    asset: RentalAssetRecord,
+    user: User,
+) -> None:
+    """Current checklist configuration stays lightweight and retains removed rows."""
+    lifecycle = RentalLifecycleService(session)
+
+    assert session.query(RentalAssetComponentRecord).count() == 0
+    tank = lifecycle.add_component(
+        asset.id,
+        RentalAssetComponentCreate(name="Бак"),
+        actor_id=user.id,
+    )
+    hose = lifecycle.add_component(
+        asset.id,
+        RentalAssetComponentCreate(name="Шланг", note="Синий"),
+        actor_id=user.id,
+    )
+    nozzle = lifecycle.add_component(
+        asset.id,
+        RentalAssetComponentCreate(name="Насадка"),
+        actor_id=user.id,
+    )
+
+    ordered = lifecycle.reorder_components(
+        asset.id,
+        RentalAssetComponentOrder(component_ids=[hose.id, tank.id, nozzle.id]),
+        actor_id=user.id,
+    )
+    edited = lifecycle.update_component(
+        asset.id,
+        tank.id,
+        RentalAssetComponentUpdate(name="Основной бак", note="Прозрачный"),
+        actor_id=user.id,
+    )
+    removed = lifecycle.deactivate_component(asset.id, nozzle.id, actor_id=user.id)
+    persisted = (
+        session.query(RentalAssetComponentRecord)
+        .filter(
+            RentalAssetComponentRecord.rental_asset_id == asset.id,
+            RentalAssetComponentRecord.is_active.is_(True),
+        )
+        .order_by(RentalAssetComponentRecord.sort_order)
+        .all()
+    )
+
+    assert [component.name for component in ordered] == ["Шланг", "Бак", "Насадка"]
+    assert edited.name == "Основной бак"
+    assert edited.note == "Прозрачный"
+    assert removed.is_active is False
+    assert [
+        component.name for component in persisted
+    ] == ["Шланг", "Основной бак"]
+    assert session.get(RentalAssetComponentRecord, nozzle.id) is not None

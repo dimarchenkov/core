@@ -156,6 +156,9 @@ def update_rental_order_record(
         item_record.deposit_applied = domain_item.deposit_applied
         item_record.return_calculation_snapshot = domain_item.return_calculation_snapshot
         item_record.seal_verification_snapshot = domain_item.seal_verification_snapshot
+        item_record.component_verification_snapshot = (
+            domain_item.component_verification_snapshot
+        )
         item_record.updated_by_id = actor_id
 
 
@@ -195,6 +198,7 @@ def _rental_order_item_to_record(
         deposit_applied=item.deposit_applied,
         return_calculation_snapshot=item.return_calculation_snapshot,
         seal_verification_snapshot=item.seal_verification_snapshot,
+        component_verification_snapshot=item.component_verification_snapshot,
         status=item.status,
         created_by_id=actor_id,
     )
@@ -230,5 +234,6 @@ def _rental_order_item_from_record(record: RentalOrderItemRecord) -> RentalOrder
         deposit_applied=record.deposit_applied,
         return_calculation_snapshot=record.return_calculation_snapshot,
         seal_verification_snapshot=record.seal_verification_snapshot,
+        component_verification_snapshot=record.component_verification_snapshot,
         status=record.status,
     )

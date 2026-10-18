@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.catalog.models import CatalogProduct, CatalogVariant
@@ -22,6 +22,10 @@ from core.rental.lifecycle_schemas import (
     DamageRead,
     MaintenanceCreate,
     MaintenanceRead,
+    RentalAssetComponentCreate,
+    RentalAssetComponentOrder,
+    RentalAssetComponentRead,
+    RentalAssetComponentUpdate,
     RentalAssetIdentificationUpdate,
     RentalAssetPassportRead,
     RentalAssetSealCreate,
@@ -30,6 +34,7 @@ from core.rental.lifecycle_schemas import (
 )
 from core.rental.mapper import rental_asset_from_record, update_rental_asset_record
 from core.rental.models import (
+    RentalAssetComponentRecord,
     RentalAssetRecord,
     RentalAssetSealRecord,
     RentalConditionPhotoRecord,
@@ -52,6 +57,10 @@ class RentalLifecycleReferenceError(Exception):
 
 class RentalSealStateError(Exception):
     """Raised when a historical seal is asked to perform an invalid transition."""
+
+
+class RentalComponentStateError(Exception):
+    """Raised when component ordering or mutation does not match active configuration."""
 
 
 class RentalLifecycleService:
@@ -109,6 +118,17 @@ class RentalLifecycleService:
                 .order_by(
                     RentalAssetSealRecord.installed_at,
                     RentalAssetSealRecord.created_at,
+                )
+            ).all()
+        )
+        component_records = list(
+            self._session.scalars(
+                select(RentalAssetComponentRecord)
+                .where(RentalAssetComponentRecord.rental_asset_id == asset_id)
+                .order_by(
+                    RentalAssetComponentRecord.is_active.desc(),
+                    RentalAssetComponentRecord.sort_order,
+                    RentalAssetComponentRecord.created_at,
                 )
             ).all()
         )
@@ -207,6 +227,10 @@ class RentalLifecycleService:
                 for record in photo_records
             ],
             seals=[RentalAssetSealRead.model_validate(record) for record in seal_records],
+            components=[
+                RentalAssetComponentRead.model_validate(record)
+                for record in component_records
+            ],
             economics=RentalEconomicsService(self._session).get_asset(asset.id),
         )
 
@@ -301,6 +325,115 @@ class RentalLifecycleService:
         self._session.commit()
         self._session.refresh(record)
         return RentalAssetSealRead.model_validate(record)
+
+    def add_component(
+        self,
+        asset_id: UUIDv7,
+        data: RentalAssetComponentCreate,
+        *,
+        actor_id: UUIDv7,
+    ) -> RentalAssetComponentRead:
+        """Append one active checklist element for future issues."""
+        self._require_asset(asset_id)
+        highest_order = self._session.scalar(
+            select(func.max(RentalAssetComponentRecord.sort_order)).where(
+                RentalAssetComponentRecord.rental_asset_id == asset_id,
+                RentalAssetComponentRecord.is_active.is_(True),
+            )
+        )
+        record = RentalAssetComponentRecord(
+            id=generate_uuid_v7(),
+            rental_asset_id=asset_id,
+            name=data.name,
+            note=data.note,
+            sort_order=(highest_order if highest_order is not None else -1) + 1,
+            is_active=True,
+            created_by_id=actor_id,
+        )
+        self._session.add(record)
+        self._session.commit()
+        self._session.refresh(record)
+        return RentalAssetComponentRead.model_validate(record)
+
+    def update_component(
+        self,
+        asset_id: UUIDv7,
+        component_id: UUIDv7,
+        data: RentalAssetComponentUpdate,
+        *,
+        actor_id: UUIDv7,
+    ) -> RentalAssetComponentRead:
+        """Edit current configuration without rewriting historical snapshots."""
+        record = self._component_for_update(asset_id, component_id)
+        if not record.is_active:
+            raise RentalComponentStateError
+        record.name = data.name
+        record.note = data.note
+        record.updated_by_id = actor_id
+        self._session.commit()
+        self._session.refresh(record)
+        return RentalAssetComponentRead.model_validate(record)
+
+    def deactivate_component(
+        self,
+        asset_id: UUIDv7,
+        component_id: UUIDv7,
+        *,
+        actor_id: UUIDv7,
+    ) -> RentalAssetComponentRead:
+        """Remove a component from future issues while retaining its record."""
+        record = self._component_for_update(asset_id, component_id)
+        if not record.is_active:
+            raise RentalComponentStateError
+        record.is_active = False
+        record.updated_by_id = actor_id
+        self._session.commit()
+        self._session.refresh(record)
+        return RentalAssetComponentRead.model_validate(record)
+
+    def reorder_components(
+        self,
+        asset_id: UUIDv7,
+        data: RentalAssetComponentOrder,
+        *,
+        actor_id: UUIDv7,
+    ) -> list[RentalAssetComponentRead]:
+        """Persist an exact order for all active checklist elements."""
+        self._require_asset(asset_id)
+        records = list(
+            self._session.scalars(
+                select(RentalAssetComponentRecord)
+                .where(
+                    RentalAssetComponentRecord.rental_asset_id == asset_id,
+                    RentalAssetComponentRecord.is_active.is_(True),
+                )
+                .with_for_update()
+            ).all()
+        )
+        by_id = {record.id: record for record in records}
+        if set(data.component_ids) != set(by_id):
+            raise RentalComponentStateError
+        for sort_order, component_id in enumerate(data.component_ids):
+            record = by_id[component_id]
+            record.sort_order = sort_order
+            record.updated_by_id = actor_id
+        self._session.commit()
+        return [
+            RentalAssetComponentRead.model_validate(by_id[value])
+            for value in data.component_ids
+        ]
+
+    def _component_for_update(
+        self, asset_id: UUIDv7, component_id: UUIDv7
+    ) -> RentalAssetComponentRecord:
+        """Lock one component and ensure it belongs to the selected asset."""
+        self._require_asset(asset_id)
+        record = self._session.get(
+            RentalAssetComponentRecord, component_id, with_for_update=True
+        )
+        if record is None or record.rental_asset_id != asset_id:
+            raise RentalLifecycleNotFoundError
+        return record
 
     def add_maintenance(
         self,

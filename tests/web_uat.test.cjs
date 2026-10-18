@@ -1182,13 +1182,17 @@ test('Rental operations cards and issue confirmation stack for mobile', () => {
   assert.match(styles, /\.issue-preview-list/);
 });
 
-test('Rental Asset passport exposes optional serial number and append-only seals', () => {
+test('Rental Asset passport exposes serial, seals and ordered optional components', () => {
   assert.match(source, /Серийный номер/);
   assert.match(source, /Контрольные пломбы/);
   assert.match(source, /Добавить пломбу/);
   assert.match(source, /\/api\/operations\/rental\/assets\/\$\{state\.operations\.asset\.id\}\/identification/);
   assert.match(source, /\/api\/operations\/rental\/assets\/\$\{state\.operations\.asset\.id\}\/seals/);
   assert.match(source, /Предыдущая пломба в этом месте сохранена в истории/);
+  assert.match(source, /Комплектность/);
+  assert.match(source, /Добавить элемент комплектности/);
+  assert.match(source, /\/components\/order/);
+  assert.match(source, /Старые выдачи не изменены/);
 });
 
 test('Return identification hides empty data and renders the immutable issue snapshot', () => {
@@ -1203,10 +1207,17 @@ test('Return identification hides empty data and renders the immutable issue sna
         {location:'Корпус', seal_number:'001842'},
         {location:'Шланг', seal_number:'001844'},
       ],
+      components:[
+        {component_id:'component-1', name:'Бак', note:null},
+        {component_id:'component-2', name:'Насадка', note:'Для пола'},
+      ],
     },
   }, {seal_verifications:[
     {expected_seal_number:'001842', result:'ok', note:null},
     {expected_seal_number:'001844', result:'mismatch', note:'Другой номер'},
+  ], component_verifications:[
+    {component_id:'component-1', name:'Бак', result:'present', note:null},
+    {component_id:'component-2', name:'Насадка', result:'missing', note:'Не вернули'},
   ]});
 
   assert.equal(empty, '');
@@ -1215,8 +1226,12 @@ test('Return identification hides empty data and renders the immutable issue sna
   assert.match(identified, /Шланг — 001844/);
   assert.match(identified, /value="mismatch" selected/);
   assert.match(identified, /Все соответствуют/);
+  assert.match(identified, /Комплектность[\s\S]*Бак[\s\S]*Насадка/);
+  assert.match(identified, /Все элементы на месте/);
+  assert.match(identified, /value="missing" selected/);
   assert.match(source, /item\.asset_identification_snapshot \|\| \{\}/);
   assert.match(source, /seal_verification_snapshot/);
+  assert.match(source, /component_verification_snapshot/);
 });
 
 test('Switching active Sale changes the Catalog add target without sharing users', async () => {
