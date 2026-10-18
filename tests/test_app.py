@@ -79,6 +79,8 @@ def test_phone_first_workflow_interface_is_available() -> None:
     assert "По длительности" in script.text
     assert "Временной слот" in script.text
     assert "Договор обязателен" in script.text
+    assert "Без сформированного договора оборудование нельзя будет выдать." in script.text
+    assert "Блокировка выдачи будет добавлена" not in script.text
     assert "История" in script.text
     assert "/tariff-items" in script.text
     assert "Другой срок" in script.text

@@ -4511,19 +4511,33 @@ function rentalTariffById(variantId, tariffId) {
 function tariffFormTypeFields(type, tariff = null) {
   const duration = type === "duration";
   const minutes = Number(tariff?.duration_minutes || 0);
-  return `<div class="tariff-type-fields" data-duration-fields ${duration ? "" : "hidden"}>
+  return `<div class="tariff-type-fields${duration ? "" : " hidden"}" data-duration-fields>
       <div class="field-row">
         <div class="field"><label for="tariff-duration-hours">Часы</label><input id="tariff-duration-hours" name="duration_hours" type="number" min="0" max="720" step="1" inputmode="numeric" value="${duration ? Math.floor(minutes / 60) : 0}"></div>
         <div class="field"><label for="tariff-duration-minutes">Минуты</label><input id="tariff-duration-minutes" name="duration_minutes_part" type="number" min="0" max="59" step="1" inputmode="numeric" value="${duration ? minutes % 60 : 0}"></div>
       </div>
     </div>
-    <div class="tariff-type-fields" data-slot-fields ${duration ? "hidden" : ""}>
+    <div class="tariff-type-fields${duration ? " hidden" : ""}" data-slot-fields>
       <div class="field-row tariff-time-row">
-        <div class="field"><label for="tariff-slot-start">Начало</label><input id="tariff-slot-start" name="slot_start" type="time" value="${escapeHtml(String(tariff?.slot_start || "09:00").slice(0, 5))}"></div>
-        <div class="field"><label for="tariff-slot-end">Окончание</label><input id="tariff-slot-end" name="slot_end" type="time" value="${escapeHtml(String(tariff?.slot_end || "14:00").slice(0, 5))}"></div>
+        <div class="field"><label for="tariff-slot-start">Начало</label><input id="tariff-slot-start" name="slot_start" type="time" data-tariff-required value="${escapeHtml(String(tariff?.slot_start || "09:00").slice(0, 5))}"></div>
+        <div class="field"><label for="tariff-slot-end">Окончание</label><input id="tariff-slot-end" name="slot_end" type="time" data-tariff-required value="${escapeHtml(String(tariff?.slot_end || "14:00").slice(0, 5))}"></div>
       </div>
       <p class="muted small">Слот должен начинаться и заканчиваться в один календарный день.</p>
     </div>`;
+}
+
+function syncRentalTariffTypeFields(form, selectedType = null) {
+  const type = selectedType || form.querySelector('[name="type"]:checked').value;
+  [
+    [form.querySelector("[data-duration-fields]"), type === "duration"],
+    [form.querySelector("[data-slot-fields]"), type === "slot"],
+  ].forEach(([container, active]) => {
+    container.classList.toggle("hidden", !active);
+    container.querySelectorAll("input, select, textarea").forEach((control) => {
+      control.disabled = !active;
+      control.required = active && control.hasAttribute("data-tariff-required");
+    });
+  });
 }
 
 function openRentalTariffEditor(variantId, tariffId = null) {
@@ -4547,7 +4561,7 @@ function openRentalTariffEditor(variantId, tariffId = null) {
       <div class="field"><label for="tariff-grace">Льготный период, мин</label><input id="tariff-grace" name="grace_minutes" type="number" min="0" max="10080" step="1" inputmode="numeric" value="${tariff?.grace_minutes ?? 30}" required></div>
     </div>
     <div class="field"><label for="tariff-deposit">Обеспечительный платёж, ₽ <span class="muted">(необязательно)</span></label><input id="tariff-deposit" name="deposit_amount" type="number" min="0" step="0.01" inputmode="decimal" value="${escapeHtml(recommendedDeposit)}"><small class="muted">Если оставить пустым, Core скопирует текущий рекомендуемый залог Variant в эту версию.</small></div>
-    <label class="tariff-agreement"><input name="requires_agreement" type="checkbox" ${tariff?.requires_agreement ? "checked" : ""}><span><strong>Договор обязателен</strong><small>Блокировка выдачи будет добавлена в следующем Rental workflow.</small></span></label>
+    <label class="tariff-agreement"><input name="requires_agreement" type="checkbox" ${tariff?.requires_agreement ? "checked" : ""}><span><strong>Договор обязателен</strong><small>Без сформированного договора оборудование нельзя будет выдать.</small></span></label>
     <div class="field-row">
       <div class="field"><label for="tariff-valid-from">Действует с</label><input id="tariff-valid-from" name="valid_from" type="date" value="${escapeHtml(tariff?.valid_from || localToday())}" required></div>
       <div class="field"><label for="tariff-valid-to">Действует до <span class="muted">(необязательно)</span></label><input id="tariff-valid-to" name="valid_to" type="date" value="${escapeHtml(tariff?.valid_to || "")}"></div>
@@ -4555,12 +4569,8 @@ function openRentalTariffEditor(variantId, tariffId = null) {
     <div class="catalog-dialog-actions"><button class="button secondary" data-action-cancel type="button">Отмена</button><button class="button" type="submit">${editing ? "Сохранить новую версию" : "Создать тариф"}</button></div>
   </form>`);
   const form = dialog.querySelector("#rental-tariff-form");
-  const syncTypeFields = () => {
-    const selected = form.querySelector('[name="type"]:checked').value;
-    form.querySelector("[data-duration-fields]").classList.toggle("hidden", selected !== "duration");
-    form.querySelector("[data-slot-fields]").classList.toggle("hidden", selected !== "slot");
-  };
-  form.querySelectorAll('[name="type"]').forEach((input) => input.addEventListener("change", syncTypeFields));
+  syncRentalTariffTypeFields(form, type);
+  form.querySelectorAll('[name="type"]').forEach((input) => input.addEventListener("change", () => syncRentalTariffTypeFields(form)));
   dialog.querySelectorAll("[data-action-cancel]").forEach((button) => button.addEventListener("click", () => dialog.close()));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();

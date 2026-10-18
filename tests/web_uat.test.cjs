@@ -55,6 +55,63 @@ test('Product text debounces, category saves immediately, PATCH includes only Pr
   assert.equal(s.status.textContent, 'Сохранено');
 });
 
+test('Rental tariff create and edit fields follow selected type, not existing values', () => {
+  const s = setup();
+  const durationMarkup = s.context.tariffFormTypeFields('duration');
+  const emptySlotMarkup = s.context.tariffFormTypeFields('slot');
+  const savedSlotMarkup = s.context.tariffFormTypeFields('slot', {slot_start:'10:30:00', slot_end:'16:45:00'});
+
+  assert.match(durationMarkup, /class="tariff-type-fields hidden" data-slot-fields/);
+  assert.match(emptySlotMarkup, /class="tariff-type-fields" data-slot-fields/);
+  assert.match(emptySlotMarkup, /name="slot_start"[^>]*value="09:00"/);
+  assert.match(emptySlotMarkup, /name="slot_end"[^>]*value="14:00"/);
+  assert.match(savedSlotMarkup, /name="slot_start"[^>]*value="10:30"/);
+  assert.match(savedSlotMarkup, /name="slot_end"[^>]*value="16:45"/);
+  assert.doesNotMatch(emptySlotMarkup, /data-slot-fields hidden/);
+});
+
+test('Rental tariff type switching synchronizes visibility and browser validation', () => {
+  const s = setup();
+  const makeContainer = (required = false) => {
+    const control = {
+      disabled: false,
+      required: false,
+      hasAttribute: name => required && name === 'data-tariff-required',
+    };
+    return {
+      hidden: false,
+      control,
+      classList: { toggle(name, value) { assert.equal(name, 'hidden'); this.hidden = value; } },
+      querySelectorAll: () => [control],
+    };
+  };
+  const duration = makeContainer();
+  const slot = makeContainer(true);
+  duration.classList.hidden = false;
+  slot.classList.hidden = false;
+  const form = {
+    querySelector(selector) {
+      if (selector === '[data-duration-fields]') return duration;
+      if (selector === '[data-slot-fields]') return slot;
+      return {value:'duration'};
+    },
+  };
+
+  s.context.syncRentalTariffTypeFields(form, 'slot');
+  assert.equal(duration.classList.hidden, true);
+  assert.equal(duration.control.disabled, true);
+  assert.equal(slot.classList.hidden, false);
+  assert.equal(slot.control.disabled, false);
+  assert.equal(slot.control.required, true);
+
+  s.context.syncRentalTariffTypeFields(form, 'duration');
+  assert.equal(duration.classList.hidden, false);
+  assert.equal(duration.control.disabled, false);
+  assert.equal(slot.classList.hidden, true);
+  assert.equal(slot.control.disabled, true);
+  assert.equal(slot.control.required, false);
+});
+
 test('Failure preserves input, never reports saved, retry succeeds', async () => {
   const s = setup();
   const api = s.context.api;
