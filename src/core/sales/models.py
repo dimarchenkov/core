@@ -18,7 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.integrations.enums import IntegrationProvider
 from core.sales.enums import (
+    FiscalizationJobStatus,
     FiscalizationStatus,
+    PaymentJobStatus,
     PaymentMethod,
     PaymentStatus,
     SaleDiscountType,
@@ -119,8 +121,22 @@ class Sale(BaseModel):
         lazy="selectin",
         order_by="PaymentAttempt.attempt_number",
     )
+    payment_jobs: Mapped[list[PaymentJob]] = relationship(
+        "PaymentJob",
+        back_populates="sale",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="PaymentJob.created_at",
+    )
     fiscalization: Mapped[Fiscalization | None] = relationship(
         "Fiscalization",
+        back_populates="sale",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
+    fiscalization_job: Mapped[FiscalizationJob | None] = relationship(
+        "FiscalizationJob",
         back_populates="sale",
         cascade="all, delete-orphan",
         lazy="selectin",
@@ -244,6 +260,55 @@ class PaymentAttempt(BaseModel):
 
     sale: Mapped[Sale] = relationship("Sale", back_populates="payments")
 
+    @property
+    def accounting_superseded(self) -> bool:
+        """Exclude audited bookkeeping corrections without rewriting provider history."""
+        return bool((self.provider_metadata or {}).get("accounting_superseded", False))
+
+    job: Mapped[PaymentJob | None] = relationship(
+        "PaymentJob",
+        back_populates="payment_attempt",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
+
+
+class PaymentJob(BaseModel):
+    """Durable worker-owned continuation for one acquiring attempt."""
+
+    __tablename__ = "payment_jobs"
+    __table_args__ = (
+        CheckConstraint("attempt_count >= 0", name="ck_payment_jobs_attempt_nonnegative"),
+        UniqueConstraint("payment_attempt_id", name="uq_payment_jobs_attempt_id"),
+    )
+
+    sale_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("sales.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    payment_attempt_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("payment_attempts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[PaymentJobStatus] = mapped_column(
+        Enum(PaymentJobStatus, name="payment_job_status", values_callable=_enum_values),
+        nullable=False,
+        default=PaymentJobStatus.QUEUED,
+        server_default=PaymentJobStatus.QUEUED.value,
+        index=True,
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+    sale: Mapped[Sale] = relationship("Sale", back_populates="payment_jobs")
+    payment_attempt: Mapped[PaymentAttempt] = relationship(
+        "PaymentAttempt", back_populates="job"
+    )
+
 
 class Fiscalization(BaseModel):
     """Single retryable fiscal obligation for one successfully paid Sale."""
@@ -295,3 +360,47 @@ class Fiscalization(BaseModel):
     error_message: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     sale: Mapped[Sale] = relationship("Sale", back_populates="fiscalization")
+
+    @property
+    def operator_dismissed(self) -> bool:
+        """Record operational dismissal without claiming a receipt exists or voiding payment."""
+        return bool((self.provider_metadata or {}).get("operator_dismissed", False))
+
+
+class FiscalizationJob(BaseModel):
+    """Durable background work item that owns fiscalization continuation."""
+
+    __tablename__ = "fiscalization_jobs"
+    __table_args__ = (
+        CheckConstraint("attempt_count >= 0", name="ck_fiscalization_jobs_attempt_nonnegative"),
+        UniqueConstraint("sale_id", name="uq_fiscalization_jobs_sale_id"),
+        UniqueConstraint("fiscalization_id", name="uq_fiscalization_jobs_fiscalization_id"),
+    )
+
+    sale_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("sales.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    fiscalization_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("fiscalizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[FiscalizationJobStatus] = mapped_column(
+        Enum(
+            FiscalizationJobStatus,
+            name="fiscalization_job_status",
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+        default=FiscalizationJobStatus.QUEUED,
+        server_default=FiscalizationJobStatus.QUEUED.value,
+        index=True,
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    aqsi_operation_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    last_error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+    sale: Mapped[Sale] = relationship("Sale", back_populates="fiscalization_job")

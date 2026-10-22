@@ -62,3 +62,21 @@ class FiscalizationStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+class FiscalizationJobStatus(StrEnum):
+    """Durable server-side execution state for one fiscal obligation."""
+
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class PaymentJobStatus(StrEnum):
+    """Durable server-side execution state for one acquiring operation."""
+
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"

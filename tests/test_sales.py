@@ -18,12 +18,14 @@ from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.database import get_session
 from core.identity.dependencies import get_current_user
 from core.identity.models import User
+from core.integrations.enums import IntegrationProvider
 from core.inventory.models import StockMovement
 from core.main import create_app
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
-from core.sales.enums import SaleItemSource, SaleStatus
-from core.sales.models import Sale, SaleItem
+from core.sales.enums import PaymentMethod, PaymentStatus, SaleItemSource, SaleStatus
+from core.sales.models import PaymentAttempt, Sale, SaleItem
+from core.sales.providers import CheckoutProviderBinding, ProviderHealth
 from core.sales.routes import _sellable_balances
 from core.shared.db import Base
 
@@ -137,6 +139,149 @@ def test_multiple_draft_sales_are_persistent_and_listed(client: TestClient) -> N
     assert listed.status_code == 200
     assert {sale["id"] for sale in listed.json()} == {first["id"], second["id"]}
     assert reloaded.json()["status"] == SaleStatus.DRAFT
+
+
+def test_checkout_operation_history_retains_completed_and_pending_facts(
+    client: TestClient,
+    session: Session,
+    users: tuple[User, User],
+) -> None:
+    """Operational history is server-owned and correlates retained payment facts."""
+    completed = Sale(
+        sale_number=901,
+        owner_id=users[0].id,
+        status=SaleStatus.COMPLETED,
+        subtotal_amount=Decimal("10.00"),
+        discount_amount=Decimal("0.00"),
+        total_amount=Decimal("10.00"),
+    )
+    pending = Sale(
+        sale_number=902,
+        owner_id=users[0].id,
+        status=SaleStatus.PAYMENT_PENDING,
+        subtotal_amount=Decimal("20.00"),
+        discount_amount=Decimal("0.00"),
+        total_amount=Decimal("20.00"),
+    )
+    session.add_all([completed, pending])
+    session.flush()
+    session.add_all(
+        [
+            PaymentAttempt(
+                sale_id=completed.id,
+                payment_method=PaymentMethod.CASH,
+                requested_amount=Decimal("10.00"),
+                fiscalization_required=False,
+                status=PaymentStatus.SUCCEEDED,
+                idempotency_key="history-completed",
+                attempt_number=1,
+            ),
+            PaymentAttempt(
+                sale_id=pending.id,
+                payment_method=PaymentMethod.CASH,
+                requested_amount=Decimal("20.00"),
+                fiscalization_required=False,
+                status=PaymentStatus.UNKNOWN,
+                idempotency_key="history-pending",
+                attempt_number=1,
+            ),
+        ]
+    )
+    session.commit()
+
+    all_rows = client.get("/api/sales/operations/history")
+    pending_rows = client.get("/api/sales/operations/history?state=pending")
+
+    assert all_rows.status_code == 200
+    assert {row["sale_number"] for row in all_rows.json()} == {901, 902}
+    assert [row["sale_number"] for row in pending_rows.json()] == [902]
+
+    completed_payment = session.scalar(
+        select(PaymentAttempt).where(PaymentAttempt.sale_id == completed.id)
+    )
+    completed_payment.status = PaymentStatus.UNKNOWN
+    completed_payment.provider_metadata = {"accounting_superseded": True}
+    session.commit()
+
+    attention_rows = client.get("/api/sales/operations/history?state=attention")
+
+    assert attention_rows.status_code == 200
+    assert [row["sale_number"] for row in attention_rows.json()] == [901]
+    assert attention_rows.json()[0]["payments"][0]["accounting_superseded"] is True
+
+
+def test_checkout_health_is_careful_and_marks_unresolved_operation_attention(
+    client: TestClient,
+    session: Session,
+    users: tuple[User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cloud reachability never hides an unresolved financial operation."""
+    class HealthyProvider:
+        def check_health(self) -> ProviderHealth:
+            return ProviderHealth(
+                True,
+                datetime.now(UTC).isoformat(),
+                "AQSI Cloud доступен; физическая касса не подтверждена.",
+            )
+
+    provider = HealthyProvider()
+    binding = CheckoutProviderBinding(
+        integration_id=users[0].id,
+        integration_name="AQSI test",
+        provider=IntegrationProvider.AQSI,
+        provider_display_name="AQSI",
+        payment_display_name="Карта / QR",
+        payment=provider,  # type: ignore[arg-type]
+        fiscal=provider,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_new_checkout": lambda self: binding}
+        )(),
+    )
+
+    idle = client.get("/api/sales/operations/health")
+    assert idle.json()["status"] == "healthy"
+    assert "физичес" in idle.json()["message"]
+
+    sale = Sale(
+        sale_number=903,
+        owner_id=users[0].id,
+        status=SaleStatus.PAYMENT_PENDING,
+        subtotal_amount=Decimal("30.00"),
+        discount_amount=Decimal("0.00"),
+        total_amount=Decimal("30.00"),
+    )
+    session.add(sale)
+    session.flush()
+    session.add(
+        PaymentAttempt(
+            sale_id=sale.id,
+            payment_method=PaymentMethod.CASH,
+            requested_amount=Decimal("30.00"),
+            fiscalization_required=False,
+            status=PaymentStatus.UNKNOWN,
+            idempotency_key="health-unknown",
+            attempt_number=1,
+        )
+    )
+    session.commit()
+
+    attention = client.get("/api/sales/operations/health")
+    assert attention.json()["status"] == "attention"
+    assert attention.json()["active_operation"] is True
+
+    old = session.scalar(select(PaymentAttempt).where(PaymentAttempt.sale_id == sale.id))
+    old.provider_metadata = {"accounting_superseded": True}
+    sale.status = SaleStatus.COMPLETED
+    session.commit()
+    recovered = client.get("/api/sales/operations/health").json()
+    assert recovered["status"] == "attention"
+    assert recovered["active_operation"] is False
+    assert recovered["manual_review_required"] is True
+    assert "Старая операция" in recovered["message"]
 
 
 def test_operators_cannot_read_or_mutate_each_others_sales(

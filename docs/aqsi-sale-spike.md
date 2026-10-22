@@ -22,6 +22,9 @@ The second, direct path uses the current AQSI v4 device-operation contract:
   kopecks and `mode=card_only`.
 - GET `/pub/v4/Operations/{operationId}` returns the documented states `Pending`,
   `Processing`, `Finishing`, `Completed`, `Canceled`, `Timeout`, or `Error`.
+- POST `/pub/v4/Operations/{operationId}/cancel` requests cancellation of a stuck device
+  operation. This is not the acquiring reversal endpoint and must not be represented as
+  a refund of a completed payment.
 - Only `Completed` is treated as acquiring success. Its `result` is a JSON string
   containing the completed Slip entity.
 - POST `/pub/v4/Receipts/process` starts fiscalization. AQSI's receipt payment model

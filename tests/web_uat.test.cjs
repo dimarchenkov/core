@@ -7,6 +7,63 @@ const source = readFileSync('src/core/web/static/app.js', 'utf8')
   .replace('if (state.token) bootstrap(); else renderLogin();', '');
 const styles = readFileSync('src/core/web/static/styles.css', 'utf8');
 
+test('Dismissed fiscal failure is retained without a retry action or receipt success', () => {
+  const s = setup();
+  const markup = s.context.renderCheckoutState({
+    status:'fiscalization_failed', total_amount:'50.00',
+    fiscalization:{status:'failed', operator_dismissed:true},
+    payments:[{status:'succeeded', payment_method:'card', requested_amount:'50.00'}],
+  });
+  assert.match(markup, /Операция неактуальна/);
+  assert.match(markup, /Оплата.*подтверждена, чек не сформирован/);
+  assert.match(markup, /Повторная обработка отключена/);
+  assert.doesNotMatch(markup, /retry-fiscalization|<button|Фискализирован/);
+});
+
+test('Recovered mixed tender shows both amounts, not superseded bookkeeping', () => {
+  const s = setup();
+  const markup = s.context.renderCheckoutState({
+    status: 'completed', fiscalization: {status: 'succeeded'},
+    payments: [
+      {payment_method:'cash', status:'succeeded', requested_amount:'6910', accounting_superseded:true},
+      {payment_method:'card', status:'succeeded', requested_amount:'5000'},
+      {payment_method:'cash', status:'succeeded', requested_amount:'1910'},
+    ],
+  });
+  assert.match(markup, /Карта \/ QR/);
+  assert.match(markup, /Наличными/);
+  assert.match(markup, /5\s*000/);
+  assert.match(markup, /1\s*910/);
+  assert.doesNotMatch(markup, /6\s*910/);
+});
+
+test('Reconciled sales do not imply a stuck remote AQSI operation is ready', async () => {
+  const s = setup();
+  s.context.document.querySelector = () => ({});
+  s.context.api = async () => ({
+    configured:true, api_reachable:true, status:'attention',
+    active_operation:false, manual_review_required:true,
+  });
+  let view;
+  s.context.scheduleCheckoutHealthView = next => { view = next; };
+  await s.context.hydrateCheckoutHealth();
+  assert.equal(view.state, 'ATTENTION');
+  assert.match(view.detail, /Старая операция AQSI/);
+  assert.doesNotMatch(view.detail, /продолжает проверку|готова/);
+});
+
+test('Manual-review AQSI payment is selected for operation details', () => {
+  const s = setup();
+  const payment = s.context.manualReviewPayment({payments: [
+    {status:'unknown', external_id:'old-aqsi', accounting_superseded:true},
+    {status:'succeeded', external_id:'imported-receipt'},
+  ]});
+  assert.equal(payment.external_id, 'old-aqsi');
+  assert.match(source, /openCheckoutOperations\(\s*checkoutHealthView\.state === "ATTENTION" \? "attention" : "all"/);
+  assert.match(source, /\["attention", "Требуют внимания"\]/);
+  assert.match(source, /Старая операция: требует проверки/);
+});
+
 function setup() {
   const timers = new Map();
   let sequence = 0;
@@ -1015,7 +1072,25 @@ test('Checkout UI selects cash or card/QR and recovers persisted provider states
   assert.match(source, /Деньги не списаны/);
   assert.match(source, /Результат оплаты пока неизвестен/);
   assert.match(source, /Оплата прошла, но чек не сформирован/);
-  assert.match(source, /checkout\/progress/);
+  assert.doesNotMatch(source, /checkout\/progress/);
+  assert.match(source, /Чеки и операции/);
+  assert.match(source, /\/api\/sales\/operations\/history/);
+  assert.match(source, /\/api\/sales\/operations\/health/);
+  assert.match(source, /data-reconcile-operation/);
+  assert.match(source, /Касса готова/);
+  assert.match(source, /Операция выполняется/);
+  assert.match(source, /Требует внимания/);
+  assert.match(source, /Нет связи с кассой/);
+  assert.match(source, /Нет связи с AQSI\. CORE повторит проверку автоматически/);
+  assert.match(source, /replaceWith\(persistentCheckoutHealth\)/);
+  assert.match(source, /scheduleCheckoutHealthView/);
+  assert.match(source, /650/);
+  assert.doesNotMatch(source, /checkout-health[^\n]*external_id/);
+  assert.match(source, /elapsed < 8000 \? 500/);
+  assert.match(source, /Checkout timing stage=T5/);
+  assert.match(source, /AQSI обрабатывает чек/);
+  assert.match(source, /Фискализация продолжается на сервере/);
+  assert.match(source, /Фоновая задача/);
   assert.match(source, /retry-payment/);
   assert.match(source, /retry-fiscalization/);
   assert.match(source, /stock_warnings/);
@@ -1027,6 +1102,7 @@ test('Checkout UI selects cash or card/QR and recovers persisted provider states
   assert.match(styles, /\.checkout-method-options/);
   assert.match(styles, /\.checkout-dialog \{[^}]*max-width: calc\(100vw - 24px\)[^}]*overflow-x: hidden/);
   assert.match(styles, /\.checkout-method \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(styles, /\.checkout-health \{[^}]*min-height: 4\.5rem/);
   assert.match(styles, /\.checkout-method-options input\[type="radio"\] \{[^}]*width: 24px[^}]*min-height: 24px/);
   assert.match(styles, /\.checkout-method-options label span \{[^}]*flex: 1 1 auto[^}]*text-align: left/);
   assert.match(styles, /overflow-wrap: anywhere/);
@@ -1457,7 +1533,7 @@ test('Moving a Variant persists the complete Product-local identity order', asyn
   assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.variant-order-actions \.button \{[^}]*min-height: 44px/);
 });
 
-test('Sales Analytics exposes calendar periods, exact tables and mobile KPI layout', () => {
+test('Business Analytics separates Sales and Rental revenue with exact daily totals', () => {
   const s = setup();
   const bars = s.context.renderAnalyticsBars([
     {date:'2026-10-15', revenue:'1250.00'},
@@ -1467,15 +1543,19 @@ test('Sales Analytics exposes calendar periods, exact tables and mobile KPI layo
   assert.match(source, /id="open-analytics"[\s\S]*Аналитика/);
   assert.match(source, /Сегодня[\s\S]*7 дней[\s\S]*30 дней[\s\S]*Этот месяц[\s\S]*Произвольный/);
   assert.match(source, /\/api\/analytics\/sales\?\$\{analyticsQuery\(filters\)\}/);
-  assert.match(source, /Выручка[\s\S]*Количество чеков[\s\S]*Средний чек[\s\S]*Продано единиц/);
+  assert.match(source, /Общая выручка[\s\S]*Продажи[\s\S]*Аренда[\s\S]*Количество продаж[\s\S]*Количество аренд/);
+  assert.match(source, /Источники бизнеса[\s\S]*summary\.business_revenue[\s\S]*summary\.sales_revenue[\s\S]*summary\.rental_revenue/);
   assert.match(source, /Продажи по источнику[\s\S]*Каталог[\s\S]*Свободная продажа/);
   assert.match(source, /Доля свободной продажи по выручке/);
+  assert.match(source, /Завершённые аренды[\s\S]*залог и компенсация повреждений не входят/);
+  assert.match(source, /total_revenue[\s\S]*sales_revenue[\s\S]*rental_revenue/);
   assert.match(source, /Product · Variant \/ SKU/);
   assert.match(source, /Топ свободной продажи[\s\S]*Группировка только по регистру и пробелам/);
-  assert.match(source, /Среднее считается по всем наблюдаемым дням/);
-  assert.match(source, /Точные данные[\s\S]*Средний чек/);
+  assert.match(source, /Топ аренды[\s\S]*исторических снимков завершённых заказов/);
+  assert.match(source, /Точные данные[\s\S]*Кол-во продаж[\s\S]*Кол-во аренд/);
   assert.match(bars, /15\.10\.2026[\s\S]*1250 RUB/);
   assert.match(styles, /\.analytics-kpis \{[^}]*grid-template-columns: repeat\(4/);
+  assert.match(styles, /\.analytics-kpis-business \{[^}]*grid-template-columns: repeat\(3/);
   assert.match(styles, /@media \(max-width: 520px\)[\s\S]*\.analytics-kpis \{[^}]*grid-template-columns: 1fr 1fr/);
   assert.match(styles, /\.analytics-table-wrap \{[^}]*overflow-x: auto/);
 });

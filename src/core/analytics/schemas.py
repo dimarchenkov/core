@@ -39,9 +39,17 @@ class SalesAnalyticsPeriodRead(PydanticBaseModel):
 
 
 class SalesSummaryRead(PydanticBaseModel):
-    """Primary Sales KPIs for one resolved period."""
+    """Primary business, Sales and Rental KPIs for one resolved period."""
 
     period: SalesAnalyticsPeriodRead
+    business_revenue: Decimal
+    sales_revenue: Decimal
+    rental_revenue: Decimal
+    overdue_revenue: Decimal
+    sale_count: int
+    rental_count: int
+    average_rental_amount: Decimal
+    # Compatibility fields retain their original Sales-only meaning.
     revenue: Decimal
     receipt_count: int
     average_receipt: Decimal
@@ -56,9 +64,15 @@ class SalesSummaryRead(PydanticBaseModel):
 
 
 class SalesDailyRead(PydanticBaseModel):
-    """Exact metrics for one business-local calendar date."""
+    """Exact Sales, Rental and combined metrics for one business-local date."""
 
     date: date
+    sales_revenue: Decimal
+    rental_revenue: Decimal
+    total_revenue: Decimal
+    sale_count: int
+    rental_count: int
+    # Compatibility fields retain their original Sales-only meaning.
     revenue: Decimal
     receipt_count: int
     items_sold: int
@@ -98,6 +112,17 @@ class SalesFreeSaleItemRead(PydanticBaseModel):
     currency: str = "RUB"
 
 
+class RentalAssetAnalyticsRead(PydanticBaseModel):
+    """Completed rental economics for one immutable physical RentalAsset identity."""
+
+    rental_asset_id: UUIDv7
+    asset_number: str
+    title: str
+    rental_count: int
+    revenue: Decimal
+    currency: str = "RUB"
+
+
 class SalesWeekdayRead(PydanticBaseModel):
     """Aggregated performance for one weekday across the selected period."""
 
@@ -120,7 +145,7 @@ class SalesPaymentMethodRead(PydanticBaseModel):
 
 
 class SalesAnalyticsDashboardRead(PydanticBaseModel):
-    """Complete first-load read model for the Sales analytics workspace."""
+    """Complete first-load read model for the business analytics workspace."""
 
     summary: SalesSummaryRead
     timeline: list[SalesDailyRead]
@@ -128,6 +153,7 @@ class SalesAnalyticsDashboardRead(PydanticBaseModel):
     top_products: list[SalesProductRead]
     top_variants: list[SalesVariantRead]
     top_free_sale_items: list[SalesFreeSaleItemRead]
+    top_rental_items: list[RentalAssetAnalyticsRead]
     weekdays: list[SalesWeekdayRead]
     payment_methods: list[SalesPaymentMethodRead]
     limitations: list[str]

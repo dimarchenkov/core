@@ -10,6 +10,7 @@ from sqlalchemy import Date, cast, func, select
 from sqlalchemy.orm import Session
 
 from core.analytics.schemas import (
+    RentalAssetAnalyticsRead,
     SalesAnalyticsDashboardRead,
     SalesAnalyticsPeriodRead,
     SalesDailyRead,
@@ -23,6 +24,8 @@ from core.analytics.schemas import (
     SalesWeekdayRead,
 )
 from core.catalog.models import CatalogVariant
+from core.rental.models import RentalOrderItemRecord, RentalOrderRecord
+from core.rental.order_enums import RentalOrderItemStatus, RentalOrderStatus
 from core.sales.enums import PaymentStatus, SaleItemSource, SaleStatus
 from core.sales.models import PaymentAttempt, Sale, SaleItem
 
@@ -119,7 +122,7 @@ def resolve_sales_period(
 
 
 class SalesAnalyticsReadService:
-    """Run read-only aggregate queries over immutable completed Sales facts."""
+    """Aggregate immutable completed Sales and Rental facts without domain mutation."""
 
     def __init__(self, session: Session, timezone_name: str) -> None:
         """Bind reporting queries to a session and the configured business timezone."""
@@ -144,6 +147,9 @@ class SalesAnalyticsReadService:
             top_free_sale_items=self.top_free_sale_items(
                 period, limit=limit, ranking=ranking
             ),
+            top_rental_items=self.top_rental_items(
+                period, limit=limit, ranking=ranking
+            ),
             weekdays=self.weekdays(period, daily=timeline),
             payment_methods=self.payment_methods(period),
             limitations=[
@@ -151,15 +157,31 @@ class SalesAnalyticsReadService:
                 "выручка не уменьшается на refunds.",
                 "Себестоимость, валовая прибыль и маржа не рассчитываются до выбора "
                 "исторического метода оценки запасов.",
+                "Повреждения и компенсация утраты не относятся к арендной выручке; "
+                "залог полностью исключён.",
             ],
         )
 
     def summary(self, period: SalesAnalyticsPeriod) -> SalesSummaryRead:
-        """Calculate revenue, receipt count, average receipt and sold units in SQL."""
-        revenue, receipt_count = self._session.execute(
+        """Calculate separate Sales/Rental revenue and operation KPIs in SQL."""
+        sales_revenue, sale_count = self._session.execute(
             select(func.coalesce(func.sum(Sale.total_amount), 0), func.count(Sale.id)).where(
                 *self._sale_filters(period)
             )
+        ).one()
+        rental_revenue_expression = self._rental_revenue_expression()
+        rental_revenue, rental_count, overdue_revenue = self._session.execute(
+            select(
+                func.coalesce(func.sum(rental_revenue_expression), 0),
+                func.count(func.distinct(RentalOrderRecord.id)),
+                func.coalesce(func.sum(RentalOrderItemRecord.overdue_charge), 0),
+            )
+            .select_from(RentalOrderRecord)
+            .join(
+                RentalOrderItemRecord,
+                RentalOrderItemRecord.order_id == RentalOrderRecord.id,
+            )
+            .where(*self._rental_filters(period))
         ).one()
         source_rows = self._session.execute(
             select(
@@ -182,24 +204,34 @@ class SalesAnalyticsReadService:
             SaleItemSource.MANUAL, (ZERO_MONEY, 0)
         )
         items_sold = catalog_units + free_sale_units
-        revenue_money = self._money(revenue)
-        receipt_total = int(receipt_count or 0)
+        sales_revenue_money = self._money(sales_revenue)
+        rental_revenue_money = self._money(rental_revenue)
+        business_revenue = self._money(sales_revenue_money + rental_revenue_money)
+        sale_total = int(sale_count or 0)
+        rental_total = int(rental_count or 0)
         return SalesSummaryRead(
             period=period.read_model(),
-            revenue=revenue_money,
-            receipt_count=receipt_total,
-            average_receipt=self._average(revenue_money, receipt_total),
+            business_revenue=business_revenue,
+            sales_revenue=sales_revenue_money,
+            rental_revenue=rental_revenue_money,
+            overdue_revenue=self._money(overdue_revenue),
+            sale_count=sale_total,
+            rental_count=rental_total,
+            average_rental_amount=self._average(rental_revenue_money, rental_total),
+            revenue=sales_revenue_money,
+            receipt_count=sale_total,
+            average_receipt=self._average(sales_revenue_money, sale_total),
             items_sold=items_sold,
             catalog_revenue=catalog_revenue,
             free_sale_revenue=free_sale_revenue,
             catalog_units=catalog_units,
             free_sale_units=free_sale_units,
-            free_sale_revenue_share=self._share(free_sale_revenue, revenue_money),
+            free_sale_revenue_share=self._share(free_sale_revenue, sales_revenue_money),
             free_sale_units_share=self._share(free_sale_units, items_sold),
         )
 
     def timeline(self, period: SalesAnalyticsPeriod) -> list[SalesDailyRead]:
-        """Group completed Sales and item quantities by business-local calendar date."""
+        """Group completed Sales and closed Rentals by business-local recognition date."""
         local_date = self._local_date_expression(Sale.completed_at, period)
         sale_rows = self._session.execute(
             select(
@@ -225,17 +257,43 @@ class SalesAnalyticsReadService:
             for day, revenue, receipts in sale_rows
         }
         item_metrics = {self._coerce_date(day): int(units) for day, units in item_rows}
+        rental_local_date = self._local_date_expression(RentalOrderRecord.closed_at, period)
+        rental_rows = self._session.execute(
+            select(
+                rental_local_date.label("business_date"),
+                func.coalesce(func.sum(self._rental_revenue_expression()), 0),
+                func.count(func.distinct(RentalOrderRecord.id)),
+            )
+            .select_from(RentalOrderRecord)
+            .join(
+                RentalOrderItemRecord,
+                RentalOrderItemRecord.order_id == RentalOrderRecord.id,
+            )
+            .where(*self._rental_filters(period))
+            .group_by(rental_local_date)
+            .order_by(rental_local_date)
+        ).all()
+        rental_metrics = {
+            self._coerce_date(day): (self._money(revenue), int(rentals))
+            for day, revenue, rentals in rental_rows
+        }
         result: list[SalesDailyRead] = []
         current = period.start_date
         while current <= period.end_date:
-            revenue, receipts = sale_metrics.get(current, (ZERO_MONEY, 0))
+            sales_day_revenue, sales = sale_metrics.get(current, (ZERO_MONEY, 0))
+            rental_day_revenue, rentals = rental_metrics.get(current, (ZERO_MONEY, 0))
             result.append(
                 SalesDailyRead(
                     date=current,
-                    revenue=revenue,
-                    receipt_count=receipts,
+                    sales_revenue=sales_day_revenue,
+                    rental_revenue=rental_day_revenue,
+                    total_revenue=self._money(sales_day_revenue + rental_day_revenue),
+                    sale_count=sales,
+                    rental_count=rentals,
+                    revenue=sales_day_revenue,
+                    receipt_count=sales,
                     items_sold=item_metrics.get(current, 0),
-                    average_receipt=self._average(revenue, receipts),
+                    average_receipt=self._average(sales_day_revenue, sales),
                 )
             )
             current += timedelta(days=1)
@@ -392,6 +450,74 @@ class SalesAnalyticsReadService:
         )
         return result[:limit]
 
+    def top_rental_items(
+        self,
+        period: SalesAnalyticsPeriod,
+        *,
+        limit: int = 10,
+        ranking: SalesRanking = SalesRanking.REVENUE,
+    ) -> list[RentalAssetAnalyticsRead]:
+        """Rank physical assets from final item snapshots and earned rental charges."""
+        rows = self._session.execute(
+            select(
+                RentalOrderItemRecord.rental_asset_id,
+                RentalOrderItemRecord.asset_number_snapshot,
+                RentalOrderItemRecord.title_snapshot,
+                func.count(RentalOrderItemRecord.id),
+                func.coalesce(func.sum(self._rental_revenue_expression()), 0),
+                func.max(RentalOrderRecord.closed_at),
+            )
+            .select_from(RentalOrderRecord)
+            .join(
+                RentalOrderItemRecord,
+                RentalOrderItemRecord.order_id == RentalOrderRecord.id,
+            )
+            .where(*self._rental_filters(period))
+            .group_by(
+                RentalOrderItemRecord.rental_asset_id,
+                RentalOrderItemRecord.asset_number_snapshot,
+                RentalOrderItemRecord.title_snapshot,
+            )
+        ).all()
+        grouped: dict[object, dict[str, object]] = {}
+        for asset_id, asset_number, title, rental_count, revenue, latest_at in rows:
+            existing = grouped.setdefault(
+                asset_id,
+                {
+                    "asset_number": asset_number,
+                    "title": title,
+                    "display_order": (latest_at, asset_number, title),
+                    "rental_count": 0,
+                    "revenue": ZERO_MONEY,
+                },
+            )
+            display_order = (latest_at, asset_number, title)
+            if display_order > existing["display_order"]:
+                existing["asset_number"] = asset_number
+                existing["title"] = title
+                existing["display_order"] = display_order
+            existing["rental_count"] = int(existing["rental_count"]) + int(rental_count)
+            existing["revenue"] = self._money(existing["revenue"]) + self._money(revenue)
+        result = [
+            RentalAssetAnalyticsRead(
+                rental_asset_id=asset_id,
+                asset_number=str(metrics["asset_number"]),
+                title=str(metrics["title"]),
+                rental_count=int(metrics["rental_count"]),
+                revenue=self._money(metrics["revenue"]),
+            )
+            for asset_id, metrics in grouped.items()
+        ]
+        result.sort(
+            key=lambda item: (
+                item.rental_count if ranking is SalesRanking.UNITS else item.revenue,
+                item.revenue,
+                item.asset_number,
+            ),
+            reverse=True,
+        )
+        return result[:limit]
+
     def weekdays(
         self,
         period: SalesAnalyticsPeriod,
@@ -419,20 +545,23 @@ class SalesAnalyticsReadService:
         return result
 
     def payment_methods(self, period: SalesAnalyticsPeriod) -> list[SalesPaymentMethodRead]:
-        """Summarize the single successful durable payment recorded for each completed Sale."""
+        """Sum effective tender amounts, including recovered mixed-payment receipts."""
         rows = self._session.execute(
             select(
                 PaymentAttempt.payment_method,
-                func.coalesce(func.sum(Sale.total_amount), 0),
-                func.count(Sale.id),
+                func.coalesce(func.sum(PaymentAttempt.requested_amount), 0),
+                func.count(func.distinct(Sale.id)),
             )
             .join(Sale, PaymentAttempt.sale_id == Sale.id)
             .where(
                 *self._sale_filters(period),
                 PaymentAttempt.status == PaymentStatus.SUCCEEDED,
+                func.coalesce(
+                    PaymentAttempt.provider_metadata["accounting_superseded"].as_boolean(), False
+                ).is_(False),
             )
             .group_by(PaymentAttempt.payment_method)
-            .order_by(func.sum(Sale.total_amount).desc())
+            .order_by(func.sum(PaymentAttempt.requested_amount).desc())
         ).all()
         labels = {"cash": "Наличные", "card": "Карта / QR"}
         return [
@@ -454,6 +583,30 @@ class SalesAnalyticsReadService:
             Sale.completed_at >= period.start_at,
             Sale.completed_at < period.end_at,
             Sale.deleted_at.is_(None),
+        )
+
+    @staticmethod
+    def _rental_filters(period: SalesAnalyticsPeriod) -> tuple[object, ...]:
+        """Recognize rental revenue once, when its whole order is financially closed."""
+        return (
+            RentalOrderRecord.status == RentalOrderStatus.CLOSED,
+            RentalOrderRecord.closed_at.is_not(None),
+            RentalOrderRecord.closed_at >= period.start_at,
+            RentalOrderRecord.closed_at < period.end_at,
+            RentalOrderRecord.deleted_at.is_(None),
+            RentalOrderItemRecord.deleted_at.is_(None),
+            RentalOrderItemRecord.status.in_(
+                (RentalOrderItemStatus.RETURNED, RentalOrderItemStatus.LOST)
+            ),
+        )
+
+    @staticmethod
+    def _rental_revenue_expression() -> object:
+        """Return earned base plus finalized overdue, excluding damage and every deposit fact."""
+        return (
+            RentalOrderItemRecord.agreed_price
+            - RentalOrderItemRecord.discount
+            + func.coalesce(RentalOrderItemRecord.overdue_charge, 0)
         )
 
     def _local_date_expression(self, timestamp: object, period: SalesAnalyticsPeriod) -> object:

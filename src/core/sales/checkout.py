@@ -4,18 +4,27 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from time import perf_counter
 
 from sqlalchemy.orm import Session
 
 from core.inventory.service import InventoryService
 from core.sales.enums import (
     CheckoutPaymentOption,
+    FiscalizationJobStatus,
     FiscalizationStatus,
+    PaymentJobStatus,
     PaymentMethod,
     PaymentStatus,
     SaleStatus,
 )
-from core.sales.models import Fiscalization, PaymentAttempt, Sale
+from core.sales.models import (
+    Fiscalization,
+    FiscalizationJob,
+    PaymentAttempt,
+    PaymentJob,
+    Sale,
+)
 from core.sales.providers import (
     CheckoutProviderBinding,
     FiscalLine,
@@ -84,13 +93,7 @@ class CheckoutService:
         )
         if start.request.method is PaymentMethod.CASH:
             return self._advance_paid_sale(start.sale_id, owner_id=owner_id)
-        if not start.initiate:
-            return self._require_owned(sale_id, owner_id)
-        try:
-            operation = self._require_binding().payment.initiate_payment(start.request)
-        except ProviderCallError as exc:
-            return self._record_payment_error(start, owner_id=owner_id, error=exc)
-        return self._record_payment_operation(start, owner_id=owner_id, operation=operation)
+        return self._require_owned(sale_id, owner_id)
 
     def retry_payment(
         self,
@@ -108,48 +111,31 @@ class CheckoutService:
         )
         if start.request.method is PaymentMethod.CASH:
             return self._advance_paid_sale(start.sale_id, owner_id=owner_id)
-        try:
-            operation = self._require_binding().payment.initiate_payment(start.request)
-        except ProviderCallError as exc:
-            return self._record_payment_error(start, owner_id=owner_id, error=exc)
-        return self._record_payment_operation(start, owner_id=owner_id, operation=operation)
+        return self._require_owned(sale_id, owner_id)
 
     def progress(self, sale_id: UUIDv7, *, owner_id: UUIDv7) -> Sale:
         """Recover provider state and advance only safe, persisted lifecycle transitions."""
         sale = self._require_owned(sale_id, owner_id)
         self._ensure_binding_matches(sale)
+        # Acquiring and fiscalization are worker-owned. HTTP only observes state.
         if sale.status is SaleStatus.PAYMENT_PENDING:
-            attempt = self._latest_payment(sale)
-            if attempt.external_id is None:
-                if attempt.status is PaymentStatus.PENDING:
-                    return self._mark_payment_unknown_without_external_id(
-                        sale.id, attempt.id, owner_id
-                    )
-                return sale
-            request = self._payment_request(sale, attempt)
-            try:
-                operation = self._require_binding().payment.get_payment(
-                    attempt.external_id,
-                    request,
-                )
-            except ProviderCallError as exc:
-                return self._record_payment_poll_error(sale.id, attempt.id, owner_id, exc)
-            sale = self._record_payment_operation(
-                CheckoutStart(sale.id, attempt.id, request, False),
-                owner_id=owner_id,
-                operation=operation,
-            )
+            return sale
         if sale.status is SaleStatus.PAID:
             return self._advance_paid_sale(sale.id, owner_id=owner_id)
+        # Fiscalization is owned by the durable server-side worker. HTTP callers
+        # only observe the persisted state and must never drive the provider poll.
         if sale.status is SaleStatus.FISCALIZATION_PENDING:
-            return self._progress_fiscalization(sale.id, owner_id=owner_id)
+            return sale
         return sale
 
     def retry_fiscalization(self, sale_id: UUIDv7, *, owner_id: UUIDv7) -> Sale:
-        """Retry a definitely failed receipt without ever initiating payment again."""
+        """Requeue a definitely failed receipt without running provider work in HTTP."""
         sale = self._locked_owned(sale_id, owner_id)
         self._ensure_binding_matches(sale)
         fiscalization = sale.fiscalization
+        if fiscalization is not None and fiscalization.operator_dismissed:
+            self._rollback()
+            raise CheckoutStateError("Операция отмечена оператором как неактуальная.")
         if sale.status is not SaleStatus.FISCALIZATION_FAILED or fiscalization is None:
             self._rollback()
             raise CheckoutStateError("Fiscalization retry requires a definite failed receipt.")
@@ -165,10 +151,60 @@ class CheckoutService:
         fiscalization.attempt_count += 1
         fiscalization.error_code = None
         fiscalization.error_message = None
+        job = sale.fiscalization_job
+        if job is None:
+            self._rollback()
+            raise CheckoutStateError("Fiscalization job is missing.")
+        job.status = FiscalizationJobStatus.QUEUED
+        job.next_retry_at = datetime.now(UTC)
+        job.last_error = None
+        job.completed_at = None
+        job.updated_by_id = owner_id
         sale.status = SaleStatus.FISCALIZATION_PENDING
         sale.updated_by_id = owner_id
         self._commit()
-        return self._initiate_fiscalization(sale.id, owner_id=owner_id)
+        return sale
+
+    def dismiss_failed_fiscalization(
+        self, sale_id: UUIDv7, *, owner_id: UUIDv7, reason: str
+    ) -> Sale:
+        """Dismiss an inactive failed receipt operationally, preserving all financial facts."""
+        sale = self._locked_owned(sale_id, owner_id)
+        fiscal = sale.fiscalization
+        if fiscal is not None and fiscal.operator_dismissed:
+            self._commit()
+            return sale
+        job = sale.fiscalization_job
+        if (
+            sale.status is not SaleStatus.FISCALIZATION_FAILED
+            or fiscal is None
+            or fiscal.status is not FiscalizationStatus.FAILED
+            or (job is not None and job.status is not FiscalizationJobStatus.FAILED)
+            or not reason.strip()
+        ):
+            self._rollback()
+            raise CheckoutStateError("Only an inactive failed fiscalization can be dismissed.")
+        self._successful_payment(sale)
+        fiscal.provider_metadata = {
+            **fiscal.provider_metadata,
+            "operator_dismissed": True,
+            "operator_dismissal": {
+                "actor_id": str(owner_id),
+                "at": datetime.now(UTC).isoformat(),
+                "reason": reason.strip(),
+                "sale_status": sale.status.value,
+                "fiscal_status": fiscal.status.value,
+                "job_status": job.status.value if job else None,
+                "previous_next_retry_at": str(job.next_retry_at) if job else None,
+            },
+        }
+        fiscal.updated_by_id = owner_id
+        fiscal.version += 1
+        if job is not None:
+            job.next_retry_at = None
+            job.updated_by_id = owner_id
+        self._commit()
+        return sale
 
     def _prepare_payment(
         self,
@@ -250,9 +286,7 @@ class CheckoutService:
             idempotency_key=f"sale:{sale.id}:payment:{attempt_number}",
             attempt_number=attempt_number,
             provider_metadata=(
-                {"confirmed_by_operator": True}
-                if payment_method is PaymentMethod.CASH
-                else {}
+                {"confirmed_by_operator": True} if payment_method is PaymentMethod.CASH else {}
             ),
             created_by_id=owner_id,
             updated_by_id=owner_id,
@@ -266,7 +300,24 @@ class CheckoutService:
             sale.status = SaleStatus.PAYMENT_PENDING
         sale.updated_by_id = owner_id
         self._session.flush()
+        if payment_method is PaymentMethod.CARD:
+            job = PaymentJob(
+                sale_id=sale.id,
+                payment_attempt_id=attempt.id,
+                status=PaymentJobStatus.QUEUED,
+                attempt_count=0,
+                next_retry_at=datetime.now(UTC),
+                created_by_id=owner_id,
+                updated_by_id=owner_id,
+            )
+            attempt.job = job
+            sale.payment_jobs.append(job)
+            self._sales.add_payment_job(job)
+        if payment_method is PaymentMethod.CASH:
+            self._stage_paid_sale(sale, attempt, owner_id=owner_id)
         request = self._payment_request(sale, attempt)
+        if attempt.status is PaymentStatus.SUCCEEDED:
+            self._stage_paid_sale(sale, attempt, owner_id=owner_id)
         self._commit()
         logger.info(
             "Payment attempt created sale=%s attempt=%s method=%s",
@@ -280,6 +331,29 @@ class CheckoutService:
             request,
             payment_method is PaymentMethod.CARD,
         )
+
+    def process_payment(self, sale_id: UUIDv7, *, owner_id: UUIDv7) -> Sale:
+        """Perform one worker-owned acquiring initiate or reconciliation step."""
+        sale = self._require_owned(sale_id, owner_id)
+        attempt = self._latest_payment(sale)
+        if attempt.status is PaymentStatus.SUCCEEDED:
+            return sale
+        request = self._payment_request(sale, attempt)
+        start = CheckoutStart(sale.id, attempt.id, request, False)
+        try:
+            if attempt.external_id:
+                operation = self._require_binding().payment.get_payment(
+                    attempt.external_id, request
+                )
+            elif attempt.status is PaymentStatus.PENDING:
+                operation = self._require_binding().payment.initiate_payment(request)
+            else:
+                return sale
+        except ProviderCallError as exc:
+            if attempt.external_id:
+                return self._record_payment_poll_error(sale.id, attempt.id, owner_id, exc)
+            return self._record_payment_error(start, owner_id=owner_id, error=exc)
+        return self._record_payment_operation(start, owner_id=owner_id, operation=operation)
 
     def _record_payment_operation(
         self,
@@ -306,6 +380,7 @@ class CheckoutService:
                 attempt.status = PaymentStatus.SUCCEEDED
                 sale.status = SaleStatus.PAID
                 sale.paid_at = datetime.now(UTC)
+                self._stage_paid_sale(sale, attempt, owner_id=owner_id)
         elif operation.state is ProviderOutcomeState.FAILED:
             attempt.status = PaymentStatus.FAILED
             sale.status = SaleStatus.DRAFT
@@ -328,9 +403,14 @@ class CheckoutService:
             attempt.external_id,
             attempt.status.value,
         )
-        if sale.status is SaleStatus.PAID:
-            return self._advance_paid_sale(
-                sale.id, owner_id=owner_id, evidence=operation.fiscal_evidence
+        if attempt.status is PaymentStatus.SUCCEEDED:
+            logger.info(
+                "Checkout timing sale=%s stage=T0 payment_operation=%s "
+                "payment_approved_at=%s provider_completed_at=%s",
+                sale.id,
+                attempt.external_id,
+                sale.paid_at.isoformat() if sale.paid_at else None,
+                attempt.provider_metadata.get("provider_updated_at"),
             )
         return sale
 
@@ -385,11 +465,18 @@ class CheckoutService:
     def _advance_paid_sale(
         self, sale_id: UUIDv7, *, owner_id: UUIDv7, evidence: object | None = None
     ) -> Sale:
+        del evidence
         sale = self._locked_owned(sale_id, owner_id)
         if sale.status not in {SaleStatus.PAID, SaleStatus.FISCALIZATION_PENDING}:
             self._commit()
             return sale
         payment = self._successful_payment(sale)
+        self._stage_paid_sale(sale, payment, owner_id=owner_id)
+        self._commit()
+        return sale
+
+    def _stage_paid_sale(self, sale: Sale, payment: PaymentAttempt, *, owner_id: UUIDv7) -> None:
+        """Atomically stage Inventory and durable fiscal work with payment approval."""
         if sale.inventory_posted_at is None:
             self._inventory.create_sale_movements_once(
                 sale.id,
@@ -422,11 +509,9 @@ class CheckoutService:
             sale.status = SaleStatus.COMPLETED
             sale.completed_at = datetime.now(UTC)
             sale.updated_by_id = owner_id
-            self._commit()
             logger.info("Fiscalization skipped by checkout option sale=%s", sale.id)
-            return sale
+            return
         binding = self._require_binding()
-        created = False
         if sale.fiscalization is None:
             fiscalization = Fiscalization(
                 sale_id=sale.id,
@@ -445,32 +530,42 @@ class CheckoutService:
             sale.fiscalization = fiscalization
             self._sales.add_fiscalization(fiscalization)
             self._session.flush()
-            created = True
+        fiscalization = sale.fiscalization
+        if fiscalization is None:
+            raise CheckoutStateError("Fiscalization record is missing.")
+        if sale.fiscalization_job is None:
+            job = FiscalizationJob(
+                sale_id=sale.id,
+                fiscalization_id=fiscalization.id,
+                status=FiscalizationJobStatus.QUEUED,
+                attempt_count=0,
+                next_retry_at=datetime.now(UTC),
+                created_by_id=owner_id,
+                updated_by_id=owner_id,
+            )
+            sale.fiscalization_job = job
+            self._sales.add_fiscalization_job(job)
         sale.status = SaleStatus.FISCALIZATION_PENDING
         sale.updated_by_id = owner_id
-        self._commit()
-        if not created:
+
+    def process_fiscalization(self, sale_id: UUIDv7, *, owner_id: UUIDv7) -> Sale:
+        """Perform one worker-owned initiate or status-poll step."""
+        sale = self._require_owned(sale_id, owner_id)
+        fiscalization = sale.fiscalization
+        if fiscalization is None:
+            raise CheckoutStateError("Fiscalization record is missing.")
+        if fiscalization.operator_dismissed:
             return sale
-        if evidence is None and payment.payment_method is PaymentMethod.CARD:
-            if payment.external_id is None:
-                return self._mark_fiscal_unknown(
-                    sale.id, owner_id, "missing_payment_id", "Payment evidence is unavailable."
-                )
-            try:
-                refreshed = binding.payment.get_payment(
-                    payment.external_id, self._payment_request(sale, payment)
-                )
-            except ProviderCallError as exc:
-                return self._mark_fiscal_unknown(sale.id, owner_id, exc.code, str(exc))
-            evidence = refreshed.fiscal_evidence
-        if evidence is None and payment.payment_method is PaymentMethod.CARD:
-            return self._mark_fiscal_unknown(
-                sale.id,
-                owner_id,
-                "missing_payment_evidence",
-                "Fiscal payment evidence is unavailable.",
-            )
-        return self._initiate_fiscalization(sale.id, owner_id=owner_id, evidence=evidence)
+        if fiscalization.status is FiscalizationStatus.SUCCEEDED:
+            return sale
+        if fiscalization.external_id:
+            return self._progress_fiscalization(sale_id, owner_id=owner_id)
+        if fiscalization.status is FiscalizationStatus.PENDING:
+            return self._initiate_fiscalization(sale_id, owner_id=owner_id)
+        # UNKNOWN without an operation ID is a quarantined cross-system gap.
+        # A lookup miss (and especially the unavailable cash lookup) cannot prove
+        # that the original receipt command failed, so never issue another POST.
+        return sale
 
     def _initiate_fiscalization(
         self, sale_id: UUIDv7, *, owner_id: UUIDv7, evidence: object | None = None
@@ -501,6 +596,19 @@ class CheckoutService:
                 "Fiscal payment evidence is unavailable.",
             )
         request = self._fiscal_request(sale, fiscalization, payment, evidence)
+        lookup_started = perf_counter()
+        try:
+            existing = binding.fiscal.find_fiscalization(request)
+        except ProviderCallError as exc:
+            return self._record_fiscal_error(sale.id, owner_id, exc)
+        logger.info(
+            "Checkout timing sale=%s stage=receipt_preflight lookup_ms=%.1f found=%s",
+            sale.id,
+            (perf_counter() - lookup_started) * 1000,
+            existing is not None,
+        )
+        if existing is not None:
+            return self._record_fiscal_operation(sale.id, owner_id, existing)
         try:
             operation = binding.fiscal.initiate_fiscalization(request)
         except ProviderCallError as exc:
@@ -524,26 +632,7 @@ class CheckoutService:
         payment = self._successful_payment(sale)
         binding = self._require_binding()
         try:
-            evidence: object | None = None
-            if payment.payment_method is PaymentMethod.CARD:
-                if payment.external_id is None:
-                    return self._mark_fiscal_unknown(
-                        sale.id,
-                        owner_id,
-                        "missing_payment_id",
-                        "Payment evidence is unavailable.",
-                    )
-                payment_state = binding.payment.get_payment(
-                    payment.external_id, self._payment_request(sale, payment)
-                )
-                if payment_state.fiscal_evidence is None:
-                    raise ProviderCallError(
-                        "missing_payment_evidence",
-                        "Provider did not return fiscal payment evidence.",
-                        outcome_unknown=True,
-                    )
-                evidence = payment_state.fiscal_evidence
-            request = self._fiscal_request(sale, fiscalization, payment, evidence)
+            request = self._fiscal_request(sale, fiscalization, payment, None)
             operation = binding.fiscal.get_fiscalization(fiscalization.external_id, request)
         except ProviderCallError as exc:
             return self._mark_fiscal_unknown(sale.id, owner_id, exc.code, str(exc))
@@ -563,6 +652,10 @@ class CheckoutService:
             fiscalization.external_receipt_id = operation.external_reference
             sale.status = SaleStatus.COMPLETED
             sale.completed_at = datetime.now(UTC)
+            fiscalization.provider_metadata = {
+                **fiscalization.provider_metadata,
+                "core_persisted_at": sale.completed_at.isoformat(),
+            }
         elif operation.state is ProviderOutcomeState.FAILED:
             fiscalization.status = FiscalizationStatus.FAILED
             sale.status = SaleStatus.FISCALIZATION_FAILED
@@ -575,6 +668,18 @@ class CheckoutService:
         fiscalization.updated_by_id = owner_id
         sale.updated_by_id = owner_id
         self._commit()
+        if operation.state is ProviderOutcomeState.SUCCEEDED:
+            logger.info(
+                "Checkout timing sale=%s stage=T4 payment_approved_at=%s "
+                "receipt_started_at=%s receipt_response_at=%s provider_completed_at=%s "
+                "core_persisted_at=%s",
+                sale.id,
+                sale.paid_at.isoformat() if sale.paid_at else None,
+                fiscalization.provider_metadata.get("receipt_process_started_at"),
+                fiscalization.provider_metadata.get("receipt_process_response_at"),
+                fiscalization.provider_metadata.get("provider_updated_at"),
+                fiscalization.provider_metadata.get("core_persisted_at"),
+            )
         logger.info(
             "Fiscal state sale=%s fiscalization=%s external=%s state=%s",
             sale.id,
@@ -648,8 +753,7 @@ class CheckoutService:
                     barcode=item.barcode_snapshot,
                     quantity=int(allocation["quantity"]),
                     unit_price=Decimal(str(allocation["unit_price"])),
-                    line_total=Decimal(str(allocation["unit_price"]))
-                    * int(allocation["quantity"]),
+                    line_total=Decimal(str(allocation["unit_price"])) * int(allocation["quantity"]),
                 )
                 for item in sale.items
                 for index, allocation in enumerate(item.fiscal_allocations)
@@ -663,7 +767,7 @@ class CheckoutService:
     ) -> None:
         if operation.external_id:
             record.external_id = operation.external_id
-        record.provider_metadata = dict(operation.metadata)
+        record.provider_metadata = {**record.provider_metadata, **operation.metadata}
         record.error_code = operation.error_code
         record.error_message = operation.error_message
 
@@ -678,9 +782,7 @@ class CheckoutService:
         if persisted_integration_id is None:
             return
         binding = self._require_binding()
-        if (
-            persisted_integration_id != binding.integration_id
-        ):
+        if persisted_integration_id != binding.integration_id:
             raise CheckoutProviderMismatchError
 
     def _require_binding(self) -> CheckoutProviderBinding:
@@ -709,7 +811,11 @@ class CheckoutService:
     @staticmethod
     def _successful_payment(sale: Sale) -> PaymentAttempt:
         attempt = next(
-            (item for item in reversed(sale.payments) if item.status is PaymentStatus.SUCCEEDED),
+            (
+                item
+                for item in reversed(sale.payments)
+                if item.status is PaymentStatus.SUCCEEDED and not item.accounting_superseded
+            ),
             None,
         )
         if attempt is None:

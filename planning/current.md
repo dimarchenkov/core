@@ -52,9 +52,11 @@ terminal cancellation recovery, AQSI card/QR acquiring, explicit cash receipt/sk
 Customer/Loyalty and refunds/returns remain outside this slice. Architecture
 and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_workspace.md) and
 [`docs/22_checkout_payment_fiscalization.md`](../docs/22_checkout_payment_fiscalization.md).
-Sprint 5.20 adds authenticated read-only Revenue analytics over completed Core Sales: local-date
-periods, KPI, daily trends/table, Product/Variant rankings, weekday metrics and payment-method
-breakdown. Refund adjustment and defensible COGS/profit remain explicitly deferred; definitions
+Sprint 5.20 adds authenticated read-only Revenue analytics over completed Core Sales and closed
+Rental orders: local-date periods, separate source KPI/counts, combined daily totals,
+Product/Variant/RentalAsset rankings, weekday Sales metrics and payment-method breakdown. Rental
+uses historical base plus finalized overdue, while deposit and damage/loss compensation are
+excluded. Refund adjustment and defensible COGS/profit remain explicitly deferred; definitions
 and UAT are recorded in [`docs/24_sales_analytics.md`](../docs/24_sales_analytics.md).
 Catalog-backed и manual/free-sale SaleItem входят в totals; source breakdown и отдельный Free Sale
 ranking сохраняют различие источников и не создают Catalog identity по совпадению имени.
@@ -377,3 +379,8 @@ ranking сохраняют различие источников и не соз�
   явного включения администратором и не обещает remote reconciliation drift detection;
 - существующие границы Catalog, Pricing, Inventory, Intake, Rental и AQSI не смешиваются;
 - результаты real-world UAT Sprint 9.12 честно зафиксированы.
+# Pre-1.0 critical: Payment & Fiscalization Reliability
+
+Надёжность реальной оплаты и фискализации имеет приоритет над менее критичными pre-1.0
+возможностями. Browser является только инициатором/наблюдателем; acquiring и fiscalization
+продолжаются через durable DB jobs, worker recovery и безопасную reconciliation.

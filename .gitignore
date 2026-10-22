@@ -31,5 +31,14 @@ storage/*
 # Logs
 *.log
 
+# Local production recovery artifacts (must never enter Git)
+/backups/**/*.dump
+/backups/**/aqsi-evidence.json
+/backups/**/aqsi-*-evidence.json
+/backups/**/operator-sales.json
+/backups/intake-incidents/*.json
+/backups/master_encryption_key-*
+/backups/reconciliation-*/reconciliation-report.md
+
 # Alembic (если будут временные файлы)
 *.pyc

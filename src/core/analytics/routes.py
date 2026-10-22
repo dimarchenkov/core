@@ -13,6 +13,7 @@ from core.analytics.read_service import (
     resolve_sales_period,
 )
 from core.analytics.schemas import (
+    RentalAssetAnalyticsRead,
     SalesAnalyticsDashboardRead,
     SalesDailyRead,
     SalesFreeSaleItemRead,
@@ -76,7 +77,7 @@ def sales_summary(
     report_period: Annotated[SalesAnalyticsPeriod, Depends(get_sales_analytics_period)],
     service: Annotated[SalesAnalyticsReadService, Depends(get_sales_analytics_service)],
 ) -> SalesSummaryRead:
-    """Return primary revenue and volume KPIs."""
+    """Return business revenue with separate Sales and Rental KPIs."""
     return service.summary(report_period)
 
 
@@ -85,7 +86,7 @@ def sales_timeline(
     report_period: Annotated[SalesAnalyticsPeriod, Depends(get_sales_analytics_period)],
     service: Annotated[SalesAnalyticsReadService, Depends(get_sales_analytics_service)],
 ) -> list[SalesDailyRead]:
-    """Return exact day-grouped revenue, receipt and item values."""
+    """Return exact day-grouped Sales, Rental and combined values."""
     return service.timeline(report_period)
 
 
@@ -129,6 +130,17 @@ def sales_top_free_sale_items(
 ) -> list[SalesFreeSaleItemRead]:
     """Rank manual/free-sale item groups without inventing Catalog identity."""
     return service.top_free_sale_items(report_period, ranking=ranking, limit=limit)
+
+
+@router.get("/top-rental-items", response_model=list[RentalAssetAnalyticsRead])
+def sales_top_rental_items(
+    report_period: Annotated[SalesAnalyticsPeriod, Depends(get_sales_analytics_period)],
+    service: Annotated[SalesAnalyticsReadService, Depends(get_sales_analytics_service)],
+    ranking: SalesRanking = SalesRanking.REVENUE,
+    limit: int = Query(default=10, ge=1, le=100),
+) -> list[RentalAssetAnalyticsRead]:
+    """Rank completed physical RentalAsset operations by count or earned revenue."""
+    return service.top_rental_items(report_period, ranking=ranking, limit=limit)
 
 
 @router.get("/weekdays", response_model=list[SalesWeekdayRead])

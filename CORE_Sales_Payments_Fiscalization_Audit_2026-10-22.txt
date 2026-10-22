@@ -1,0 +1,819 @@
+CORE Sales, Payments and Fiscalization
+READ-ONLY ARCHITECTURAL AND RELIABILITY AUDIT
+
+Дата аудита: 2026-10-22
+Режим: STRICT READ-ONLY
+
+Обозначения:
+- VERIFIED — подтверждено кодом, схемой, безопасным SELECT или существующим логом.
+- INFERRED — логический вывод из подтверждённых фактов.
+- UNVERIFIED — требуется внешний контракт, live-device UAT или недоступный источник.
+
+============================================================
+A. EXECUTIVE SUMMARY
+============================================================
+
+Итог аудита: текущая реализация заметно надёжнее браузерно-управляемого checkout, но ещё не гарантирует безопасное восстановление после неоднозначного ответа AQSI. Для реальной точки продаж есть три подтверждённых P0-класса риска.
+
+1. VERIFIED — повторная фискализация после неопределённого POST.
+
+Если POST /Receipts/process мог выполниться, но CORE не получил operationId, Fiscalization становится UNKNOWN, однако worker продолжает цикл и снова вызывает создание чека. Для наличных lookup всегда возвращает None, поэтому риск особенно прямой.
+
+Evidence:
+- src/core/sales/checkout.py — CheckoutService.process_fiscalization(), _initiate_fiscalization(), _record_fiscal_error()
+- src/core/sales/fiscalization_jobs.py — run_fiscalization_job()
+- src/core/integrations/aqsi/checkout.py — AqsiCheckoutAdapter.find_fiscalization()
+
+2. VERIFIED + INFERRED impact — AQSI HTTP 5xx трактуется как определённый отказ.
+
+AqsiHttpClient._request() ставит retryable, но не outcome_unknown. Sales переводит попытку в FAILED, возвращает Sale в DRAFT и разрешает новую оплату. Если AQSI успел принять команду до ответа 500, возможен второй charge. Аналогично возможен второй чек после ручного retry.
+
+Evidence:
+- src/core/integrations/aqsi/client.py — AqsiHttpClient._request()
+- src/core/sales/checkout.py — CheckoutService._record_payment_error()
+
+3. VERIFIED — финансовые backup-артефакты уже добавлены в Git index с mode 100644, а master encryption key находится незатреканным под backups/.
+
+Содержимое ключа не читалось. .gitignore не исключает эти файлы. Это риск утечки production-данных и ключа при следующем commit/push.
+
+Положительные стороны:
+
+- VERIFIED: Payment и fiscal jobs хранятся в PostgreSQL; Redis — только механизм пробуждения.
+- VERIFIED: Browser больше не выполняет provider polling и может быть закрыт.
+- VERIFIED: Неопределённая card payment без external_id блокирует слепой повтор.
+- VERIFIED: Stock posting и создание fiscal job выполняются в транзакции с фиксацией успешной оплаты.
+- VERIFIED: Повторные движения склада ограничены уникальным индексом.
+- VERIFIED: В текущей БД нет completed Sales без успешной effective payment, корректной fiscalization либо inventory timestamp.
+
+Общий вердикт: необходимо устранить P0 до доверия автоматическим retry при неопределённом POST. Обычный happy path реализован, но end-to-end физическая надёжность остаётся UNVERIFIED, потому что live-device UAT не выполнялся.
+
+============================================================
+B. CURRENT ARCHITECTURE DIAGRAM
+============================================================
+
+Browser / app.js
+        | HTTP via Angie
+        v
+FastAPI sales routes
+        |
+        +-- Cart/Sale commands ----------------+
+        |                                       |
+        v                                       v
+CheckoutService                           PostgreSQL
+        |                            Sales, attempts,
+        | commit Sale + durable job    fiscalizations,
+        |                                  jobs, stock
+        v
+Redis RQ queue -- wakeup only
+        |
+        v
+One RQ Worker process
+(forks work-horse per job)
+        |
+        v
+CheckoutProviderFactory
+        |
+        v
+AqsiCheckoutAdapter -> AQSI Cloud API -> physical AQSI device
+        |
+        +-- poll/update PostgreSQL
+
+Browser only reads persisted Sale state.
+
+Текущий Compose: один API, один worker, PostgreSQL, Redis и Angie. На момент проверки все контейнеры запущены; PostgreSQL и Redis healthy. Worker слушает checkout, default.
+
+============================================================
+C. ACTUAL SOURCE FILES AND RESPONSIBILITIES
+============================================================
+
+1. src/core/sales/models.py
+   Responsibility: Sale, SaleItem, PaymentAttempt, PaymentJob, Fiscalization, FiscalizationJob.
+   Persistence: PostgreSQL.
+   Execution: API и worker.
+
+2. src/core/sales/service.py
+   Responsibility: корзина, цены, quantity, отмена только DRAFT.
+   Persistence: PostgreSQL.
+   Execution: API.
+
+3. src/core/sales/checkout.py
+   Responsibility: payment/fiscal orchestration и состояния.
+   Persistence: PostgreSQL.
+   Execution: API и worker.
+
+4. src/core/sales/providers.py
+   Responsibility: generic PaymentProvider, FiscalProvider, безопасные DTO/error.
+   Persistence: отсутствует.
+
+5. src/core/sales/routes.py
+   Responsibility: Checkout API, history, health, reconciliation.
+   Execution: FastAPI.
+
+6. src/core/sales/payment_jobs.py
+   Responsibility: durable acquiring job, claim/recovery.
+   Persistence: PostgreSQL + Redis/RQ.
+
+7. src/core/sales/fiscalization_jobs.py
+   Responsibility: durable fiscal job, claim/recovery.
+   Persistence: PostgreSQL + Redis/RQ.
+
+8. src/core/integrations/checkout.py
+   Responsibility: выбор Integration и построение provider binding.
+   Execution: API и worker.
+
+9. src/core/integrations/aqsi/checkout.py
+   Responsibility: маппинг generic requests/states в AQSI.
+   Execution: worker.
+
+10. src/core/integrations/aqsi/client.py
+    Responsibility: AQSI HTTP и transport errors.
+    Execution: worker.
+
+11. src/core/inventory/service.py
+    Responsibility: однократные отрицательные Sale movements.
+    Persistence: PostgreSQL.
+
+12. src/core/analytics/read_service.py
+    Responsibility: revenue только по completed Sales.
+    Persistence: PostgreSQL/read API.
+
+13. src/core/web/static/app.js
+    Responsibility: UI, display polling, health banner.
+    Execution: browser.
+
+14. src/core/worker.py
+    Responsibility: один RQ worker и recovery schedules.
+    Execution: worker container.
+
+15. src/core/main.py
+    Responsibility: безусловное подключение Sales/Analytics routes.
+    Execution: API.
+
+16. docker-compose.yml
+    Responsibility: API, worker, PostgreSQL, Redis, Angie.
+
+Персистентным источником истины являются PostgreSQL-таблицы. Redis не содержит единственную копию финансового состояния, но scheduler/repeat state находится в Redis.
+
+============================================================
+D. CURRENT STATE MACHINES
+============================================================
+
+D1. Sale
+
+DRAFT ------------------------------> CANCELLED
+  |
+  +-- card --> PAYMENT_PENDING
+  |                 |
+  |                 +-- failed/canceled --> DRAFT
+  |                 +-- succeeded -------> PAID
+  |
+  +-- cash ------------------------------> PAID
+                                            |
+                    no receipt -------------+--> COMPLETED
+                                            |
+                    receipt required        v
+                                  FISCALIZATION_PENDING
+                                    |                 |
+                                    | success         | definite failure
+                                    v                 v
+                                COMPLETED      FISCALIZATION_FAILED
+                                                     |
+                                                     +-- explicit retry
+                                                         -> FISCALIZATION_PENDING
+
+- VERIFIED: PAYMENT_FAILED существует в enum, но текущий checkout его не устанавливает. В БД осталась Sale #1 в этом состоянии; list_drafts() её не возвращает. Это legacy stuck state.
+- VERIFIED: COMPLETED зависит от успешного/пропущенного fiscalization, то есть коммерческое завершение и фискальная обязанность связаны слишком жёстко.
+- VERIFIED: База не запрещает противоречивые межтабличные сочетания статусов.
+
+D2. PaymentAttempt
+
+PENDING -> PENDING | UNKNOWN | SUCCEEDED | FAILED | CANCELED
+UNKNOWN + external_id -> provider polling
+UNKNOWN без external_id -> manual reconciliation required; automatic retry blocked
+FAILED/CANCELED -> новый PaymentAttempt только через explicit retry
+
+UNKNOWN сохраняется правильно для transport timeout/request error. Но HTTP 5xx ошибочно попадает в FAILED.
+
+D3. Fiscalization
+
+PENDING -> PENDING | UNKNOWN | SUCCEEDED | FAILED
+FAILED -> PENDING через explicit retry
+SKIPPED -> terminal
+
+Опасный переход: UNKNOWN без external_id -> повторный initiate, хотя предыдущее создание могло выполниться.
+
+D4. Background jobs
+
+QUEUED -> PROCESSING -> COMPLETED | FAILED | QUEUED
+stale PROCESSING -> QUEUED
+
+Исключение: stale payment job без provider ID переводится в FAILED, Payment — в UNKNOWN. У job нет состояний manual_review, canceled или lease ownership.
+
+============================================================
+E. DEPENDENCY AND MODULARITY ASSESSMENT
+============================================================
+
+- Sales -> Catalog/Pricing: appropriate domain dependency — выбор товара и frozen price snapshots.
+- Sales -> Inventory: appropriate application dependency, хотя синхронное stock posting внутри payment completion увеличивает blast radius.
+- Sales -> generic provider protocols: appropriate infrastructure boundary.
+- Sales models -> IntegrationProvider: infrastructure leakage; provider enum сохраняется прямо в financial domain.
+- FiscalizationJob.aqsi_operation_id: архитектурное нарушение generic boundary.
+- CheckoutProviderFactory: composition root расположен правильно, но _build() поддерживает только AQSI и требует, чтобы одна Integration предоставляла одновременно payment и fiscal capabilities.
+- AQSI adapter -> Sales provider DTO: нормальная зависимость инфраструктурного адаптера от порта.
+- AQSI incident recovery -> Sales/Inventory models: допустимо только как одноразовый recovery tool; повторное использование сделает его boundary violation.
+
+Ответы на ключевые вопросы:
+
+- Sales application service напрямую AQSI client не вызывает: нет.
+- Создать payment без AQSI можно: да, только cash.
+- Безопасно завершить Sale через внешнюю кассу: нет; cash_without_receipt не хранит внешний provider/device/receipt и искажает происхождение платежа.
+- Bank operation details находятся в отдельном PaymentAttempt, а не в полях Sale: да, это хорошо.
+- Fiscalization связана с Sale completion: да, чрезмерно.
+- Feature toggle Sales отсутствует. Sales routes и UI подключаются безусловно; SPA после login обязательно вызывает /api/sales.
+- Rental Python-код не импортирует Sales и использует общие Catalog/Inventory/Customer модели. Домен Rental независим, текущая сборка UI/API — нет.
+- Catalog deletion импортирует SaleItem, чтобы защищать исторические ссылки; это обоснованная dependency.
+- Analytics импортирует Sales и Rental как read model; это приемлемо.
+
+============================================================
+F. AQSI REPLACEMENT READINESS
+============================================================
+
+Capability                                  Current state
+-----------------------------------------------------------------
+Initiate payment                            Есть
+Get payment status                          Есть
+Request pending-operation cancellation      Нет в generic interface
+Reversal/void                               Нет
+Refund                                      Нет
+Create fiscal receipt                       Есть
+Get receipt operation status                Есть
+Find existing receipt                       Есть, AQSI-specific recovery
+Get structured fiscal details               Частично через metadata/reference
+Separate payment and fiscal providers       Протоколы разделены, selection требует одну Integration
+
+Готовность к замене провайдера: частичная, ближе к низкой/средней. Основная orchestration provider-neutral, но потребуются новый enum/provider registration, factory branch, credential/config mapping и устранение AQSI-поля job.
+
+Terminal ID не зашит literal-значением: он читается из Integration configuration. AQSI tax/payment/subject mappings сосредоточены в адаптере, что правильно для инфраструктуры, хотя часть фискальных бизнес-настроек сейчас фиксирована: calculationTypeId=4, subjectId=1, payment type 0/1.
+
+Локальный idempotency_key существует, но в AQSI purchase/receipt payload не передаётся. В опубликованной схеме purchase также не указан idempotency token. Это не даёт provider-side exactly-once.
+
+Official source: https://api.aqsi.ru/
+
+============================================================
+G. PAYMENT AND FISCALIZATION RELIABILITY
+============================================================
+
+G1. End-to-end flow
+
+1. Cart
+   HTTP -> SaleService. Sale row блокируется FOR UPDATE. Commit на команду.
+
+2. Start card checkout
+   HTTP -> _prepare_payment. PaymentAttempt(PENDING) и PaymentJob(QUEUED) создаются одним commit.
+
+3. Queue wakeup
+   Выполняется после commit. Redis failure допустим: 15-секундный DB sweep должен подобрать job.
+
+4. Acquiring POST
+   Worker -> process_payment() -> AQSI purchase.
+
+5. Persist operation ID
+   Отдельный DB commit после provider response.
+
+6. Payment polling
+   Worker, восемь проходов; затем job requeue.
+
+7. Approval
+   В одном DB transaction фиксируются payment succeeded, Sale paid, stock movements, fiscalization и fiscal job.
+
+8. Receipt create/poll
+   Отдельный fiscal worker job.
+
+9. Completion
+   Fiscal succeeded -> Sale completed.
+
+10. UI
+    Только GET /api/sales/{id}; provider calls из браузера отсутствуют.
+
+G2. Reliability findings
+
+- VERIFIED — Browser independence: navigation/закрытие страницы прекращает только визуальный polling; worker продолжает.
+- VERIFIED — Durable handoff: payment approval, stock и fiscal job коммитятся совместно.
+- VERIFIED — Duplicate checkout click: Sale lock и existing-attempt replay предотвращают обычный двойной POST.
+- VERIFIED — Timeout payment: сохраняется UNKNOWN; blind retry блокируется.
+- FAIL — Payment response/ID lost: без provider correlation исходную оплату нельзя автоматически найти; job quarantined, но оператор не получает безопасного recovery workflow.
+- FAIL — HTTP 5xx: допускает новую оплату как после definitive failure.
+- FAIL — Fiscal timeout/missing ID: worker автоматически повторяет create.
+- FAIL — Cross-system gap: provider POST и DB commit не атомарны. При успешном POST и локальном исключении до persistence ID возможен повтор. Stale payment recovery защищает только случай, когда job остался PROCESSING; он не доказывает безопасность всех exception paths.
+- UNVERIFIED — AQSI Timeout/Error: адаптер считает их definitive failure и разрешает повтор. Нужен подтверждённый acquiring contract/UAT, что банк точно не списал деньги.
+- VERIFIED — Read-before-write: card fiscalization ищет receipt по slip, но lookup может быть eventually consistent; для cash lookup отсутствует. Это не exactly-once.
+
+В тестах есть проверки browser-independent jobs, UNKNOWN payment и stale quarantine, но нет доказательства безопасного повторного запуска после receipt POST timeout/500.
+
+Relevant tests inspected, not executed:
+- tests/test_sales_checkout.py — test_stale_payment_initiation_without_operation_id_is_not_repeated()
+- tests/test_sales_checkout.py — test_worker_requeues_temporary_fiscalization_error_without_reacquiring()
+- tests/test_sales_checkout.py — test_worker_completes_fiscalization_without_browser_request()
+- tests/test_worker.py — test_worker_starts_with_scheduler()
+
+G3. Worker and deployment
+
+- Один RQ Worker слушает checkout и default, fork на каждую job.
+- Container policy: restart: unless-stopped.
+- Claims используют FOR UPDATE SKIP LOCKED.
+- Stale threshold — 2 минуты; RQ job timeout — 90 секунд.
+- Recovery запускается при startup и каждые 15 секунд.
+- Repeat ограничен 1,000,000 запусков — примерно 174 дня непрерывной работы, затем schedule закончится без restart/re-registration.
+- Graceful shutdown/lease protocol специально не реализован.
+
+VERIFIED log:
+2026-10-21 21:35:36 UTC worker упал в AQSI catalog job с:
+psycopg.errors.DuplicatePreparedStatement: prepared statement "_pg3_0" already exists
+
+INFERRED root cause:
+engine.dispose() вызывается до регистрации recovery schedules, но schedule functions снова открывают DB sessions до начала RQ fork loop. Child может унаследовать повторно заполненный pool. Ошибка наблюдалась на catalog sync, а не на payment job, поэтому влияние на checkout остаётся INFERRED, но общий worker process и DB engine те же.
+
+============================================================
+H. CANCEL, REFUND AND EMERGENCY FALLBACK READINESS
+============================================================
+
+A. Cancel unpaid DRAFT
+   Есть, без payment/fiscal side effects.
+
+B. Cancel pending acquiring
+   Не доступно через Sales/API/UI.
+
+C. Reversal approved payment
+   Не реализовано.
+
+D. Refund completed payment
+   Не реализовано.
+
+E. Stop waiting in UI
+   Можно уйти со страницы; операция продолжится.
+
+F. Switch to external/manual POS
+   Не реализовано для pending/unknown Sale.
+
+AQSI adapter содержит cancel_device_operation(), но этот метод отсутствует в PaymentProvider и не вызывается Sales. Он отменяет команду устройства, а не делает банковский reversal.
+
+Официальная AQSI API разделяет:
+- POST /v4/Operations/{id}/cancel — отмена операции устройства;
+- POST /v4/Slips/process/reversal — эквайринговая отмена с originalId;
+- POST /v4/Slips/process/refund — возврат с originalId.
+
+Следовательно, UI cancel нельзя интерпретировать как «деньги не списаны».
+
+Official source: https://api.aqsi.ru/
+
+Emergency fallback сейчас отсутствует. cash_without_receipt можно выбрать только из чистого DRAFT; он:
+
+- записывает CASH, а не EXTERNAL_POS;
+- не хранит внешнюю кассу/чек;
+- не связывается с исходной UNKNOWN payment;
+- не обрабатывает поздний APPROVED;
+- автоматически помечает fiscalization как SKIPPED.
+
+Одноразовый incident recovery умеет сохранять accounting_superseded, но это не штатный операторский процесс.
+
+Требуемые safeguards:
+
+- неизменяемая исходная UNKNOWN attempt;
+- отдельное operator-confirmed external payment;
+- incident/override record с actor, reason, timestamp и acknowledgement риска;
+- запрет второго automatic acquiring/fiscal POST;
+- связь fallback с исходной attempt;
+- поздний APPROVED должен создавать reconciliation incident, а не автоматически переписывать external payment или Sale.
+
+============================================================
+I. INVENTORY AND ANALYTICS CONSISTENCY
+============================================================
+
+Stock уменьшается после подтверждения payment, до успешной fiscalization. Для cash это операторское подтверждение.
+
+Защита:
+
+- inventory_posted_at;
+- read-before-create;
+- partial unique index (source_id, variant_id) для Sale movements;
+- immutable stock ledger.
+
+Read-only сверка текущей БД:
+
+- 115 completed Sales — все имеют inventory timestamp;
+- completed без effective successful payment: 0;
+- completed без succeeded/skipped fiscalization: 0;
+- несовпадений frozen SaleItem quantity и Sale stock movement: 0.
+
+Проблемы:
+
+- Sale #92: payment succeeded, stock posted, fiscalization failed и operator-dismissed. Она не входит в revenue analytics.
+- Analytics учитывает только Sale.status=COMPLETED; оплаченная, но нефискализированная продажа временно или навсегда исчезает из revenue.
+- Если Variant деактивирован между cart и payment approval, stock posting падает. Деньги уже могли быть получены, а локальная фиксация approval будет повторяться до ручного исправления.
+- Refund movements и отрицательная revenue-коррекция отсутствуют.
+- Sale #128 имеет два effective successful tender: card 5,000 + cash 1,910 = total 6,910. Модель это физически допускает, но normal checkout service ориентирован на одну successful attempt; split tender — recovery artifact, не формализованный workflow.
+
+Состояние БД на момент проверки:
+
+- Sales: 115 completed, 12 cancelled, 1 draft, 1 payment_failed, 1 fiscalization_failed.
+- Payment attempts: 118 succeeded, 18 failed, 8 canceled, 1 pending.
+- Fiscalizations: 85 succeeded, 30 skipped, 1 failed.
+- Sale #1 — legacy payment_failed, не попадает в текущий resumable list.
+- Sale #109 — completed после incident recovery; исходная pending attempt сохранена как accounting_superseded.
+- Sale #92 — paid/stock-posted, но fiscalization failed.
+
+============================================================
+J. SECURITY, HISTORY, HEALTH AND OPERATIONAL CONCERNS
+============================================================
+
+J1. Security
+
+- API key хранится encrypted и не отдаётся browser DTO: PASS.
+- Provider errors sanitised/truncated: PASS.
+- Sales требуют authenticated user и ограничивают Sales по owner: PASS.
+- Отдельного cashier/refund/override permission нет: P1.
+- Health считает глобальные payment/job состояния, хотя endpoint доступен обычному пользователю: умеренная cross-operator information leak.
+- JWT хранится в sessionStorage; это увеличивает последствия XSS.
+
+Критическая repository hygiene:
+
+- четыре AQSI evidence/dump-файла уже staged;
+- Git index mode — 100644;
+- незатреканный backups/master_encryption_key-2026-10-12;
+- backup paths не игнорируются.
+
+Рабочее дерево значительно изменено и branch main ahead of origin/main на 2 commit. Аудит относится к текущему working tree, а не только к опубликованному baseline.
+
+J2. Operation history
+
+История может ответить:
+
+- payment/fiscal current status — да;
+- provider operation ID — да;
+- external fiscal receipt ID — иногда;
+- ошибки — только последнее error_code/message и job.last_error;
+- operator dismissal — да, но не полноценная event history.
+
+Не может надёжно ответить:
+
+- был ли refund/reversal;
+- какое физическое устройство выполнило конкретную операцию;
+- полная последовательность ошибок;
+- внешний POS и внешний receipt reference;
+- связь emergency override с поздним APPROVED.
+
+J3. Health checker
+
+Используемые сигналы:
+
+- AQSI Cloud list_shop_ids;
+- число глобальных pending/unknown payments;
+- queued/processing fiscal jobs;
+- superseded operation requiring manual review.
+
+Отсутствуют:
+
+- device existence/online/readiness;
+- worker heartbeat;
+- queue lag/oldest job age;
+- last successful acquiring/fiscal interaction;
+- terminal busy status;
+- unresolved failed fiscal jobs в общем health state.
+
+UI отображает READY как «Касса готова», хотя backend явно проверяет только Cloud API. Это ложное усиление сигнала.
+
+Flicker/contradictions возникают потому, что каждый rerender Sale запускает новый health request; progress polling работает каждые 0.5–2 секунды; есть 650 ms debounce, но нет request generation/abort, поэтому ответы могут применяться не по порядку. Кроме того, глобальная чужая операция может показать текущему оператору BUSY.
+
+Минимальная семантика:
+
+- CLOUD_UNREACHABLE;
+- DEVICE_READINESS_UNKNOWN;
+- PROCESSING;
+- MANUAL_REVIEW;
+- READY_FOR_NEW_COMMAND только после подтверждённого device signal;
+- отдельный WORKER_UNHEALTHY.
+
+============================================================
+K. FAILURE SCENARIO MATRIX
+============================================================
+
+1. Normal payment + fiscalization
+   Current: durable jobs, stock then fiscal, Sale completion.
+   Expected: то же + physical confirmation.
+   Recovery: persisted job polling.
+   Evidence: CheckoutService._stage_paid_sale(), run_payment_job(), run_fiscalization_job().
+   Status: PASS / live UAT UNKNOWN.
+
+2. Payment declined
+   Current: AQSI Error/Canceled -> failed/canceled -> DRAFT.
+   Expected: подтверждённый definitive decline.
+   Risk: Error/Timeout semantics могут не доказывать отсутствие списания.
+   Recovery: explicit retry только после доказанного final state.
+   Evidence: AqsiCheckoutAdapter.get_payment().
+   Status: UNKNOWN.
+
+3. Provider timeout before operation ID
+   Current: Payment UNKNOWN, job failed, retry blocked.
+   Expected: durable manual reconciliation/search.
+   Risk: операция не может быть найдена автоматически.
+   Recovery: ручная сверка.
+   Evidence: CheckoutService._record_payment_error(), run_payment_job().
+   Status: FAIL.
+
+4. Payment approved but response lost
+   Current: UNKNOWN без provider correlation.
+   Expected: find by provider correlation; never recharge blindly.
+   Risk: потеря связи с approved payment.
+   Recovery: только ручная provider reconciliation.
+   Evidence: payment idempotency key не передаётся в AQSI payload.
+   Status: FAIL.
+
+5. Browser navigation during payment
+   Current: worker продолжает; UI polling прекращается.
+   Expected: server-owned execution.
+   Recovery: открыть Sale/history снова.
+   Evidence: app.js scheduleCheckoutProgress(), payment_jobs.py.
+   Status: PASS.
+
+6. Browser navigation during fiscalization
+   Current: worker продолжает.
+   Expected: server-owned execution.
+   Recovery: открыть Sale/history снова.
+   Evidence: fiscalization_jobs.py.
+   Status: PASS.
+
+7. Backend restart during payment
+   Current: DB job recovered; no-ID stale job quarantined.
+   Expected: authoritative reconciliation.
+   Risk: cross-system gap без correlation.
+   Recovery: recovery sweep/manual review.
+   Evidence: recover_payment_jobs().
+   Status: PARTIAL/FAIL.
+
+8. Backend restart during fiscalization
+   Current: stale job requeued; no-ID create может повториться.
+   Expected: quarantine unknown create.
+   Risk: duplicate fiscal receipt.
+   Recovery: ручной lookup; для cash штатного lookup нет.
+   Evidence: recover_fiscalization_jobs(), process_fiscalization().
+   Status: FAIL.
+
+9. Worker does not start
+   Current: jobs persist, но нет worker health/processing.
+   Expected: alert + operator block/fallback.
+   Risk: checkout indefinitely pending.
+   Recovery: восстановить worker; DB sweep подберёт job.
+   Evidence: worker.py, checkout_health().
+   Status: FAIL.
+
+10. Device offline
+    Current: Cloud/API semantics не проверены на устройстве.
+    Expected: device-specific state and safe UNKNOWN.
+    Risk: misleading readiness and ambiguous operations.
+    Recovery: manual/device UAT.
+    Evidence: check_health() uses list_shop_ids only.
+    Status: UNKNOWN.
+
+11. AQSI API online but device offline
+    Current: health может показать «Касса готова».
+    Expected: API_REACHABLE != DEVICE_READY.
+    Risk: operator starts unusable checkout.
+    Recovery: device readiness signal.
+    Evidence: AqsiCheckoutAdapter.check_health(), app.js hydrateCheckoutHealth().
+    Status: FAIL.
+
+12. Fiscalization delayed
+    Current: poll/requeue по external ID.
+    Expected: durable polling, timeout shown to operator.
+    Risk: poor visibility; no bounded escalation.
+    Recovery: worker retry/manual review.
+    Evidence: run_fiscalization_job().
+    Status: PASS/PARTIAL.
+
+13. Receipt created but response lost
+    Current: Fiscal UNKNOWN без ID, затем повторный POST.
+    Expected: quarantine/search/correlation.
+    Risk: duplicate receipt.
+    Recovery: card receipt lookup may eventually help; cash cannot.
+    Evidence: _initiate_fiscalization(), find_fiscalization().
+    Status: FAIL.
+
+14. Duplicate checkout click
+    Current: Sale lock/replay; новый attempt не создаётся.
+    Expected: one acquiring command.
+    Recovery: return current Sale state.
+    Evidence: _prepare_payment(), unique constraints.
+    Status: PASS.
+
+15. Concurrent requests to same Sale
+    Current: FOR UPDATE, unique constraints, job claim.
+    Expected: serialized aggregate.
+    Recovery: conflict/replay.
+    Evidence: SaleRepository.get_owned_for_update(), _claim_job().
+    Status: PASS.
+
+16. Operator requests cancellation
+    Current: только DRAFT Sale cancel.
+    Expected: отдельная pending-operation cancel.
+    Risk: UI intent could be confused with bank state.
+    Recovery: not available.
+    Evidence: SaleService.cancel_sale(), PaymentProvider protocol.
+    Status: NOT IMPLEMENTED.
+
+17. Cancellation result unknown
+    Current: lifecycle/API отсутствуют.
+    Expected: UNKNOWN cancel + reconciliation.
+    Risk: false canceled state or duplicate action.
+    Recovery: not available.
+    Evidence: missing domain model/interface.
+    Status: NOT IMPLEMENTED.
+
+18. Operator switches to external POS
+    Current: pending/unknown Sale нельзя переключить.
+    Expected: explicit emergency override.
+    Risk: checkout blocked during outage.
+    Recovery: one-off incident tooling only.
+    Evidence: CheckoutPaymentOption and _prepare_payment().
+    Status: NOT IMPLEMENTED.
+
+19. Original UNKNOWN payment later becomes APPROVED
+    Current: только одноразовый incident recovery.
+    Expected: duplicate-payment incident and resolution.
+    Risk: two payments/fiscal facts.
+    Recovery: manual reconciliation.
+    Evidence: integrations/aqsi/incident_recovery.py.
+    Status: NOT IMPLEMENTED.
+
+20. External cash register fiscalizes successfully
+    Current: нельзя сохранить источник/receipt.
+    Expected: external fiscal fact, no second receipt.
+    Risk: history falsely говорит «без чека».
+    Recovery: none in normal workflow.
+    Evidence: CASH_WITHOUT_RECEIPT -> SKIPPED.
+    Status: NOT IMPLEMENTED.
+
+21. Sale refunded after completion
+    Current: refund model/provider API/accounting отсутствуют.
+    Expected: durable refund + inventory/accounting events.
+    Risk: неверная выручка и stock.
+    Recovery: outside CORE.
+    Evidence: PaymentProvider protocol, enums/models.
+    Status: NOT IMPLEMENTED.
+
+22. Sales module disabled with outstanding jobs
+    Current: module toggle отсутствует; SPA требует /api/sales.
+    Expected: stop new Sales, continue recovery/history.
+    Risk: Rental/UI break или остановка financial recovery.
+    Recovery: disable only provider for new checkout, but this is not a module toggle.
+    Evidence: main.py create_app(), app.js bootstrap(), CheckoutProviderFactory.for_recovery().
+    Status: NOT IMPLEMENTED.
+
+============================================================
+L. PRIORITY CLASSIFICATION
+============================================================
+
+P0
+
+1. Automatic repeated receipt creation after uncertain receipt POST, особенно cash.
+2. AQSI 5xx classified as definitive failure, enabling second payment/fiscal attempt.
+3. Provider-response/DB-persistence gap without provider idempotency or correlation.
+4. Approved payment without received ID cannot be automatically reconciled.
+5. Staged DB dumps/evidence and untracked master encryption key under repository tree.
+
+P1
+
+1. Observed fork/database prepared-statement failure in the shared worker.
+2. No normal cancel/reversal/refund lifecycle.
+3. No emergency external POS workflow or late-approval handling.
+4. Paid but non-completed Sale excluded from revenue while stock is already decremented.
+5. Legacy payment_failed state is stuck and hidden from resumable list.
+6. No worker heartbeat/queue-age readiness signal.
+7. No cashier/financial-override permissions.
+8. No safe Sales module disable mode.
+9. Variant deactivation can block persistence after provider approval.
+
+P2
+
+1. Cloud reachability labelled as physical cash-register readiness.
+2. Excessive health polling and stale-response flicker.
+3. AQSI-specific aqsi_operation_id in generic job model.
+4. Provider factory requires one integration for both payment and fiscalization.
+5. Incomplete operation/error history.
+6. Finite recovery Repeat schedule.
+7. Global health state shown in an owner-scoped UI.
+
+============================================================
+M. MINIMAL PHASED REMEDIATION PLAN
+============================================================
+
+Phase A — restore reliable current payment operation
+
+Concrete work:
+- Treat every ambiguous POST outcome, including 5xx, as UNKNOWN.
+- Stop fiscal create when state is UNKNOWN and no operation ID exists.
+- Add explicit quarantine/manual-review behavior.
+- Fix worker DB pool/fork lifecycle.
+- Alert on stuck jobs.
+
+Blast radius: medium.
+Migration: optional if existing statuses are reused.
+Tests: unit fault injection, DB failure tests, worker fork integration.
+UAT: real card/cash terminal timeout cases.
+Rollback: gate automatic retry changes behind a feature/config switch.
+
+Phase B — durable, recoverable financial lifecycle
+
+Concrete work:
+- Durable command/outbox record before provider call.
+- Append-only operation events.
+- Provider correlation/reconciliation.
+- Job lease/heartbeat.
+- Explicit manual-review state.
+- Preserve safe provider references.
+
+Blast radius: high.
+Migration: required.
+Tests: crash at every provider/commit boundary, multi-worker and restart tests.
+UAT: restart/network partition during actual terminal operation.
+Rollback: expand-only schema and compatibility reads.
+
+Phase C — external POS and emergency fallback
+
+Concrete work:
+- EXTERNAL_POS payment source.
+- Operator confirmation distinct from provider verification.
+- Fiscal source and external receipt reference.
+- Override incident linked to original UNKNOWN attempt.
+- Late APPROVED resolution workflow.
+
+Blast radius: medium/high.
+Migration: required.
+Tests: authorization, audit, double-payment warnings, no second receipt.
+UAT: external cash register and late AQSI approval.
+Rollback: disable entry UI while retaining records and reconciliation.
+
+Phase D — provider interface isolation
+
+Concrete work:
+- Add cancel/reversal/refund capabilities.
+- Separate payment/fiscal integration selection.
+- Replace aqsi_operation_id with generic provider_operation_id.
+- Formalize provider status contracts.
+
+Blast radius: medium.
+Migration: likely required for field rename/new operation tables.
+Tests: contract suite per provider and AQSI adapter regression.
+UAT: AQSI cancellation/reversal/refund.
+Rollback: retain old adapter compatibility layer.
+
+Phase E — module toggles, observability and UX
+
+Concrete work:
+- Separate accept_new_sales from recovery/history.
+- Conditional router/UI bootstrap.
+- Worker heartbeat and queue age.
+- Device readiness distinct from Cloud reachability.
+- Cashier/financial-override roles.
+- Remove health request races and polling flicker.
+- Establish backup/secret repository policy.
+
+Blast radius: medium.
+Migration: heartbeat/permissions may require one.
+Tests: module-off tests proving Rental/Catalog operation and outstanding job recovery.
+UAT: operator UX under worker/device/API outage.
+Rollback: configuration toggle without deletion of data.
+
+Порядок A -> B обязателен: external fallback нельзя безопасно добавлять, пока поздний APPROVED и uncertain fiscal create не имеют устойчивой модели.
+
+============================================================
+N. UNKNOWNS REQUIRING LIVE-DEVICE UAT
+============================================================
+
+1. Гарантирует ли AQSI acquiring status Timeout отсутствие списания.
+2. Может ли Error появиться после банковского approval.
+3. Поведение device-operation cancel в Processing и Finishing.
+4. Когда нужен reversal, а когда refund; ограничения смены/дня.
+5. Eventual-consistency задержка между созданием receipt и появлением в /v4/Receipts.
+6. Возможность надёжно найти purchase без полученного operationId по RRN/amount/time/device.
+7. Поддерживает ли AQSI недокументированный idempotency/correlation header.
+8. Реакция offline device при Cloud API online.
+9. Поведение receipt create timeout до и после физической печати.
+10. Split tender fiscalization на устройстве.
+11. Worker recovery после реального SIGTERM/OOM/network partition.
+12. Соответствие будущего external-POS workflow требованиям учёта и фискального законодательства.
+
+============================================================
+O. ACTIONS NOT PERFORMED
+============================================================
+
+- Код, существующая документация, migrations и конфигурация не изменялись.
+- Записи БД не изменялись; выполнялись только BEGIN READ ONLY и SELECT.
+- Тесты не запускались.
+- Worker/API/Angie/PostgreSQL/Redis не запускались и не перезапускались.
+- Payment, cancellation, reversal, refund и fiscal mutation APIs AQSI не вызывались.
+- Живая касса/терминал не использовались.
+- Secrets, dump contents и evidence payloads не читались.
+- Commit, branch, push и staging changes не выполнялись.
+- Существующие пользовательские изменения рабочего дерева не затрагивались.
+
+END OF REPORT

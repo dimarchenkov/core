@@ -19,7 +19,17 @@ def test_worker_starts_with_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
     session_context.__exit__ = Mock(return_value=None)
     validate_credentials = Mock()
     ensure_sync_schedule = Mock()
+    ensure_fiscalization_schedule = Mock()
+    ensure_payment_schedule = Mock()
     dispose_engine = Mock()
+    lifecycle: list[str] = []
+    ensure_sync_schedule.side_effect = lambda connection: lifecycle.append("catalog_schedule")
+    ensure_payment_schedule.side_effect = lambda connection: lifecycle.append("payment_recovery")
+    ensure_fiscalization_schedule.side_effect = lambda connection: lifecycle.append(
+        "fiscal_recovery"
+    )
+    dispose_engine.side_effect = lambda: lifecycle.append("dispose")
+    worker.work.side_effect = lambda **kwargs: lifecycle.append("work")
 
     monkeypatch.setattr(worker_module.Redis, "from_url", Mock(return_value=redis_connection))
     monkeypatch.setattr(worker_module, "build_worker", Mock(return_value=worker))
@@ -39,6 +49,16 @@ def test_worker_starts_with_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
         "ensure_aqsi_catalog_sync_schedule",
         ensure_sync_schedule,
     )
+    monkeypatch.setattr(
+        worker_module,
+        "ensure_fiscalization_recovery_schedule",
+        ensure_fiscalization_schedule,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "ensure_payment_recovery_schedule",
+        ensure_payment_schedule,
+    )
     monkeypatch.setattr(worker_module.engine, "dispose", dispose_engine)
 
     worker_module.main()
@@ -46,7 +66,16 @@ def test_worker_starts_with_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
     validate_credentials.assert_called_once_with(database_session, "resolved-master-key")
     dispose_engine.assert_called_once_with()
     ensure_sync_schedule.assert_called_once_with(redis_connection)
+    ensure_fiscalization_schedule.assert_called_once_with(redis_connection)
+    ensure_payment_schedule.assert_called_once_with(redis_connection)
     worker.work.assert_called_once_with(with_scheduler=True)
+    assert lifecycle == [
+        "catalog_schedule",
+        "payment_recovery",
+        "fiscal_recovery",
+        "dispose",
+        "work",
+    ]
 
 
 def test_aqsi_periodic_sync_schedule_is_registered_once(

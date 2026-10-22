@@ -228,12 +228,15 @@ POS input — hardware scanner в HID/keyboard mode; повторный scan у�
 Checkout decisions и failure semantics описаны в
 [`22_checkout_payment_fiscalization.md`](22_checkout_payment_fiscalization.md).
 
-Sprint 5.20 добавляет отдельный read-only reporting слой Sales Analytics. Он агрегирует только
-`COMPLETED Sale` по business-local календарным датам, использует сохранённые Sale/SaleItem
-monetary snapshots и не обращается к AQSI. Reporting API, определения метрик и ограничения
-refund/COGS описаны в [`24_sales_analytics.md`](24_sales_analytics.md).
+Sprint 5.20 добавляет отдельный read-only reporting слой Business Revenue Analytics. Он
+агрегирует `COMPLETED Sale` и закрытые `CLOSED RentalOrder` по business-local календарным датам,
+использует сохранённые Sale/SaleItem и RentalOrderItem monetary snapshots и не обращается к
+AQSI. Reporting API, определения метрик и ограничения refund/COGS описаны в
+[`24_sales_analytics.md`](24_sales_analytics.md).
 Catalog и manual/free-sale строки считаются двумя легитимными источниками: totals включают оба,
 а Product/Variant и Free Sale rankings намеренно остаются раздельными.
+Rental остаётся отдельным источником: учитываются base и финальная overdue charge, но не deposit,
+damage/loss compensation или незавершённые заказы.
 
 ---
 

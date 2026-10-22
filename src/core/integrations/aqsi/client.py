@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import httpx2
@@ -73,6 +74,9 @@ class AqsiPendingOrderGateway(Protocol):
 
     def get_operation(self, operation_id: str) -> dict[str, object]:
         """Read one AQSI device operation and its real status."""
+
+    def cancel_operation(self, operation_id: str) -> dict[str, object]:
+        """Request cancellation of one device operation without reversing its payment."""
 
     def create_receipt(self, payload: dict[str, object]) -> dict[str, object]:
         """Create one AQSI fiscal receipt device operation."""
@@ -237,6 +241,93 @@ class AqsiHttpClient:
         """Read the authoritative AQSI state for one device operation."""
         return self._device_operation("GET", f"/v4/Operations/{operation_id}")
 
+    def cancel_operation(self, operation_id: str) -> dict[str, object]:
+        """Use AQSI's documented device-operation cancellation endpoint."""
+        return self._device_operation("POST", f"/v4/Operations/{operation_id}/cancel")
+
+    def list_receipts(
+        self, *, processed_from: datetime, processed_to: datetime
+    ) -> list[dict[str, object]]:
+        """Read all fiscal receipts in one explicit half-open provider time range."""
+        return self._list_processed_entities(
+            "/v4/Receipts", processed_from=processed_from, processed_to=processed_to
+        )
+
+    def list_slips(
+        self, *, processed_from: datetime, processed_to: datetime
+    ) -> list[dict[str, object]]:
+        """Read all acquiring slips in one explicit half-open provider time range."""
+        return self._list_processed_entities(
+            "/v4/Slips", processed_from=processed_from, processed_to=processed_to
+        )
+
+    def find_receipt_by_slip(
+        self, slip_id: str, *, acquired_at: datetime
+    ) -> dict[str, object] | None:
+        """Find a fiscal receipt linked to one unique acquiring slip without creating it."""
+        start = acquired_at.astimezone(UTC) - timedelta(minutes=5)
+        end = datetime.now(UTC) + timedelta(minutes=5)
+        matches: list[dict[str, object]] = []
+        for row in self.list_receipts(processed_from=start, processed_to=end):
+            payments = row.get("payments")
+            if not isinstance(payments, list):
+                continue
+            if any(_receipt_payment_has_slip(payment, slip_id) for payment in payments):
+                matches.append(row)
+        if len(matches) > 1:
+            raise AqsiApiError(
+                "duplicate_receipts",
+                "AQSI returned more than one receipt for the acquiring slip.",
+                outcome_unknown=True,
+            )
+        return matches[0] if matches else None
+
+    def _list_processed_entities(
+        self,
+        path: str,
+        *,
+        processed_from: datetime,
+        processed_to: datetime,
+    ) -> list[dict[str, object]]:
+        """Page through one documented v4 list without mutating provider state."""
+        if (
+            processed_from.tzinfo is None
+            or processed_to.tzinfo is None
+            or processed_from >= processed_to
+        ):
+            raise ValueError("AQSI export range must be timezone-aware and increasing.")
+        page = 1
+        records: list[dict[str, object]] = []
+        while True:
+            response = self._request(
+                "GET",
+                path,
+                params={
+                    "pageSize": 100,
+                    "page": page,
+                    "filtered.processedAtTzFrom": processed_from.isoformat(),
+                    "filtered.processedAtTzTo": processed_to.isoformat(),
+                },
+            )
+            if response is None:
+                raise AqsiApiError("invalid_response", "AQSI returned an empty list.")
+            value = response.json()
+            if not isinstance(value, Mapping):
+                raise AqsiApiError("invalid_response", "AQSI returned an invalid list.")
+            rows = value.get("rows")
+            pages = value.get("pages")
+            if not isinstance(rows, list) or not isinstance(pages, int) or pages < 0:
+                raise AqsiApiError("invalid_response", "AQSI returned an invalid list.")
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    raise AqsiApiError("invalid_response", "AQSI returned an invalid list row.")
+                records.append(dict(row))
+            page += 1
+            if page > max(pages, 1):
+                return records
+            if page > 10_000:
+                raise AqsiApiError("invalid_response", "AQSI returned an unreasonable page count.")
+
     def create_receipt(self, payload: dict[str, object]) -> dict[str, object]:
         """Start fiscalization of an itemized receipt on the physical device."""
         return self._device_operation("POST", "/v4/Receipts/process", payload)
@@ -318,4 +409,22 @@ class AqsiHttpClient:
                 message = "; ".join(str(item) for item in errors)[:1000]
             elif isinstance(remote_message, str) and remote_message:
                 message = remote_message[:1000]
-        raise AqsiApiError(code, message, retryable=response.status_code >= 500)
+        server_error = response.status_code >= 500
+        mutating_request = method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        raise AqsiApiError(
+            code,
+            message,
+            retryable=server_error,
+            # A 5xx response proves only that AQSI could not return a successful
+            # response.  For a financial command it does not prove that the
+            # command was not accepted before the server failed.
+            outcome_unknown=server_error and mutating_request,
+        )
+
+
+def _receipt_payment_has_slip(payment: object, slip_id: str) -> bool:
+    """Return whether one receipt payment references the exact acquiring slip."""
+    if not isinstance(payment, Mapping):
+        return False
+    slip = payment.get("slip")
+    return isinstance(slip, Mapping) and slip.get("id") == slip_id

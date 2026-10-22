@@ -6,6 +6,7 @@ from rq import Queue
 from core.config import get_settings
 
 DEFAULT_QUEUE_NAME = "default"
+CHECKOUT_QUEUE_NAME = "checkout"
 
 
 def get_redis_connection() -> Redis:
@@ -16,3 +17,8 @@ def get_redis_connection() -> Redis:
 def get_default_queue() -> Queue:
     """Return the default RQ queue for infrastructure-level background jobs."""
     return Queue(DEFAULT_QUEUE_NAME, connection=get_redis_connection())
+
+
+def get_checkout_queue() -> Queue:
+    """Return the high-priority queue for payment and fiscalization continuity."""
+    return Queue(CHECKOUT_QUEUE_NAME, connection=get_redis_connection())

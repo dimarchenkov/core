@@ -9,7 +9,9 @@ from pydantic import ConfigDict, Field, computed_field
 from core.integrations.enums import IntegrationProvider
 from core.sales.enums import (
     CheckoutPaymentOption,
+    FiscalizationJobStatus,
     FiscalizationStatus,
+    PaymentJobStatus,
     PaymentMethod,
     PaymentStatus,
     SaleDiscountType,
@@ -83,6 +85,22 @@ class SaleItemRead(PydanticBaseModel):
     currency: str
 
 
+class PaymentJobRead(PydanticBaseModel):
+    """Safe acquiring worker state visible in operational history."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUIDv7
+    status: PaymentJobStatus
+    attempt_count: int
+    next_retry_at: datetime | None
+    last_attempt_at: datetime | None
+    completed_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class PaymentAttemptRead(PydanticBaseModel):
     """Safe acquiring history without card data or raw provider payloads."""
 
@@ -97,11 +115,13 @@ class PaymentAttemptRead(PydanticBaseModel):
     currency: str
     external_id: str | None
     status: PaymentStatus
+    accounting_superseded: bool = False
     attempt_number: int
     error_code: str | None
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+    job: PaymentJobRead | None
 
 
 class FiscalizationRead(PydanticBaseModel):
@@ -115,11 +135,29 @@ class FiscalizationRead(PydanticBaseModel):
     external_id: str | None
     external_receipt_id: str | None
     status: FiscalizationStatus
+    operator_dismissed: bool = False
     attempt_count: int
     fiscal_amount: Decimal
     currency: str
     error_code: str | None
     error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FiscalizationJobRead(PydanticBaseModel):
+    """Safe background execution state visible to operators."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUIDv7
+    status: FiscalizationJobStatus
+    attempt_count: int
+    next_retry_at: datetime | None
+    last_attempt_at: datetime | None
+    completed_at: datetime | None
+    aqsi_operation_id: str | None
+    last_error: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -148,6 +186,7 @@ class SaleRead(PydanticBaseModel):
     items: list[SaleItemRead]
     payments: list[PaymentAttemptRead]
     fiscalization: FiscalizationRead | None
+    fiscalization_job: FiscalizationJobRead | None
 
     @computed_field
     @property
@@ -190,3 +229,16 @@ class CheckoutStartRequest(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
 
     payment_option: CheckoutPaymentOption = CheckoutPaymentOption.CARD
+
+
+class CheckoutHealthRead(PydanticBaseModel):
+    """Multi-signal provider state without overstating physical readiness."""
+
+    status: str
+    api_reachable: bool | None
+    configured: bool
+    active_operation: bool
+    manual_review_required: bool = False
+    message: str
+    checked_at: datetime
+    integration_name: str | None = None

@@ -433,7 +433,11 @@ Fiscalization; Sprint 5.20 — Sales Analytics: Revenue Dashboard. Returns/refun
   консервативно нормализованному имени без слияния с Catalog.
 - [x] Weekday totals, observed-day averages и надёжный Payment method breakdown.
 - [x] Исторические Sale/SaleItem monetary snapshots вместо current Catalog price.
-- [x] Authenticated reporting API и отдельный mobile-first экран «Аналитика → Продажи».
+- [x] Rental revenue только по `CLOSED RentalOrder`: historical base после discount + finalized
+  overdue, без deposit, damage/loss compensation и active/partial orders.
+- [x] Общая выручка Sales + Rental, отдельные operation counts, combined daily timeline и Top
+  RentalAsset по immutable item snapshots.
+- [x] Authenticated reporting API и отдельный mobile-first экран «Аналитика → Выручка».
 - [ ] Real-data сверка Today/new Sale/top lists и desktop/iPad/phone visual UAT.
 - [ ] Refund adjustment после реализации постоянного returns/refunds domain.
 - [ ] COGS / Gross Profit / Margin после отдельного решения historical inventory costing.

@@ -85,6 +85,15 @@ class ProviderOperation:
     error_message: str | None = None
 
 
+@dataclass(frozen=True)
+class ProviderHealth:
+    """Careful cloud/API signal that does not overclaim physical device readiness."""
+
+    reachable: bool
+    checked_at: str
+    message: str
+
+
 class PaymentProvider(Protocol):
     """Generic acquiring boundary used by Sales checkout orchestration."""
 
@@ -94,9 +103,15 @@ class PaymentProvider(Protocol):
     def get_payment(self, external_id: str, request: PaymentRequest) -> ProviderOperation:
         """Read authoritative provider payment state without creating a charge."""
 
+    def check_health(self) -> ProviderHealth:
+        """Check provider API/configuration without claiming terminal readiness."""
+
 
 class FiscalProvider(Protocol):
     """Generic fiscal receipt boundary used after confirmed payment."""
+
+    def find_fiscalization(self, request: FiscalRequest) -> ProviderOperation | None:
+        """Find an already-created receipt without starting another fiscal operation."""
 
     def initiate_fiscalization(self, request: FiscalRequest) -> ProviderOperation:
         """Start one itemized fiscal operation."""

@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from core.catalog.models import CatalogProduct, CatalogVariant
 from core.sales.enums import SaleStatus
-from core.sales.models import Fiscalization, PaymentAttempt, Sale, SaleItem
+from core.sales.models import (
+    Fiscalization,
+    FiscalizationJob,
+    PaymentAttempt,
+    PaymentJob,
+    Sale,
+    SaleItem,
+)
 from core.shared.db import UUIDv7
 
 
@@ -33,10 +40,20 @@ class SaleRepository:
         self._session.add(attempt)
         return attempt
 
+    def add_payment_job(self, job: PaymentJob) -> PaymentJob:
+        """Stage the durable worker-owned continuation for acquiring."""
+        self._session.add(job)
+        return job
+
     def add_fiscalization(self, fiscalization: Fiscalization) -> Fiscalization:
         """Stage the single fiscal obligation owned by a paid Sale."""
         self._session.add(fiscalization)
         return fiscalization
+
+    def add_fiscalization_job(self, job: FiscalizationJob) -> FiscalizationJob:
+        """Stage the durable worker-owned continuation for one fiscal obligation."""
+        self._session.add(job)
+        return job
 
     def next_sale_number(self) -> int:
         """Reserve the next human-readable Sale number."""
@@ -45,13 +62,23 @@ class SaleRepository:
         return (self._session.scalar(select(func.max(Sale.sale_number))) or 0) + 1
 
     def list_drafts(self, owner_id: UUIDv7) -> Sequence[Sale]:
-        """List one operator's draft carts newest first with items loaded."""
+        """List editable carts and paid Sales needing fiscal attention."""
         statement = (
             select(Sale)
             .where(
                 Sale.owner_id == owner_id,
-                Sale.status == SaleStatus.DRAFT,
+                Sale.status.in_(
+                    {
+                        SaleStatus.DRAFT,
+                        SaleStatus.PAYMENT_PENDING,
+                        SaleStatus.FISCALIZATION_PENDING,
+                        SaleStatus.FISCALIZATION_FAILED,
+                    }
+                ),
                 Sale.deleted_at.is_(None),
+                ~Sale.fiscalization.has(
+                    Fiscalization.provider_metadata["operator_dismissed"].as_boolean().is_(True)
+                ),
             )
             .options(selectinload(Sale.items))
             .order_by(Sale.updated_at.desc(), Sale.sale_number.desc())

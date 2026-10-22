@@ -6,6 +6,11 @@ let zxingLoader = null;
 let intakeSearchTimer = null;
 let scannerService = null;
 let salesProgressTimer = null;
+let salesProgressSaleId = null;
+let salesProgressStartedAt = 0;
+let salesFiscalPendingObservedAt = 0;
+let checkoutHealthTimer = null;
+let checkoutHealthView = { state: "READY", detail: "", context: "" };
 let intakeRealtimeController = null;
 let intakeRealtimeSessionId = null;
 let intakeRealtimeReconnectTimer = null;
@@ -37,6 +42,7 @@ function routeUrl(route) {
   if (route.name === "order") return `${window.location.pathname}#order/${route.orderId}`;
   if (route.name === "intake") return `${window.location.pathname}#intake/${route.sessionId}`;
   if (route.name === "sale") return `${window.location.pathname}#sale${route.saleId ? `/${route.saleId}` : ""}`;
+  if (route.name === "operations") return `${window.location.pathname}#operations${route.state && route.state !== "all" ? `?state=${route.state}` : ""}`;
   if (route.name === "analytics") {
     const params = new URLSearchParams();
     params.set("period", route.period || "today");
@@ -62,6 +68,10 @@ function routeFromLocation() {
   if (name === "order" && id) return { name, orderId: id };
   if (name === "intake" && id) return { name, sessionId: id };
   if (name === "sale") return { name, saleId: id || undefined };
+  if (name === "operations") {
+    const params = new URLSearchParams(queryString);
+    return { name, state: params.get("state") || "all" };
+  }
   if (name === "analytics") {
     const params = new URLSearchParams(queryString);
     return {
@@ -103,6 +113,7 @@ async function restoreRoute(route) {
     else if (route.name === "rental") await openRentalHub();
     else if (route.name === "settings") await openSettings();
     else if (route.name === "sale") await openSalesWorkspace(route.saleId);
+    else if (route.name === "operations") await openCheckoutOperations(route.state);
     else if (route.name === "analytics") await openSalesAnalytics(route);
     else if (route.name === "customer") await selectRentalCustomer(route.customerId);
     else if (route.name === "order") await openRentalOrder(route.orderId);
@@ -362,7 +373,7 @@ function storeActiveSaleId(saleId) {
 async function refreshSalesContext(preferredId = undefined) {
   state.sales.drafts = await api("/api/sales");
   const candidate = preferredId === undefined ? storedActiveSaleId() : preferredId;
-  const active = state.sales.drafts.find((sale) => sale.id === candidate) || null;
+  const active = state.sales.drafts.find((sale) => sale.id === candidate && sale.status === "draft") || null;
   state.sales.activeId = active?.id || null;
   state.sales.active = active;
   storeActiveSaleId(state.sales.activeId);
@@ -371,7 +382,7 @@ async function refreshSalesContext(preferredId = undefined) {
 
 function rememberSale(sale, makeActive = true) {
   state.sales.drafts = [sale, ...state.sales.drafts.filter((item) => item.id !== sale.id)]
-    .filter((item) => item.status === "draft");
+    .filter((item) => ["draft", "fiscalization_pending", "fiscalization_failed"].includes(item.status));
   if (makeActive) {
     state.sales.activeId = sale.status === "draft" ? sale.id : null;
     state.sales.active = sale.status === "draft" ? sale : null;
@@ -382,8 +393,8 @@ function rememberSale(sale, makeActive = true) {
 
 function selectActiveSale(saleId) {
   const sale = state.sales.drafts.find((item) => item.id === saleId) || null;
-  state.sales.activeId = sale?.id || null;
-  state.sales.active = sale;
+  state.sales.activeId = sale?.status === "draft" ? sale.id : null;
+  state.sales.active = sale?.status === "draft" ? sale : null;
   storeActiveSaleId(state.sales.activeId);
   updateSalesIndicator();
   return sale;
@@ -391,9 +402,12 @@ function selectActiveSale(saleId) {
 
 function renderSalesIndicator() {
   const sale = state.sales.active;
+  const attention = state.sales.drafts.filter((item) => ["payment_pending", "fiscalization_pending", "fiscalization_failed"].includes(item.status));
   const summary = sale
     ? `<strong>🛒 Продажа #${sale.sale_number}</strong><span>${sale.item_quantity} поз. · ${formatMoney(sale.total_amount)}</span>`
-    : "<strong>🛒 Продажа</strong><span>Корзина пуста</span>";
+    : attention.length
+      ? `<strong>⚠ Чеки требуют внимания · ${attention.length}</strong><span>Фискализация продолжается на сервере</span>`
+      : "<strong>🛒 Продажа</strong><span>Корзина пуста</span>";
   return `<button class="sales-indicator" id="sales-indicator" type="button" aria-label="Открыть продажи">${summary}</button>`;
 }
 
@@ -741,7 +755,7 @@ function renderHome(activity) {
         <button class="action-card" id="open-intake"><span class="action-icon">＋</span><strong>Приёмка</strong><span class="muted small">Принять товар</span></button>
         <button class="action-card" id="open-catalog"><span class="action-icon">▦</span><strong>Каталог</strong><span class="muted small">Товары и варианты</span></button>
         <button class="action-card" id="open-rental"><span class="action-icon">↔</span><strong>Аренда</strong><span class="muted small">Активные, выдача и возврат</span></button>
-        <button class="action-card" id="open-analytics"><span class="action-icon">↗</span><strong>Аналитика</strong><span class="muted small">Выручка и продажи</span></button>
+        <button class="action-card" id="open-analytics"><span class="action-icon">↗</span><strong>Аналитика</strong><span class="muted small">Выручка: продажи и аренда</span></button>
         ${state.user?.is_admin || state.user?.is_superuser ? '<button class="action-card" id="open-settings"><span class="action-icon">⚙</span><strong>Настройки</strong><span class="muted small">Интеграции и доступы</span></button>' : ""}
       </div>
       <section id="intake-home" class="hidden">
@@ -1140,7 +1154,7 @@ async function openSalesAnalytics(options = {}) {
   };
   recordRoute("analytics", filters);
   logicalParent = () => loadHome();
-  root.innerHTML = `<div class="shell analytics-shell">${topbar(true)}<section class="analytics-loading"><strong>Собираем аналитику продаж…</strong></section></div>`;
+  root.innerHTML = `<div class="shell analytics-shell">${topbar(true)}<section class="analytics-loading"><strong>Собираем аналитику выручки…</strong></section></div>`;
   bindTopbar();
   try {
     const report = await api(`/api/analytics/sales?${analyticsQuery(filters)}`);
@@ -1202,32 +1216,39 @@ function renderSalesAnalytics(report, filters) {
   const freeSaleRows = report.top_free_sale_items.length
     ? report.top_free_sale_items.map((item, index) => `<tr><td><span class="analytics-rank">${index + 1}</span>${escapeHtml(item.display_name)}</td><td>${item.units}</td><td>${formatMoney(item.revenue)}</td></tr>`).join("")
     : '<tr><td colspan="3" class="muted">Нет свободных продаж за период</td></tr>';
+  const rentalRows = report.top_rental_items.length
+    ? report.top_rental_items.map((item, index) => `<tr><td><span class="analytics-rank">${index + 1}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.asset_number)}</small></td><td>${item.rental_count}</td><td>${formatMoney(item.revenue)}</td></tr>`).join("")
+    : '<tr><td colspan="3" class="muted">Нет завершённых аренд за период</td></tr>';
   const weekdayRows = report.weekdays.map((item) => `<tr><td><strong>${escapeHtml(item.label)}</strong><small>${item.observed_days} ${item.observed_days === 1 ? "день" : "дн."}</small></td><td>${formatMoney(item.revenue)}<small>в среднем ${formatMoney(item.average_revenue)}</small></td><td>${item.receipt_count}<small>средний чек ${formatMoney(item.average_receipt)}</small></td></tr>`).join("");
-  const dailyRows = report.daily.map((item) => `<tr><td>${formatAnalyticsDate(item.date)}</td><td>${formatMoney(item.revenue)}</td><td>${item.receipt_count}</td><td>${item.items_sold}</td><td>${formatMoney(item.average_receipt)}</td></tr>`).join("");
+  const dailyRows = report.daily.map((item) => `<tr><td>${formatAnalyticsDate(item.date)}</td><td><strong>${formatMoney(item.total_revenue)}</strong></td><td>${formatMoney(item.sales_revenue)}</td><td>${formatMoney(item.rental_revenue)}</td><td>${item.sale_count}</td><td>${item.rental_count}</td><td>${item.items_sold}</td></tr>`).join("");
   const payments = report.payment_methods.length
     ? `<section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Оплата</p><h2>Способы оплаты</h2></div></div><div class="payment-breakdown">${report.payment_methods.map((item) => `<article class="card"><span>${escapeHtml(item.label)}</span><strong>${formatMoney(item.revenue)}</strong><small>${item.receipt_count} чек.</small></article>`).join("")}</div></section>`
     : "";
   root.innerHTML = `<div class="shell analytics-shell">
     ${topbar(true)}
-    <header class="analytics-heading"><div><p class="eyebrow">Аналитика · Продажи</p><h1>Выручка и продажи</h1><p class="muted">${analyticsPeriodLabel(summary.period)} · ${escapeHtml(summary.period.timezone)}</p></div><button class="button secondary compact" id="analytics-refresh" type="button">Обновить</button></header>
+    <header class="analytics-heading"><div><p class="eyebrow">Аналитика · Бизнес</p><h1>Выручка</h1><p class="muted">${analyticsPeriodLabel(summary.period)} · ${escapeHtml(summary.period.timezone)}</p></div><button class="button secondary compact" id="analytics-refresh" type="button">Обновить</button></header>
     <nav class="filter-bar analytics-presets" aria-label="Период аналитики">${presetButtons}<button class="filter-chip ${filters.period === "custom" ? "active" : ""}" id="analytics-custom-toggle" type="button">Произвольный</button></nav>
     <form class="analytics-custom ${filters.period === "custom" ? "" : "hidden"}" id="analytics-custom-form"><label>С<input name="start_date" type="date" value="${filters.startDate || summary.period.start_date}" required></label><label>По<input name="end_date" type="date" value="${filters.endDate || summary.period.end_date}" required></label><button class="button" type="submit">Показать</button></form>
-    <section class="analytics-kpis" aria-label="Основные показатели">
-      <article class="analytics-kpi"><span>Выручка</span><strong>${formatMoney(summary.revenue)}</strong></article>
-      <article class="analytics-kpi"><span>Количество чеков</span><strong>${summary.receipt_count}</strong></article>
-      <article class="analytics-kpi"><span>Средний чек</span><strong>${formatMoney(summary.average_receipt)}</strong></article>
+    <section class="analytics-kpis analytics-kpis-business" aria-label="Основные показатели">
+      <article class="analytics-kpi"><span>Общая выручка</span><strong>${formatMoney(summary.business_revenue)}</strong></article>
+      <article class="analytics-kpi"><span>Продажи</span><strong>${formatMoney(summary.sales_revenue)}</strong></article>
+      <article class="analytics-kpi"><span>Аренда</span><strong>${formatMoney(summary.rental_revenue)}</strong></article>
+      <article class="analytics-kpi"><span>Количество продаж</span><strong>${summary.sale_count}</strong></article>
+      <article class="analytics-kpi"><span>Количество аренд</span><strong>${summary.rental_count}</strong></article>
       <article class="analytics-kpi"><span>Продано единиц</span><strong>${summary.items_sold}</strong></article>
     </section>
-    <section class="analytics-section analytics-sources"><div class="analytics-section-head"><div><p class="eyebrow">Состав продаж</p><h2>Продажи по источнику</h2></div><strong class="free-sale-share">Доля свободной продажи по выручке: ${formatPercent(summary.free_sale_revenue_share)}</strong></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Источник</th><th>Выручка</th><th>Единиц</th></tr></thead><tbody><tr><td><strong>Всего</strong></td><td><strong>${formatMoney(summary.revenue)}</strong></td><td><strong>${summary.items_sold}</strong></td></tr><tr><td>Каталог</td><td>${formatMoney(summary.catalog_revenue)}</td><td>${summary.catalog_units}</td></tr><tr><td>Свободная продажа</td><td>${formatMoney(summary.free_sale_revenue)}</td><td>${summary.free_sale_units}</td></tr></tbody></table></div><p class="muted small source-share-note">Доля свободной продажи по единицам: ${formatPercent(summary.free_sale_units_share)}</p></section>
-    ${summary.receipt_count === 0 ? '<section class="empty analytics-empty"><strong>В выбранном периоде продаж нет</strong><p>Все показатели равны нулю. Выберите другой период или обновите данные после продажи.</p></section>' : ""}
-    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Динамика</p><h2>Выручка по дням</h2></div></div>${renderAnalyticsBars(report.timeline, "revenue", (value) => formatMoney(value), "Нет выручки за выбранный период")}</section>
-    <section class="analytics-section"><div class="analytics-section-head"><div><h2>Количество чеков</h2><p class="muted small">Завершённые продажи по локальным календарным дням</p></div></div>${renderAnalyticsBars(report.timeline, "receipt_count", (value) => `${value} чек.`, "Нет завершённых чеков за выбранный период")}</section>
+    <section class="analytics-section analytics-sources"><div class="analytics-section-head"><div><p class="eyebrow">Источники бизнеса</p><h2>Выручка</h2></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Источник</th><th>Выручка</th><th>Операций</th></tr></thead><tbody><tr><td><strong>Всего</strong></td><td><strong>${formatMoney(summary.business_revenue)}</strong></td><td>—</td></tr><tr><td>Продажи</td><td>${formatMoney(summary.sales_revenue)}</td><td>${summary.sale_count}</td></tr><tr><td>Аренда</td><td>${formatMoney(summary.rental_revenue)}</td><td>${summary.rental_count}</td></tr></tbody></table></div></section>
+    <section class="analytics-section analytics-sources"><div class="analytics-section-head"><div><p class="eyebrow">Состав продаж</p><h2>Продажи по источнику</h2></div><strong class="free-sale-share">Доля свободной продажи по выручке: ${formatPercent(summary.free_sale_revenue_share)}</strong></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Источник</th><th>Выручка</th><th>Единиц</th></tr></thead><tbody><tr><td><strong>Всего продаж</strong></td><td><strong>${formatMoney(summary.sales_revenue)}</strong></td><td><strong>${summary.items_sold}</strong></td></tr><tr><td>Каталог</td><td>${formatMoney(summary.catalog_revenue)}</td><td>${summary.catalog_units}</td></tr><tr><td>Свободная продажа</td><td>${formatMoney(summary.free_sale_revenue)}</td><td>${summary.free_sale_units}</td></tr></tbody></table></div><p class="muted small source-share-note">Доля свободной продажи по единицам: ${formatPercent(summary.free_sale_units_share)}</p></section>
+    <section class="analytics-section analytics-rental-summary"><div class="analytics-section-head"><div><p class="eyebrow">Аренда</p><h2>Завершённые аренды</h2><p class="muted small">Признание в дату закрытия заказа; залог и компенсация повреждений не входят.</p></div></div><div class="payment-breakdown analytics-rental-metrics"><article class="card"><span>Выручка аренды</span><strong>${formatMoney(summary.rental_revenue)}</strong></article><article class="card"><span>Количество аренд</span><strong>${summary.rental_count}</strong></article><article class="card"><span>Средняя аренда</span><strong>${formatMoney(summary.average_rental_amount)}</strong></article><article class="card"><span>Из них просрочка</span><strong>${formatMoney(summary.overdue_revenue)}</strong></article></div></section>
+    ${summary.sale_count === 0 && summary.rental_count === 0 ? '<section class="empty analytics-empty"><strong>В выбранном периоде операций нет</strong><p>Все показатели равны нулю. Выберите другой период или обновите данные после завершения операции.</p></section>' : ""}
+    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Динамика</p><h2>Выручка по дням</h2><p class="muted small">Общая выручка равна сумме продаж и завершённых аренд.</p></div></div><div class="analytics-trend-grid"><div><h3>Всего</h3>${renderAnalyticsBars(report.timeline, "total_revenue", (value) => formatMoney(value), "Нет выручки за выбранный период")}</div><div><h3>Продажи</h3>${renderAnalyticsBars(report.timeline, "sales_revenue", (value) => formatMoney(value), "Нет продаж за выбранный период")}</div><div><h3>Аренда</h3>${renderAnalyticsBars(report.timeline, "rental_revenue", (value) => formatMoney(value), "Нет завершённых аренд за выбранный период")}</div></div></section>
     <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Лидеры</p><h2>Товары</h2></div><div class="analytics-ranking" aria-label="Сортировка лидеров"><button class="filter-chip ${filters.ranking === "units" ? "active" : ""}" data-analytics-ranking="units" type="button">По штукам</button><button class="filter-chip ${filters.ranking === "revenue" ? "active" : ""}" data-analytics-ranking="revenue" type="button">По выручке</button></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Товар</th><th>Шт.</th><th>Выручка</th></tr></thead><tbody>${productRows}</tbody></table></div></section>
     <section class="analytics-section"><div class="analytics-section-head"><div><h2>Варианты</h2><p class="muted small">Цвет, размер и тип сохраняют отдельную идентичность</p></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Product · Variant / SKU</th><th>Шт.</th><th>Выручка</th></tr></thead><tbody>${variantRows}</tbody></table></div></section>
     <section class="analytics-section"><div class="analytics-section-head"><div><h2>Топ свободной продажи</h2><p class="muted small">Группировка только по регистру и пробелам; с Catalog по названию не объединяется</p></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>Наименование</th><th>Продано</th><th>Выручка</th></tr></thead><tbody>${freeSaleRows}</tbody></table></div></section>
-    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Дни недели</p><h2>Средняя и общая эффективность</h2><p class="muted small">Среднее считается по всем наблюдаемым дням, включая дни без продаж.</p></div></div><div class="analytics-table-wrap"><table class="analytics-table weekday-table"><thead><tr><th>День</th><th>Выручка</th><th>Чеки</th></tr></thead><tbody>${weekdayRows}</tbody></table></div></section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><h2>Топ аренды</h2><p class="muted small">Физические RentalAsset; названия и суммы берутся из исторических снимков завершённых заказов.</p></div></div><div class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>RentalAsset</th><th>Аренд</th><th>Выручка</th></tr></thead><tbody>${rentalRows}</tbody></table></div></section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Продажи · дни недели</p><h2>Средняя и общая эффективность</h2><p class="muted small">Этот блок остаётся Sales-only; среднее включает дни без продаж.</p></div></div><div class="analytics-table-wrap"><table class="analytics-table weekday-table"><thead><tr><th>День</th><th>Выручка продаж</th><th>Продажи</th></tr></thead><tbody>${weekdayRows}</tbody></table></div></section>
     ${payments}
-    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Точные данные</p><h2>По дням</h2></div></div><div class="analytics-table-wrap"><table class="analytics-table daily-table"><thead><tr><th>Дата</th><th>Выручка</th><th>Чеки</th><th>Единицы</th><th>Средний чек</th></tr></thead><tbody>${dailyRows}</tbody></table></div></section>
+    <section class="analytics-section"><div class="analytics-section-head"><div><p class="eyebrow">Точные данные</p><h2>По дням</h2></div></div><div class="analytics-table-wrap"><table class="analytics-table daily-table"><thead><tr><th>Дата</th><th>Всего</th><th>Продажи</th><th>Аренда</th><th>Кол-во продаж</th><th>Кол-во аренд</th><th>Продано единиц</th></tr></thead><tbody>${dailyRows}</tbody></table></div></section>
     <aside class="analytics-limitations"><strong>Границы первой версии</strong>${report.limitations.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</aside>
   </div>`;
   bindTopbar();
@@ -1257,6 +1278,7 @@ async function openSalesWorkspace(requestedSaleId = undefined) {
 }
 
 function renderSalesWorkspace(sale = state.sales.active) {
+  const persistentCheckoutHealth = document.querySelector("#checkout-health");
   const editable = sale?.status === "draft";
   const items = sale?.items.length
     ? sale.items.map((item) => `<article class="sale-item">
@@ -1275,9 +1297,15 @@ function renderSalesWorkspace(sale = state.sales.active) {
     : '<div class="empty">В продаже пока нет товаров</div>';
   root.innerHTML = `<div class="shell sale-shell">
     ${topbar(true)}
+    <section id="checkout-health" class="checkout-health checkout-health-ready" aria-live="polite">
+      <span class="checkout-health-icon" aria-hidden="true">✓</span>
+      <div class="checkout-health-copy"><strong>Касса готова</strong><small></small></div>
+      <span class="checkout-health-context"></span>
+      <button class="button ghost compact checkout-health-details" type="button">Подробнее</button>
+    </section>
     <div class="sale-heading">
       <div><p class="eyebrow">Продажа</p><h1>${sale ? `Продажа #${sale.sale_number}` : "Продажи"}</h1></div>
-      <button class="button secondary" id="new-sale" type="button">＋ Новая продажа</button>
+      <div class="sale-heading-actions"><button class="button secondary" id="checkout-operations" type="button">Чеки и операции</button><button class="button secondary" id="new-sale" type="button">＋ Новая продажа</button></div>
     </div>
     ${renderSaleSwitcher(sale)}
     <form class="sale-barcode-form" id="sale-barcode-form">
@@ -1298,8 +1326,16 @@ function renderSalesWorkspace(sale = state.sales.active) {
       ${editable ? `<div class="sale-actions"><button class="button secondary" id="defer-sale" type="button">Отложить</button><button class="button danger" id="cancel-sale" type="button">Отменить продажу</button></div>` : ""}
     </section>` : '<section class="empty sale-empty"><strong>Активной продажи нет</strong><p>Выберите отложенную или начните новую продажу.</p></section>'}
   </div>`;
+  if (persistentCheckoutHealth) {
+    document.querySelector("#checkout-health")?.replaceWith(persistentCheckoutHealth);
+  }
   bindTopbar();
+  const checkoutHealthDetails = document.querySelector("#checkout-health .checkout-health-details");
+  if (checkoutHealthDetails) checkoutHealthDetails.onclick = () => openCheckoutOperations(
+    checkoutHealthView.state === "ATTENTION" ? "attention" : "all",
+  );
   document.querySelector("#new-sale").addEventListener("click", createAndOpenSale);
+  document.querySelector("#checkout-operations").addEventListener("click", () => openCheckoutOperations());
   document.querySelector("#sale-barcode-form").addEventListener("submit", submitSaleBarcode);
   document.querySelectorAll("[data-switch-sale]").forEach((button) => {
     button.addEventListener("click", () => switchSale(button.dataset.switchSale));
@@ -1329,6 +1365,112 @@ function renderSalesWorkspace(sale = state.sales.active) {
   document.querySelector("#cancel-sale")?.addEventListener("click", () => cancelSale(sale.id));
   if (editable && sale.items.length) void hydrateCheckoutButton(sale.id);
   scheduleCheckoutProgress(sale);
+  void hydrateCheckoutHealth();
+}
+
+async function hydrateCheckoutHealth() {
+  const target = document.querySelector("#checkout-health");
+  if (!target) return;
+  try {
+    const health = await api("/api/sales/operations/health");
+    if (!document.querySelector("#checkout-health")) return;
+    const sale = state.sales.active;
+    const payment = sale?.payments?.[sale.payments.length - 1];
+    const needsAttention = payment?.status === "unknown"
+      || sale?.fiscalization?.status === "unknown"
+      || (sale?.status === "fiscalization_failed" && !sale?.fiscalization?.operator_dismissed);
+    let view;
+    if (!health.configured || health.api_reachable === false || health.status === "degraded") {
+      view = { state: "OFFLINE", detail: "Нет связи с AQSI. CORE повторит проверку автоматически.", context: "" };
+    } else if (health.manual_review_required) {
+      view = { state: "ATTENTION", detail: "Продажи сверены. Старая операция AQSI требует проверки.", context: "" };
+    } else if (needsAttention) {
+      view = { state: "ATTENTION", detail: "Последняя операция требует проверки.", context: checkoutHealthSaleContext(sale) };
+    } else if (health.active_operation) {
+      view = {
+        state: "BUSY",
+        detail: sale?.status === "fiscalization_pending" ? "Фискализируем чек…" : "Проверяем состояние оплаты…",
+        context: checkoutHealthSaleContext(sale),
+      };
+    } else {
+      view = { state: "READY", detail: "", context: "" };
+    }
+    scheduleCheckoutHealthView(view);
+  } catch (error) {
+    scheduleCheckoutHealthView({ state: "OFFLINE", detail: "Нет связи с AQSI. CORE повторит проверку автоматически.", context: "" });
+  }
+}
+
+function checkoutHealthSaleContext(sale) {
+  if (!sale || !["payment_pending", "fiscalization_pending", "fiscalization_failed"].includes(sale.status)) return "";
+  return `Продажа #${sale.sale_number} · ${formatMoney(sale.total_amount)}`;
+}
+
+function scheduleCheckoutHealthView(view) {
+  clearTimeout(checkoutHealthTimer);
+  const target = document.querySelector("#checkout-health");
+  const sameView = view.state === checkoutHealthView.state
+    && view.detail === checkoutHealthView.detail
+    && view.context === checkoutHealthView.context;
+  if (sameView && target?.classList.contains(`checkout-health-${view.state.toLowerCase()}`)) return;
+  checkoutHealthTimer = setTimeout(() => applyCheckoutHealthView(view), 650);
+}
+
+function applyCheckoutHealthView(view) {
+  const target = document.querySelector("#checkout-health");
+  if (!target) return;
+  const labels = {
+    READY: ["✓", "Касса готова"],
+    BUSY: ["…", "Операция выполняется"],
+    ATTENTION: ["!", "Требует внимания"],
+    OFFLINE: ["×", "Нет связи с кассой"],
+  };
+  const [icon, title] = labels[view.state];
+  target.className = `checkout-health checkout-health-${view.state.toLowerCase()}`;
+  target.querySelector(".checkout-health-icon").textContent = icon;
+  target.querySelector(".checkout-health-copy strong").textContent = title;
+  target.querySelector(".checkout-health-copy small").textContent = view.detail;
+  target.querySelector(".checkout-health-context").textContent = view.context;
+  target.querySelector(".checkout-health-details").hidden = view.state === "READY";
+  checkoutHealthView = view;
+}
+
+function manualReviewPayment(sale) {
+  return (sale.payments || []).find((payment) => payment.accounting_superseded
+    && ["pending", "unknown"].includes(payment.status));
+}
+
+async function openCheckoutOperations(filterState = "all") {
+  try {
+    const [operations, health] = await Promise.all([
+      api(`/api/sales/operations/history?state=${encodeURIComponent(filterState)}`),
+      api("/api/sales/operations/health"),
+    ]);
+    recordRoute("operations", { state: filterState });
+    logicalParent = () => openSalesWorkspace();
+    const paymentLabel = (value) => ({ pending: "Выполняется", unknown: "Требует сверки", succeeded: "Завершена", failed: "Ошибка", canceled: "Отменена" }[value] || "—");
+    const fiscalLabel = (sale) => sale.fiscalization?.operator_dismissed ? "Неактуальна · чек не сформирован" : sale.fiscalization?.status === "succeeded" ? "Фискализирован" : sale.fiscalization?.status === "failed" ? "Ошибка" : sale.fiscalization?.status === "skipped" ? "Без чека" : sale.fiscalization ? "Выполняется" : "Не начата";
+    const rows = operations.length ? operations.map((sale) => {
+      const reviewPayment = manualReviewPayment(sale);
+      const payment = reviewPayment || sale.payments?.[sale.payments.length - 1];
+      const needsReconcile = !reviewPayment && ["payment_pending", "fiscalization_pending"].includes(sale.status);
+      const paymentStatus = reviewPayment ? "Старая операция: требует проверки" : paymentLabel(payment?.status);
+      const reviewNote = reviewPayment ? "<small>Продажа сверена, автоматическая обработка этой операции отключена.</small>" : "";
+      return `<article class="operation-card${reviewPayment ? " operation-card-attention" : ""}"><div><small>${new Date(sale.created_at).toLocaleString("ru-RU")}</small><h3>Продажа #${sale.sale_number}</h3><strong>${formatMoney(sale.total_amount)}</strong></div><div><span>Оплата: <strong>${paymentStatus}</strong></span><span>Чек: <strong>${fiscalLabel(sale)}</strong></span><small>AQSI: ${escapeHtml(payment?.external_id || sale.fiscalization_job?.aqsi_operation_id || "—")}</small>${reviewNote}</div><div class="operation-actions"><button class="button secondary compact" data-open-operation="${sale.id}" type="button">Подробнее</button>${needsReconcile ? `<button class="button compact" data-reconcile-operation="${sale.id}" type="button">Проверить</button>` : ""}</div></article>`;
+    }).join("") : '<section class="empty"><strong>Операций нет</strong><p>Для выбранного фильтра история пуста.</p></section>';
+    root.innerHTML = `<div class="shell operations-shell">${topbar(true)}<div class="page-title"><div><p class="eyebrow">Касса</p><h1>Чеки и операции</h1></div><button class="button secondary" id="operations-back" type="button">К продажам</button></div><section class="checkout-health checkout-health-${health.status}"><span>AQSI</span><strong>${health.api_reachable ? "● Cloud API доступен" : "⚠ Требует внимания"}</strong><small>${escapeHtml(health.message)}</small></section><nav class="operation-filters">${[["all", "Все"], ["attention", "Требуют внимания"], ["pending", "В процессе"], ["failed", "Ошибки"], ["completed", "Завершённые"]].map(([value, label]) => `<button class="button ${filterState === value ? "" : "secondary"} compact" data-operation-filter="${value}" type="button">${label}</button>`).join("")}</nav><section class="operation-list">${rows}</section></div>`;
+    bindTopbar();
+    document.querySelector("#operations-back")?.addEventListener("click", () => openSalesWorkspace());
+    document.querySelectorAll("[data-operation-filter]").forEach((button) => button.addEventListener("click", () => openCheckoutOperations(button.dataset.operationFilter)));
+    document.querySelectorAll("[data-open-operation]").forEach((button) => button.addEventListener("click", () => openSalesWorkspace(button.dataset.openOperation)));
+    document.querySelectorAll("[data-reconcile-operation]").forEach((button) => button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await api(`/api/sales/operations/${button.dataset.reconcileOperation}/reconcile`, { method: "POST" });
+        await openCheckoutOperations(filterState);
+      } catch (error) { showToast(error.message, true); button.disabled = false; }
+    }));
+  } catch (error) { showToast(error.message, true); }
 }
 
 function renderSaleDiscount(sale) {
@@ -1341,6 +1483,9 @@ function renderSaleDiscount(sale) {
 function renderCheckoutState(sale) {
   const payment = sale.payments?.[sale.payments.length - 1];
   const fiscal = sale.fiscalization;
+  if (fiscal?.operator_dismissed) {
+    return `<section class="checkout-state"><strong>Операция неактуальна</strong><p>Отмечена по решению оператора. Оплата ${formatMoney(sale.total_amount)} подтверждена, чек не сформирован.</p><small>История сохранена. Повторная обработка отключена.</small></section>`;
+  }
   if (sale.status === "cancelled") return "";
   if (sale.status === "draft" && !["canceled", "failed"].includes(payment?.status)) return "";
   const messages = {
@@ -1350,7 +1495,12 @@ function renderCheckoutState(sale) {
     paid: ["✓ Оплата прошла", "Фиксируем продажу в учёте…"],
     fiscalization_pending: fiscal?.status === "unknown"
       ? ["⚠ Оплата прошла, статус чека пока неизвестен", "Проверяем AQSI. Повторная оплата запрещена."]
-      : ["✓ Оплата прошла", "Формируем фискальный чек…"],
+      : [
+          "✓ Оплата прошла",
+          salesFiscalPendingObservedAt && performance.now() - salesFiscalPendingObservedAt >= 5000
+            ? `AQSI обрабатывает чек ${Math.round((performance.now() - salesFiscalPendingObservedAt) / 1000)} сек. Новая оплата заблокирована.`
+            : "Формируем фискальный чек…",
+        ],
     completed: fiscal?.status === "skipped"
       ? ["✓ Продажа завершена", "Оплата подтверждена, товар списан, фискальный чек не формировался."]
       : ["✓ Продажа завершена", "Оплата подтверждена, товар списан, чек фискализирован."],
@@ -1364,13 +1514,22 @@ function renderCheckoutState(sale) {
   const paymentLabels = { succeeded: "✓ Оплачено", canceled: "Отменено на терминале", failed: "Не выполнено", unknown: "Результат неизвестен", pending: "Ожидается" };
   const paymentMethodLabel = payment?.payment_method === "cash" ? "Наличными" : "Карта / QR";
   const paidLabel = payment?.status === "succeeded" ? `✓ ${paymentMethodLabel}` : paymentMethodLabel;
-  const paymentSummary = payment ? `<div><span>Оплата</span><strong>${paidLabel} · ${formatMoney(payment.requested_amount)}</strong><small>${escapeHtml(paymentLabels[payment.status] || payment.status)}${payment.external_id ? ` · ${escapeHtml(payment.external_id)}` : ""}</small></div>` : "";
+  const paymentJob = payment?.job;
+  const paymentJobDetails = paymentJob ? `<small>Фоновая задача: ${escapeHtml(paymentJob.status)} · попыток ${paymentJob.attempt_count}${paymentJob.last_attempt_at ? ` · последняя ${formatDate(paymentJob.last_attempt_at)}` : ""}${paymentJob.last_error ? ` · ${escapeHtml(paymentJob.last_error)}` : ""}</small>` : "";
+  const effectivePayments = (sale.payments || []).filter((item) => item.status === "succeeded" && !item.accounting_superseded);
+  const paymentSummary = effectivePayments.length > 1
+    ? `<div><span>Оплата</span>${effectivePayments.map((item) => `<strong>✓ ${item.payment_method === "cash" ? "Наличными" : "Карта / QR"} · ${formatMoney(item.requested_amount)}</strong>`).join("")}</div>`
+    : payment ? `<div><span>Оплата</span><strong>${paidLabel} · ${formatMoney(payment.requested_amount)}</strong><small>${escapeHtml(paymentLabels[payment.status] || payment.status)}${payment.external_id ? ` · ${escapeHtml(payment.external_id)}` : ""}</small>${paymentJobDetails}</div>` : "";
   const fiscalStatusLabel = fiscal?.status === "succeeded"
     ? "✓ Фискализирован"
     : fiscal?.status === "skipped"
       ? "— Не формировался"
       : fiscal?.status;
-  const fiscalSummary = fiscal ? `<div><span>Фискальный чек</span><strong>${escapeHtml(fiscalStatusLabel)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}</div>` : "";
+  const fiscalJob = sale.fiscalization_job;
+  const jobDetails = fiscalJob
+    ? `<small>Фоновая задача: ${escapeHtml(fiscalJob.status)} · попыток ${fiscalJob.attempt_count}${fiscalJob.last_attempt_at ? ` · последняя ${formatDate(fiscalJob.last_attempt_at)}` : ""}${fiscalJob.last_error ? ` · ${escapeHtml(fiscalJob.last_error)}` : ""}</small>`
+    : "";
+  const fiscalSummary = fiscal ? `<div><span>Фискальный чек</span><strong>${escapeHtml(fiscalStatusLabel)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}${jobDetails}</div>` : "";
   const action = sale.status === "draft" && ["canceled", "failed"].includes(payment?.status)
     ? '<div class="checkout-recovery-actions"><button class="button" id="retry-draft-payment" type="button">Повторить оплату</button><button class="button secondary" id="return-to-sale" type="button">Вернуться к продаже</button></div>'
     : sale.status === "payment_failed"
@@ -1456,18 +1615,40 @@ async function executeCheckoutCommand(saleId, suffix, paymentOption = null) {
 
 function scheduleCheckoutProgress(sale) {
   clearTimeout(salesProgressTimer);
-  if (!sale || !["payment_pending", "paid", "fiscalization_pending"].includes(sale.status)) return;
+  if (!sale || !["payment_pending", "paid", "fiscalization_pending"].includes(sale.status)) {
+    if (sale?.status === "completed" && salesFiscalPendingObservedAt) {
+      console.info("Checkout timing stage=T5", {
+        saleId: sale.id,
+        pendingToRenderedMs: Math.round(performance.now() - salesFiscalPendingObservedAt),
+        renderedAt: new Date().toISOString(),
+      });
+    }
+    salesProgressSaleId = null;
+    salesProgressStartedAt = 0;
+    salesFiscalPendingObservedAt = 0;
+    return;
+  }
+  if (salesProgressSaleId !== sale.id) {
+    salesProgressSaleId = sale.id;
+    salesProgressStartedAt = performance.now();
+    salesFiscalPendingObservedAt = 0;
+  }
+  if (sale.status === "fiscalization_pending" && !salesFiscalPendingObservedAt) {
+    salesFiscalPendingObservedAt = performance.now();
+  }
+  const elapsed = performance.now() - salesProgressStartedAt;
+  const delay = elapsed < 8000 ? 500 : elapsed < 20000 ? 1000 : 2000;
   salesProgressTimer = setTimeout(async () => {
     if (!window.location.hash.startsWith(`#sale/${sale.id}`)) return;
     try {
-      const current = await api(`/api/sales/${sale.id}/checkout/progress`, { method: "POST" });
+      const current = await api(`/api/sales/${sale.id}`);
       rememberSale(current);
       renderSalesWorkspace(current);
     } catch (error) {
       showToast(error.message, true);
       salesProgressTimer = setTimeout(() => scheduleCheckoutProgress(sale), 3000);
     }
-  }, 1200);
+  }, delay);
 }
 
 function renderSaleSwitcher(current) {
@@ -1475,7 +1656,7 @@ function renderSaleSwitcher(current) {
   const active = current?.status === "draft" && current.id === state.sales.activeId ? current : null;
   const deferred = drafts.filter((sale) => sale.id !== active?.id);
   const row = (sale, selected) => `<button class="sale-switch-row ${selected ? "active" : ""}" data-switch-sale="${sale.id}" type="button">
-    <span>${selected ? "✓ " : ""}#${sale.sale_number}</span>
+    <span>${selected ? "✓ " : ""}${sale.status === "fiscalization_failed" ? "⚠ " : ["payment_pending", "fiscalization_pending"].includes(sale.status) ? "⏳ " : ""}#${sale.sale_number}</span>
     <span>${sale.item_quantity} поз.</span>
     <strong>${formatMoney(sale.total_amount)}</strong>
   </button>`;

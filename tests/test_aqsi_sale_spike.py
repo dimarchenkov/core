@@ -256,8 +256,7 @@ def test_spike_maps_distinct_real_variants_and_preserves_core_facts(
     positions = content["positions"]
     assert isinstance(positions, list)
     mapped_lines = [
-        (position["sku"], position["quantity"], position["price"])
-        for position in positions
+        (position["sku"], position["quantity"], position["price"]) for position in positions
     ]
     assert mapped_lines == [
         ("SKU-900001", 2, 10.15),
@@ -336,9 +335,9 @@ def test_spike_requires_admin_and_feature_flag(
         password_hash="unused",
         is_admin=False,
     )
-    assert client.post(
-        "/api/dev/aqsi-sale-spike/orders", json=order_body(variants)
-    ).status_code == 403
+    assert (
+        client.post("/api/dev/aqsi-sale-spike/orders", json=order_body(variants)).status_code == 403
+    )
 
     client.app.dependency_overrides[get_current_user] = lambda: User(
         email="admin@example.com",
@@ -347,9 +346,9 @@ def test_spike_requires_admin_and_feature_flag(
         is_admin=True,
     )
     client.app.dependency_overrides[get_settings] = lambda: make_settings(enabled=False)
-    assert client.post(
-        "/api/dev/aqsi-sale-spike/orders", json=order_body(variants)
-    ).status_code == 503
+    assert (
+        client.post("/api/dev/aqsi-sale-spike/orders", json=order_body(variants)).status_code == 503
+    )
 
 
 def completed_purchase(amount: int = 4205) -> dict[str, object]:
@@ -443,9 +442,7 @@ def test_direct_completed_purchase_fiscalizes_exact_basket_snapshot(
     session.commit()
     gateway.operations["purchase-operation"] = completed_purchase()
 
-    response = client.post(
-        f"/api/dev/aqsi-sale-spike/direct/{started['core_reference']}/progress"
-    )
+    response = client.post(f"/api/dev/aqsi-sale-spike/direct/{started['core_reference']}/progress")
 
     assert response.status_code == 200
     assert response.json()["state"] == "payment_success_fiscalization_pending"
@@ -459,8 +456,7 @@ def test_direct_completed_purchase_fiscalizes_exact_basket_snapshot(
     positions = receipt["positions"]
     assert isinstance(positions, list)
     mapped_positions = [
-        (position["info"]["baseQuantity"], position["info"]["finalPrice"])
-        for position in positions
+        (position["info"]["baseQuantity"], position["info"]["finalPrice"]) for position in positions
     ]
     assert mapped_positions == [
         ("2", 1015),
@@ -475,14 +471,15 @@ def test_direct_completed_purchase_fiscalizes_exact_basket_snapshot(
     assert payments[0]["type"] == 1
     assert payments[0]["amount"] == 4205
     assert payments[0]["slip"]["id"] == "slip-physical-payment"
-    assert sum(
-        int(position["info"]["baseQuantity"]) * position["info"]["finalPrice"]
-        for position in positions
-    ) == payments[0]["amount"]
-
-    repeated = client.post(
-        f"/api/dev/aqsi-sale-spike/direct/{started['core_reference']}/progress"
+    assert (
+        sum(
+            int(position["info"]["baseQuantity"]) * position["info"]["finalPrice"]
+            for position in positions
+        )
+        == payments[0]["amount"]
     )
+
+    repeated = client.post(f"/api/dev/aqsi-sale-spike/direct/{started['core_reference']}/progress")
     assert repeated.status_code == 200
     assert len(gateway.purchases) == 1
     assert len(gateway.receipts) == 1
@@ -491,9 +488,7 @@ def test_direct_completed_purchase_fiscalizes_exact_basket_snapshot(
         "status": "Completed",
         "type": "receipt.process",
     }
-    completed = client.post(
-        f"/api/dev/aqsi-sale-spike/direct/{started['core_reference']}/progress"
-    )
+    completed = client.post(f"/api/dev/aqsi-sale-spike/direct/{started['core_reference']}/progress")
     assert completed.json()["state"] == "completed"
 
 
@@ -617,6 +612,15 @@ def test_aqsi_http_client_uses_official_deferred_order_paths() -> None:
             return httpx2.Response(200, json={"operationId": "purchase-operation"})
         if request.url.path.endswith("/Receipts/process"):
             return httpx2.Response(200, json={"operationId": "receipt-operation"})
+        if request.url.path.endswith("/Operations/purchase-operation/cancel"):
+            return httpx2.Response(
+                200,
+                json={
+                    "operationId": "purchase-operation",
+                    "status": "Processing",
+                    "isCancellationRequested": True,
+                },
+            )
         if "/Operations/" in request.url.path:
             return httpx2.Response(
                 200,
@@ -632,17 +636,79 @@ def test_aqsi_http_client_uses_official_deferred_order_paths() -> None:
             "operationId": "purchase-operation"
         }
         assert aqsi.get_operation("purchase-operation")["status"] == "Pending"
-        assert aqsi.create_receipt({"deviceId": 748887}) == {
-            "operationId": "receipt-operation"
-        }
+        canceled = aqsi.cancel_operation("purchase-operation")
+        assert canceled["isCancellationRequested"] is True
+        assert aqsi.create_receipt({"deviceId": 748887}) == {"operationId": "receipt-operation"}
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("POST", "/pub/v2/Orders/simple"),
         ("GET", "/pub/v2/Orders/simple/CORE-SPIKE-one"),
         ("POST", "/pub/v4/Slips/process/purchase"),
         ("GET", "/pub/v4/Operations/purchase-operation"),
+        ("POST", "/pub/v4/Operations/purchase-operation/cancel"),
         ("POST", "/pub/v4/Receipts/process"),
     ]
+
+
+def test_aqsi_http_client_finds_receipt_by_exact_slip_across_pages() -> None:
+    """Receipt reconciliation uses paged read-only lookup and exact slip identity."""
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        page = int(request.url.params["page"])
+        rows = (
+            [{"id": "other", "payments": [{"slip": {"id": "other-slip"}}]}]
+            if page == 1
+            else [{"id": "receipt-1", "payments": [{"slip": {"id": "slip-1"}}]}]
+        )
+        return httpx2.Response(200, json={"rows": rows, "pages": 2})
+
+    with AqsiHttpClient(make_settings(), transport=httpx2.MockTransport(handler)) as aqsi:
+        found = aqsi.find_receipt_by_slip(
+            "slip-1", acquired_at=datetime(2026, 10, 19, 12, 19, tzinfo=UTC)
+        )
+
+    assert found is not None
+    assert found["id"] == "receipt-1"
+    assert [request.url.params["page"] for request in requests] == ["1", "2"]
+    assert all(request.method == "GET" for request in requests)
+    assert all(request.url.path == "/pub/v4/Receipts" for request in requests)
+    assert all("filtered.processedAtTzFrom" in request.url.params for request in requests)
+
+
+def test_aqsi_http_client_exports_receipts_and_slips_with_explicit_range() -> None:
+    """Recovery export uses the documented paged read-only v4 list endpoints."""
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        kind = "receipt" if request.url.path.endswith("/Receipts") else "slip"
+        return httpx2.Response(
+            200,
+            json={"rows": [{"id": f"{kind}-{request.url.params['page']}"}], "pages": 1},
+        )
+
+    start = datetime(2026, 10, 20, 21, tzinfo=UTC)
+    end = datetime(2026, 10, 21, 21, tzinfo=UTC)
+    with AqsiHttpClient(make_settings(), transport=httpx2.MockTransport(handler)) as aqsi:
+        receipts = aqsi.list_receipts(processed_from=start, processed_to=end)
+        slips = aqsi.list_slips(processed_from=start, processed_to=end)
+
+    assert receipts == [{"id": "receipt-1"}]
+    assert slips == [{"id": "slip-1"}]
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/pub/v4/Receipts"),
+        ("GET", "/pub/v4/Slips"),
+    ]
+    assert all(request.url.params["page"] == "1" for request in requests)
+    assert all(
+        request.url.params["filtered.processedAtTzFrom"] == start.isoformat()
+        for request in requests
+    )
+    assert all(
+        request.url.params["filtered.processedAtTzTo"] == end.isoformat() for request in requests
+    )
 
 
 def test_aqsi_http_client_marks_connect_timeout_as_known_not_sent() -> None:
@@ -650,13 +716,47 @@ def test_aqsi_http_client_marks_connect_timeout_as_known_not_sent() -> None:
         raise httpx2.ConnectTimeout("connect failed", request=request)
 
     with (
-        AqsiHttpClient(
-            make_settings(), transport=httpx2.MockTransport(handler)
-        ) as aqsi,
+        AqsiHttpClient(make_settings(), transport=httpx2.MockTransport(handler)) as aqsi,
         pytest.raises(AqsiApiError) as raised,
     ):
         aqsi.create_purchase({"deviceId": 748887, "amount": 3000})
 
     assert raised.value.code == "connect_timeout"
+    assert raised.value.retryable is True
+    assert raised.value.outcome_unknown is False
+
+
+@pytest.mark.parametrize("command", ["purchase", "receipt"])
+def test_aqsi_http_client_marks_financial_post_5xx_outcome_unknown(command: str) -> None:
+    """A server error cannot prove that an accepted financial POST had no effect."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500, json={"message": "Temporary server failure"})
+
+    with (
+        AqsiHttpClient(make_settings(), transport=httpx2.MockTransport(handler)) as aqsi,
+        pytest.raises(AqsiApiError) as raised,
+    ):
+        if command == "purchase":
+            aqsi.create_purchase({"deviceId": 748887, "amount": 3000})
+        else:
+            aqsi.create_receipt({"deviceId": 748887})
+
+    assert raised.value.retryable is True
+    assert raised.value.outcome_unknown is True
+
+
+def test_aqsi_http_client_keeps_status_query_5xx_safe_to_retry() -> None:
+    """A failed GET changes no provider state and may be repeated for the same operation."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(503, json={"message": "Temporary server failure"})
+
+    with (
+        AqsiHttpClient(make_settings(), transport=httpx2.MockTransport(handler)) as aqsi,
+        pytest.raises(AqsiApiError) as raised,
+    ):
+        aqsi.get_operation("existing-operation")
+
     assert raised.value.retryable is True
     assert raised.value.outcome_unknown is False
