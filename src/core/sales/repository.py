@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from core.catalog.models import CatalogProduct, CatalogVariant
 from core.sales.enums import SaleStatus
 from core.sales.models import (
+    FinancialOperationEvent,
     Fiscalization,
     FiscalizationJob,
     PaymentAttempt,
@@ -54,6 +55,11 @@ class SaleRepository:
         """Stage the durable worker-owned continuation for one fiscal obligation."""
         self._session.add(job)
         return job
+
+    def add_financial_event(self, event: FinancialOperationEvent) -> FinancialOperationEvent:
+        """Append immutable financial evidence in the caller's transaction."""
+        self._session.add(event)
+        return event
 
     def next_sale_number(self) -> int:
         """Reserve the next human-readable Sale number."""

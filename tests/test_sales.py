@@ -24,6 +24,7 @@ from core.main import create_app
 from core.pricing.enums import PriceType
 from core.pricing.models import Price
 from core.sales.enums import PaymentMethod, PaymentStatus, SaleItemSource, SaleStatus
+from core.sales.health import CheckoutWorkerHealth
 from core.sales.models import PaymentAttempt, Sale, SaleItem
 from core.sales.providers import CheckoutProviderBinding, ProviderHealth
 from core.sales.routes import _sellable_balances
@@ -106,9 +107,7 @@ def test_checkout_context_balance_query_returns_variant_mapping(
     session: Session, priced_variant: CatalogVariant
 ) -> None:
     """Checkout stock preflight consumes SQLAlchemy rows instead of the Result object."""
-    assert _sellable_balances(session, [priced_variant.id]) == {
-        priced_variant.id: Decimal("0")
-    }
+    assert _sellable_balances(session, [priced_variant.id]) == {priced_variant.id: Decimal("0")}
 
 
 def _create_sale(client: TestClient) -> dict[str, object]:
@@ -206,8 +205,9 @@ def test_checkout_operation_history_retains_completed_and_pending_facts(
     attention_rows = client.get("/api/sales/operations/history?state=attention")
 
     assert attention_rows.status_code == 200
-    assert [row["sale_number"] for row in attention_rows.json()] == [901]
-    assert attention_rows.json()[0]["payments"][0]["accounting_superseded"] is True
+    assert [row["sale_number"] for row in attention_rows.json()] == [902, 901]
+    superseded = next(row for row in attention_rows.json() if row["sale_number"] == 901)
+    assert superseded["payments"][0]["accounting_superseded"] is True
 
 
 def test_checkout_health_is_careful_and_marks_unresolved_operation_attention(
@@ -217,8 +217,13 @@ def test_checkout_health_is_careful_and_marks_unresolved_operation_attention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cloud reachability never hides an unresolved financial operation."""
+
     class HealthyProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def check_health(self) -> ProviderHealth:
+            self.calls += 1
             return ProviderHealth(
                 True,
                 datetime.now(UTC).isoformat(),
@@ -238,13 +243,26 @@ def test_checkout_health_is_careful_and_marks_unresolved_operation_attention(
     monkeypatch.setattr(
         "core.sales.routes.CheckoutProviderFactory",
         lambda database_session, settings: type(
-            "Factory", (), {"for_new_checkout": lambda self: binding}
+            "Factory", (), {"for_health_check": lambda self: binding}
         )(),
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.collect_checkout_worker_health",
+        lambda database_session, settings, now: CheckoutWorkerHealth(
+            running=True,
+            last_heartbeat=now,
+            queued_jobs=0,
+            processing_jobs=0,
+            oldest_queued_age_seconds=None,
+            stalled_jobs=0,
+            last_error=None,
+        ),
     )
 
     idle = client.get("/api/sales/operations/health")
     assert idle.json()["status"] == "healthy"
     assert "физичес" in idle.json()["message"]
+    assert provider.calls == 1
 
     sale = Sale(
         sale_number=903,
@@ -281,7 +299,203 @@ def test_checkout_health_is_careful_and_marks_unresolved_operation_attention(
     assert recovered["status"] == "attention"
     assert recovered["active_operation"] is False
     assert recovered["manual_review_required"] is True
-    assert "Старая операция" in recovered["message"]
+    assert "ручной проверки" in recovered["message"]
+    assert provider.calls == 3
+
+
+def test_checkout_health_does_not_attribute_another_operators_payment(
+    client: TestClient,
+    session: Session,
+    users: tuple[User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Global queue visibility never turns another operator's Sale into a local blocker."""
+
+    class HealthyProvider:
+        def check_health(self) -> ProviderHealth:
+            return ProviderHealth(True, datetime.now(UTC).isoformat(), "AQSI Cloud доступен")
+
+    provider = HealthyProvider()
+    binding = CheckoutProviderBinding(
+        integration_id=users[0].id,
+        integration_name="AQSI test",
+        provider=IntegrationProvider.AQSI,
+        provider_display_name="AQSI",
+        payment_display_name="Карта / QR",
+        payment=provider,  # type: ignore[arg-type]
+        fiscal=provider,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_health_check": lambda self: binding}
+        )(),
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.collect_checkout_worker_health",
+        lambda database_session, settings, now: CheckoutWorkerHealth(
+            running=True,
+            last_heartbeat=now,
+            queued_jobs=0,
+            processing_jobs=0,
+            oldest_queued_age_seconds=None,
+            stalled_jobs=0,
+            last_error=None,
+        ),
+    )
+    other_sale = Sale(
+        sale_number=904,
+        owner_id=users[1].id,
+        status=SaleStatus.PAYMENT_PENDING,
+        subtotal_amount=Decimal("30.00"),
+        discount_amount=Decimal("0.00"),
+        total_amount=Decimal("30.00"),
+    )
+    session.add(other_sale)
+    session.flush()
+    session.add(
+        PaymentAttempt(
+            sale_id=other_sale.id,
+            payment_method=PaymentMethod.CASH,
+            requested_amount=Decimal("30.00"),
+            fiscalization_required=False,
+            status=PaymentStatus.PENDING,
+            idempotency_key="other-operator-pending",
+            attempt_number=1,
+        )
+    )
+    session.commit()
+
+    health = client.get("/api/sales/operations/health").json()
+
+    assert health["global_active_operation"] is True
+    assert health["local_active_operation"] is False
+    assert health["active_operation"] is False
+
+
+@pytest.mark.parametrize(
+    ("cloud_reachable", "worker_running", "expected_status"),
+    [(True, False, "attention"), (False, True, "degraded")],
+)
+def test_checkout_health_keeps_cloud_and_worker_signals_independent(
+    client: TestClient,
+    users: tuple[User, User],
+    monkeypatch: pytest.MonkeyPatch,
+    cloud_reachable: bool,
+    worker_running: bool,
+    expected_status: str,
+) -> None:
+    """A healthy Cloud cannot mask a stopped worker, and the reverse remains visible."""
+    class Provider:
+        def check_health(self) -> ProviderHealth:
+            return ProviderHealth(
+                cloud_reachable,
+                datetime.now(UTC).isoformat(),
+                "AQSI Cloud доступен" if cloud_reachable else "AQSI Cloud недоступен",
+            )
+
+    provider = Provider()
+    binding = CheckoutProviderBinding(
+        integration_id=users[0].id,
+        integration_name="AQSI test",
+        provider=IntegrationProvider.AQSI,
+        provider_display_name="AQSI",
+        payment_display_name="Карта / QR",
+        payment=provider,  # type: ignore[arg-type]
+        fiscal=provider,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_health_check": lambda self: binding}
+        )(),
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.collect_checkout_worker_health",
+        lambda database_session, settings, now: CheckoutWorkerHealth(
+            running=worker_running,
+            last_heartbeat=now if worker_running else None,
+            queued_jobs=0,
+            processing_jobs=0,
+            oldest_queued_age_seconds=None,
+            stalled_jobs=0,
+            last_error=None,
+        ),
+    )
+
+    health = client.get("/api/sales/operations/health").json()
+
+    assert health["status"] == expected_status
+    assert health["api_reachable"] is cloud_reachable
+    assert health["worker_running"] is worker_running
+
+
+def test_checkout_health_reports_payment_fiscal_and_device_signals_separately(
+    client: TestClient,
+    users: tuple[User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase D provider roles and unverifiable device readiness remain distinct facts."""
+
+    class PaymentHealthProvider:
+        def check_health(self) -> ProviderHealth:
+            return ProviderHealth(
+                True,
+                datetime.now(UTC).isoformat(),
+                "Payment API available.",
+                physical_device_ready=None,
+            )
+
+    class FiscalHealthProvider:
+        def check_health(self) -> ProviderHealth:
+            return ProviderHealth(
+                False,
+                datetime.now(UTC).isoformat(),
+                "Fiscal API unavailable.",
+                physical_device_ready=None,
+            )
+
+    binding = CheckoutProviderBinding(
+        integration_id=users[0].id,
+        integration_name="Payment integration",
+        provider=IntegrationProvider.AQSI,
+        provider_display_name="Payment provider",
+        payment_display_name="Карта / QR",
+        payment=PaymentHealthProvider(),  # type: ignore[arg-type]
+        fiscal=FiscalHealthProvider(),  # type: ignore[arg-type]
+        fiscal_integration_id=users[1].id,
+        fiscal_integration_name="Fiscal integration",
+        fiscal_provider_kind=IntegrationProvider.AQSI,
+        fiscal_provider_display_name="Fiscal provider",
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_health_check": lambda self: binding}
+        )(),
+    )
+    monkeypatch.setattr(
+        "core.sales.routes.collect_checkout_worker_health",
+        lambda database_session, settings, now: CheckoutWorkerHealth(
+            running=True,
+            last_heartbeat=now,
+            queued_jobs=0,
+            processing_jobs=0,
+            oldest_queued_age_seconds=None,
+            stalled_jobs=0,
+            last_error=None,
+        ),
+    )
+
+    health = client.get("/api/sales/operations/health").json()
+
+    assert health["status"] == "degraded"
+    assert health["payment_provider_reachable"] is True
+    assert health["fiscal_provider_reachable"] is False
+    assert health["physical_device_ready"] is None
+    assert health["payment_integration_name"] == "Payment integration"
+    assert health["fiscal_integration_name"] == "Fiscal integration"
+    assert "фискализации недоступен" in health["message"]
 
 
 def test_operators_cannot_read_or_mutate_each_others_sales(
@@ -441,12 +655,8 @@ def test_percentage_discount_presets_and_custom_value_are_exact(
     unchanged = _add_variant(client, sale["id"], priced_variant.id)
     assert unchanged["subtotal_amount"] == unchanged["total_amount"] == "500.00"
 
-    five = client.patch(
-        f"/api/sales/{sale['id']}/discount", json={"discount_value": "5.00"}
-    ).json()
-    ten = client.patch(
-        f"/api/sales/{sale['id']}/discount", json={"discount_value": "10.00"}
-    ).json()
+    five = client.patch(f"/api/sales/{sale['id']}/discount", json={"discount_value": "5.00"}).json()
+    ten = client.patch(f"/api/sales/{sale['id']}/discount", json={"discount_value": "10.00"}).json()
     custom = client.patch(
         f"/api/sales/{sale['id']}/discount", json={"discount_value": "7.50"}
     ).json()
@@ -464,12 +674,8 @@ def test_invalid_or_fiscally_unsafe_discount_is_rejected(
     """Server validation rejects negative, excessive and zero-price fiscal allocations."""
     sale = _create_sale(client)
     _add_variant(client, sale["id"], priced_variant.id)
-    negative = client.patch(
-        f"/api/sales/{sale['id']}/discount", json={"discount_value": "-1"}
-    )
-    excessive = client.patch(
-        f"/api/sales/{sale['id']}/discount", json={"discount_value": "100"}
-    )
+    negative = client.patch(f"/api/sales/{sale['id']}/discount", json={"discount_value": "-1"})
+    excessive = client.patch(f"/api/sales/{sale['id']}/discount", json={"discount_value": "100"})
 
     assert negative.status_code == excessive.status_code == 422
 
@@ -483,9 +689,7 @@ def test_manual_item_participates_in_totals_and_discount_without_variant(
         f"/api/sales/{sale['id']}/items/manual",
         json={"name": "Игрушка антистресс", "unit_price": "350.00", "quantity": 2},
     )
-    discounted = client.patch(
-        f"/api/sales/{sale['id']}/discount", json={"discount_value": "10"}
-    )
+    discounted = client.patch(f"/api/sales/{sale['id']}/discount", json={"discount_value": "10"})
 
     assert added.status_code == 200
     item = added.json()["items"][0]
@@ -523,12 +727,8 @@ def test_discount_allocation_rounding_is_deterministic_and_exact(client: TestCli
             json={"name": name, "unit_price": price, "quantity": 1},
         )
         assert response.status_code == 200
-    first = client.patch(
-        f"/api/sales/{sale['id']}/discount", json={"discount_value": "10"}
-    ).json()
-    second = client.patch(
-        f"/api/sales/{sale['id']}/discount", json={"discount_value": "10"}
-    ).json()
+    first = client.patch(f"/api/sales/{sale['id']}/discount", json={"discount_value": "10"}).json()
+    second = client.patch(f"/api/sales/{sale['id']}/discount", json={"discount_value": "10"}).json()
 
     assert first["total_amount"] == "9.00"
     assert [item["fiscal_line_total"] for item in first["items"]] == ["3.00", "6.00"]
@@ -598,9 +798,7 @@ def test_explicit_remove_command_recalculates_empty_cart(
     sale = _create_sale(client)
     added = _add_variant(client, sale["id"], priced_variant.id)
 
-    response = client.delete(
-        f"/api/sales/{sale['id']}/items/{added['items'][0]['id']}"
-    )
+    response = client.delete(f"/api/sales/{sale['id']}/items/{added['items'][0]['id']}")
 
     assert response.status_code == 200
     assert response.json()["items"] == []

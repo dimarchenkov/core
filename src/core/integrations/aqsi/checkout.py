@@ -14,6 +14,7 @@ from core.sales.providers import (
     FiscalRequest,
     PaymentRequest,
     ProviderCallError,
+    ProviderErrorKind,
     ProviderHealth,
     ProviderOperation,
     ProviderOutcomeState,
@@ -75,7 +76,7 @@ class AqsiCheckoutAdapter:
         try:
             operation = self._client.get_operation(external_id)
         except AqsiApiError as exc:
-            raise _provider_error(exc) from exc
+            raise _provider_error(exc, status_query=True) from exc
         status = str(operation.get("status") or "")
         metadata = _safe_metadata(operation, status)
         if status == "Completed":
@@ -132,11 +133,17 @@ class AqsiCheckoutAdapter:
         try:
             self._client.list_shop_ids()
         except AqsiApiError as exc:
-            return ProviderHealth(False, checked_at, str(exc))
+            return ProviderHealth(
+                False,
+                checked_at,
+                str(exc),
+                physical_device_ready=None,
+            )
         return ProviderHealth(
             True,
             checked_at,
             "AQSI Cloud доступен; физическая готовность кассы не подтверждается API.",
+            physical_device_ready=None,
         )
 
     def cancel_device_operation(self, external_id: str) -> dict[str, object]:
@@ -220,7 +227,7 @@ class AqsiCheckoutAdapter:
         try:
             receipt = self._client.find_receipt_by_slip(slip_id, acquired_at=acquired_at)
         except AqsiApiError as exc:
-            raise _provider_error(exc) from exc
+            raise _provider_error(exc, status_query=True) from exc
         if receipt is None:
             return None
         return _verified_existing_receipt(receipt, request, self._device_id)
@@ -231,7 +238,7 @@ class AqsiCheckoutAdapter:
         try:
             operation = self._client.get_operation(external_id)
         except AqsiApiError as exc:
-            raise _provider_error(exc) from exc
+            raise _provider_error(exc, status_query=True) from exc
         elapsed_ms = (perf_counter() - started) * 1000
         extra: dict[str, object] = {"fiscal_status_http_ms": round(elapsed_ms, 1)}
         if operation.get("status") == "Completed":
@@ -345,8 +352,22 @@ def _fiscal_operation(
     )
 
 
-def _provider_error(error: AqsiApiError) -> ProviderCallError:
+def _provider_error(
+    error: AqsiApiError, *, status_query: bool = False
+) -> ProviderCallError:
     """Translate AQSI errors while preserving only sanitized diagnostics."""
+    if status_query and error.retryable:
+        return ProviderCallError(
+            error.code,
+            str(error),
+            kind=ProviderErrorKind.TEMPORARY_STATUS_QUERY_FAILURE,
+        )
+    if status_query:
+        return ProviderCallError(
+            error.code,
+            str(error),
+            kind=ProviderErrorKind.OUTCOME_UNKNOWN,
+        )
     return ProviderCallError(error.code, str(error), outcome_unknown=error.outcome_unknown)
 
 

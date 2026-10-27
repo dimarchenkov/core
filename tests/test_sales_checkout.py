@@ -8,16 +8,21 @@ from decimal import Decimal
 from typing import cast
 
 import pytest
+from fastapi import HTTPException
 from pydantic import SecretStr
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import core.main  # noqa: F401 -- register all models required by route-level read checks
 import core.sales.checkout as checkout_module
 import core.sales.fiscalization_jobs as fiscal_jobs_module
+import core.sales.health as sales_health_module
 import core.sales.models as sales_models_module
 import core.sales.payment_jobs as payment_jobs_module
+import core.sales.routes as sales_routes_module
+from core.analytics.read_service import SalesAnalyticsReadService, resolve_sales_period
+from core.analytics.schemas import SalesPeriodPreset
 from core.catalog.models import CatalogProduct, CatalogVariant, Category
 from core.config import Settings
 from core.identity.models import User
@@ -27,7 +32,7 @@ from core.integrations.checkout import (
     CheckoutIntegrationUnavailableError,
     CheckoutProviderFactory,
 )
-from core.integrations.enums import IntegrationProvider
+from core.integrations.enums import IntegrationProvider, ProviderCapability
 from core.integrations.models import Integration
 from core.integrations.service import IntegrationConfigurationError, IntegrationService
 from core.inventory.enums import MovementType
@@ -37,6 +42,9 @@ from core.pricing.models import Price
 from core.sales.checkout import CheckoutService, CheckoutStateError
 from core.sales.enums import (
     CheckoutPaymentOption,
+    FinancialActorType,
+    FinancialEntityType,
+    FinancialEventType,
     FiscalizationJobStatus,
     FiscalizationStatus,
     PaymentMethod,
@@ -44,19 +52,22 @@ from core.sales.enums import (
     SaleItemSource,
     SaleStatus,
 )
-from core.sales.models import Sale
+from core.sales.financial_events import append_financial_event, list_financial_events
+from core.sales.models import FinancialOperationEvent, PaymentAttempt, Sale
 from core.sales.providers import (
     CheckoutProviderBinding,
     FiscalLine,
     FiscalRequest,
     PaymentRequest,
     ProviderCallError,
+    ProviderErrorKind,
+    ProviderHealth,
     ProviderOperation,
     ProviderOutcomeState,
 )
 from core.sales.repository import SaleRepository
-from core.sales.routes import list_checkout_operations
-from core.sales.schemas import CheckoutStartRequest, SaleRead
+from core.sales.routes import checkout_operation_detail, list_checkout_operations
+from core.sales.schemas import CheckoutStartRequest, EmergencyFallbackRequest, SaleRead
 from core.sales.service import SaleNotDraftError, SaleService
 from core.shared.db import Base
 from core.shared.db.types import generate_uuid_v7
@@ -122,6 +133,74 @@ class FakeCheckoutProvider:
         if self.fiscal_error:
             raise self.fiscal_error
         return self.fiscal_state
+
+
+class FakePaymentProvider:
+    """Payment-only contract double proving Sales does not require fiscal methods."""
+
+    def __init__(self) -> None:
+        """Initialize deterministic payment initiation and polling results."""
+        self.initiations: list[PaymentRequest] = []
+        self.polls: list[str] = []
+        self.initiate_result = ProviderOperation(
+            ProviderOutcomeState.PENDING,
+            external_id="fake-payment-operation",
+        )
+        self.poll_result = self.initiate_result
+
+    def initiate_payment(self, request: PaymentRequest) -> ProviderOperation:
+        """Capture the sole mutating payment command."""
+        self.initiations.append(request)
+        return self.initiate_result
+
+    def get_payment(self, external_id: str, request: PaymentRequest) -> ProviderOperation:
+        """Capture a non-mutating recovery lookup by provider operation ID."""
+        del request
+        self.polls.append(external_id)
+        return self.poll_result
+
+    def check_health(self) -> ProviderHealth:
+        """Return a stable fake health result."""
+        return ProviderHealth(True, datetime.now(UTC).isoformat(), "Fake payment is ready.")
+
+
+class FakeFiscalProvider:
+    """Fiscal-only contract double proving Sales does not require acquiring methods."""
+
+    def __init__(self) -> None:
+        """Initialize deterministic receipt initiation and polling results."""
+        self.lookups: list[FiscalRequest] = []
+        self.initiations: list[FiscalRequest] = []
+        self.polls: list[str] = []
+        self.initiate_result = ProviderOperation(
+            ProviderOutcomeState.PENDING,
+            external_id="fake-fiscal-operation",
+        )
+        self.poll_result = self.initiate_result
+
+    def find_fiscalization(self, request: FiscalRequest) -> ProviderOperation | None:
+        """Capture the safe preflight lookup."""
+        self.lookups.append(request)
+        return None
+
+    def initiate_fiscalization(self, request: FiscalRequest) -> ProviderOperation:
+        """Capture the sole mutating fiscal command."""
+        self.initiations.append(request)
+        return self.initiate_result
+
+    def get_fiscalization(
+        self,
+        external_id: str,
+        request: FiscalRequest,
+    ) -> ProviderOperation:
+        """Capture a non-mutating receipt recovery lookup."""
+        del request
+        self.polls.append(external_id)
+        return self.poll_result
+
+    def check_health(self) -> ProviderHealth:
+        """Return a stable fake health result."""
+        return ProviderHealth(True, datetime.now(UTC).isoformat(), "Fake fiscal is ready.")
 
 
 @pytest.fixture
@@ -206,6 +285,270 @@ def _succeeded_payment(external_id: str = "payment-operation-1") -> ProviderOper
             "content": {"type": "purchase", "amount": 2468},
         },
     )
+
+
+def test_independent_fake_provider_contract_recovers_without_duplicate_commands(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Distinct payment/fiscal providers survive polling and complete exactly once locally."""
+    user, variant, payment_integration, _, _ = checkout_setup
+    fiscal_integration = Integration(
+        provider=IntegrationProvider.AQSI,
+        name="Independent fiscal provider",
+        enabled=True,
+        configuration={"payment_enabled": False, "fiscalization_enabled": True},
+    )
+    session.add(fiscal_integration)
+    session.commit()
+    payment_provider = FakePaymentProvider()
+    fiscal_provider = FakeFiscalProvider()
+    binding = CheckoutProviderBinding(
+        integration_id=payment_integration.id,
+        integration_name=payment_integration.name,
+        provider=payment_integration.provider,
+        provider_display_name="Fake Pay",
+        payment_display_name="Карта / QR",
+        payment=payment_provider,
+        fiscal=fiscal_provider,
+        fiscal_integration_id=fiscal_integration.id,
+        fiscal_integration_name=fiscal_integration.name,
+        fiscal_provider_kind=fiscal_integration.provider,
+        fiscal_provider_display_name="Fake Fiscal",
+    )
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+
+    started = checkout.start(sale.id, owner_id=user.id)
+    assert started.payments[0].selected_fiscal_integration_id == fiscal_integration.id
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    checkout.process_payment(sale.id, owner_id=user.id)
+
+    assert pending.payments[0].external_id == "fake-payment-operation"
+    assert len(payment_provider.initiations) == 1
+    assert payment_provider.polls == ["fake-payment-operation"]
+
+    payment_provider.poll_result = _succeeded_payment("fake-payment-operation")
+    paid = checkout.process_payment(sale.id, owner_id=user.id)
+
+    assert paid.fiscalization is not None
+    assert paid.fiscalization.integration_id == fiscal_integration.id
+    assert paid.fiscalization.provider == fiscal_integration.provider
+
+    checkout.process_fiscalization(sale.id, owner_id=user.id)
+    checkout.process_fiscalization(sale.id, owner_id=user.id)
+    fiscal_provider.poll_result = ProviderOperation(
+        ProviderOutcomeState.SUCCEEDED,
+        external_id="fake-fiscal-operation",
+        external_reference="fake-receipt",
+    )
+    completed = checkout.process_fiscalization(sale.id, owner_id=user.id)
+    repeated = checkout.process_fiscalization(sale.id, owner_id=user.id)
+
+    assert completed.status is repeated.status is SaleStatus.COMPLETED
+    assert len(payment_provider.initiations) == 1
+    assert len(fiscal_provider.initiations) == 1
+    assert fiscal_provider.polls == ["fake-fiscal-operation", "fake-fiscal-operation"]
+
+
+def test_provider_contract_rejects_missing_independent_capability(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Missing payment or fiscal capability fails before any financial command is sent."""
+    user, variant, integration, _, _ = checkout_setup
+    payment_provider = FakePaymentProvider()
+    fiscal_provider = FakeFiscalProvider()
+    no_payment = CheckoutProviderBinding(
+        integration.id,
+        integration.name,
+        integration.provider,
+        "Fake",
+        "Карта / QR",
+        None,
+        fiscal_provider,
+    )
+    card_sale = _sale_with_item(session, user, variant)
+
+    with pytest.raises(CheckoutStateError, match="Payment provider"):
+        CheckoutService(session, no_payment).start(card_sale.id, owner_id=user.id)
+
+    no_fiscal = CheckoutProviderBinding(
+        integration.id,
+        integration.name,
+        integration.provider,
+        "Fake",
+        "Карта / QR",
+        payment_provider,
+        None,
+    )
+    cash_sale = _sale_with_item(session, user, variant)
+
+    with pytest.raises(CheckoutStateError, match="Fiscal provider"):
+        CheckoutService(session, no_fiscal).start(
+            cash_sale.id,
+            owner_id=user.id,
+            payment_option=CheckoutPaymentOption.CASH_WITH_RECEIPT,
+        )
+    assert payment_provider.initiations == []
+
+
+def test_provider_error_contract_distinguishes_normalized_failure_kinds() -> None:
+    """Callers can distinguish ambiguity, safe query retry and unsupported operations."""
+    ambiguous = ProviderCallError("timeout", "Unknown result.", outcome_unknown=True)
+    definitive = ProviderCallError("declined", "Declined.", outcome_unknown=False)
+    temporary = ProviderCallError.temporary_status_query("http_503", "Try status later.")
+    unsupported = ProviderCallError.unsupported("refund")
+
+    assert ambiguous.kind is ProviderErrorKind.OUTCOME_UNKNOWN
+    assert ambiguous.outcome_unknown is True
+    assert definitive.kind is ProviderErrorKind.DEFINITIVE_FAILURE
+    assert temporary.kind is ProviderErrorKind.TEMPORARY_STATUS_QUERY_FAILURE
+    assert temporary.outcome_unknown is False
+    assert unsupported.kind is ProviderErrorKind.UNSUPPORTED_OPERATION
+
+
+def test_inflight_checkout_keeps_persisted_provider_bindings_after_configuration_change(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical recovery never follows newly selected payment or fiscal Integrations."""
+    user, variant, payment_integration, provider, _ = checkout_setup
+    fiscal_integration = Integration(
+        provider=IntegrationProvider.AQSI,
+        name="Original fiscal",
+        enabled=True,
+        configuration={"payment_enabled": False, "fiscalization_enabled": True},
+    )
+    session.add(fiscal_integration)
+    session.commit()
+    binding = CheckoutProviderBinding(
+        integration_id=payment_integration.id,
+        integration_name=payment_integration.name,
+        provider=payment_integration.provider,
+        provider_display_name="Original payment",
+        payment_display_name="Карта / QR",
+        payment=provider,
+        fiscal=provider,
+        fiscal_integration_id=fiscal_integration.id,
+        fiscal_integration_name=fiscal_integration.name,
+        fiscal_provider_kind=fiscal_integration.provider,
+        fiscal_provider_display_name="Original fiscal",
+    )
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    payment_integration.enabled = False
+    fiscal_integration.enabled = False
+    replacement = Integration(
+        provider=IntegrationProvider.AQSI,
+        name="New default",
+        enabled=True,
+        configuration={},
+    )
+    session.add(replacement)
+    session.commit()
+    captured: list[tuple[object, object]] = []
+
+    class RecordingFactory:
+        def __init__(self, database_session: Session, settings: Settings) -> None:
+            del database_session, settings
+
+        def for_recovery(self, **kwargs: object) -> CheckoutProviderBinding:
+            captured.append(
+                (kwargs["payment_integration_id"], kwargs["fiscal_integration_id"])
+            )
+            return binding
+
+        def for_new_checkout(self) -> CheckoutProviderBinding:
+            raise AssertionError("In-flight checkout must not resolve new defaults.")
+
+    monkeypatch.setattr(sales_routes_module, "CheckoutProviderFactory", RecordingFactory)
+
+    resolved = sales_routes_module._checkout_binding(
+        session,
+        Settings(jwt_secret="test-only-jwt-secret-at-least-32-bytes"),
+        sale,
+    )
+
+    assert resolved is binding
+    assert captured == [(payment_integration.id, fiscal_integration.id)]
+    assert replacement.id not in captured[0]
+
+
+def test_restarted_worker_uses_persisted_provider_bindings_after_configuration_change(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker restart cannot redirect an in-flight command to new default providers."""
+    user, variant, payment_integration, provider, _ = checkout_setup
+    fiscal_integration = Integration(
+        provider=IntegrationProvider.AQSI,
+        name="Original worker fiscal",
+        enabled=True,
+        configuration={"payment_enabled": False, "fiscalization_enabled": True},
+    )
+    session.add(fiscal_integration)
+    session.commit()
+    binding = CheckoutProviderBinding(
+        integration_id=payment_integration.id,
+        integration_name=payment_integration.name,
+        provider=payment_integration.provider,
+        provider_display_name="Original payment",
+        payment_display_name="Карта / QR",
+        payment=provider,
+        fiscal=provider,
+        fiscal_integration_id=fiscal_integration.id,
+        fiscal_integration_name=fiscal_integration.name,
+        fiscal_provider_kind=fiscal_integration.provider,
+        fiscal_provider_display_name="Original fiscal",
+    )
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    payment_integration.enabled = False
+    fiscal_integration.enabled = False
+    session.add(
+        Integration(
+            provider=IntegrationProvider.AQSI,
+            name="Replacement after restart",
+            enabled=True,
+            configuration={},
+        )
+    )
+    session.commit()
+    provider.payment_state = _succeeded_payment()
+    captured: list[tuple[object, object]] = []
+
+    class RecordingFactory:
+        def __init__(self, database_session: Session, settings: Settings) -> None:
+            del database_session, settings
+
+        def for_recovery(self, **kwargs: object) -> CheckoutProviderBinding:
+            captured.append(
+                (kwargs["payment_integration_id"], kwargs["fiscal_integration_id"])
+            )
+            return binding
+
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(payment_jobs_module, "SessionLocal", factory)
+    monkeypatch.setattr(payment_jobs_module, "CheckoutProviderFactory", RecordingFactory)
+    monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0,))
+    monkeypatch.setattr(payment_jobs_module, "enqueue_sale_fiscalization", lambda sale_id: True)
+
+    result = payment_jobs_module.run_payment_job(str(sale.payments[0].job.id))
+
+    assert result == "completed"
+    assert captured == [(payment_integration.id, fiscal_integration.id)]
+    assert len(provider.payment_initiations) == 1
 
 
 def test_checkout_freezes_exact_total_and_duplicate_start_is_idempotent(
@@ -714,6 +1057,16 @@ def test_dismiss_failed_receipt_preserves_financial_facts_and_blocks_retries(
     checkout.process_fiscalization(sale.id, owner_id=user.id)
     sale.fiscalization_job.status = FiscalizationJobStatus.FAILED
     session.commit()
+    list_settings = Settings(jwt_secret="test-only-jwt-secret-at-least-32-bytes")
+    assert sale in list_checkout_operations(
+        session,
+        list_settings,
+        user,
+        state="attention",
+        date_from=None,
+        date_to=None,
+        limit=100,
+    )
     assert sale in SaleRepository(session).list_drafts(user.id)
     amounts = (sale.total_amount, sale.paid_at, sale.inventory_posted_at, sale.completed_at)
     calls = (
@@ -736,10 +1089,19 @@ def test_dismiss_failed_receipt_preserves_financial_facts_and_blocks_retries(
     assert amounts == (sale.total_amount, sale.paid_at, sale.inventory_posted_at, sale.completed_at)
     assert dismissed not in SaleRepository(session).list_drafts(user.id)
     assert dismissed in list_checkout_operations(
-        session, user, state="all", date_from=None, date_to=None, limit=100
+        session, list_settings, user, state="all", date_from=None, date_to=None, limit=100
     )
     assert dismissed not in list_checkout_operations(
-        session, user, state="failed", date_from=None, date_to=None, limit=100
+        session, list_settings, user, state="failed", date_from=None, date_to=None, limit=100
+    )
+    assert dismissed not in list_checkout_operations(
+        session,
+        list_settings,
+        user,
+        state="attention",
+        date_from=None,
+        date_to=None,
+        limit=100,
     )
     with pytest.raises(CheckoutStateError, match="неактуальная"):
         checkout.retry_fiscalization(sale.id, owner_id=user.id)
@@ -816,6 +1178,39 @@ def test_checkout_factory_never_falls_back_to_legacy_environment_secret(
 
     with pytest.raises(CheckoutIntegrationUnavailableError, match="ключ"):
         CheckoutProviderFactory(session, settings).for_new_checkout()
+
+
+def test_checkout_factory_selects_payment_and_fiscal_integrations_independently(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Two boolean assignments split capabilities while legacy defaults still select both."""
+    _, _, payment_integration, _, _ = checkout_setup
+    factory = CheckoutProviderFactory(
+        session,
+        Settings(jwt_secret="test-only-jwt-secret-at-least-32-bytes"),
+    )
+
+    assert factory._select(ProviderCapability.PAYMENT).id == payment_integration.id
+    assert factory._select(ProviderCapability.FISCALIZATION).id == payment_integration.id
+
+    payment_integration.configuration = {
+        "payment_enabled": True,
+        "fiscalization_enabled": False,
+    }
+    fiscal_integration = Integration(
+        provider=IntegrationProvider.AQSI,
+        name="Fiscal only",
+        enabled=True,
+        configuration={"payment_enabled": False, "fiscalization_enabled": True},
+    )
+    session.add(fiscal_integration)
+    session.commit()
+
+    assert factory._select(ProviderCapability.PAYMENT).id == payment_integration.id
+    assert factory._select(ProviderCapability.FISCALIZATION).id == fiscal_integration.id
 
 
 class RecordingAqsiClient:
@@ -1171,7 +1566,7 @@ def test_payment_worker_completes_and_atomically_creates_fiscal_job(
         payment_jobs_module,
         "CheckoutProviderFactory",
         lambda database_session, settings: type(
-            "Factory", (), {"for_recovery": lambda self, integration_id: binding}
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
         )(),
     )
     monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0,))
@@ -1210,7 +1605,7 @@ def test_payment_worker_quarantines_unknown_command_without_operation_id(
         payment_jobs_module,
         "CheckoutProviderFactory",
         lambda database_session, settings: type(
-            "Factory", (), {"for_recovery": lambda self, integration_id: binding}
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
         )(),
     )
     monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0,))
@@ -1249,7 +1644,7 @@ def test_payment_worker_with_existing_operation_id_only_polls_status(
         payment_jobs_module,
         "CheckoutProviderFactory",
         lambda database_session, settings: type(
-            "Factory", (), {"for_recovery": lambda self, integration_id: binding}
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
         )(),
     )
     monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0,))
@@ -1327,7 +1722,7 @@ def test_worker_completes_fiscalization_without_browser_request(
         fiscal_jobs_module,
         "CheckoutProviderFactory",
         lambda database_session, settings: type(
-            "Factory", (), {"for_recovery": lambda self, integration_id: binding}
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
         )(),
     )
     monkeypatch.setattr(fiscal_jobs_module, "FISCALIZATION_POLL_DELAYS", (0.0,))
@@ -1368,7 +1763,7 @@ def test_worker_quarantines_unknown_fiscal_command_without_operation_id(
         fiscal_jobs_module,
         "CheckoutProviderFactory",
         lambda database_session, settings: type(
-            "Factory", (), {"for_recovery": lambda self, integration_id: binding}
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
         )(),
     )
     monkeypatch.setattr(fiscal_jobs_module, "FISCALIZATION_POLL_DELAYS", (0.0,))
@@ -1489,3 +1884,595 @@ def test_restart_recovery_requeues_stale_fiscal_status_query_with_operation_id(
         session.get(fiscal_jobs_module.FiscalizationJob, job.id).status
         is FiscalizationJobStatus.QUEUED
     )
+
+
+def test_financial_journal_records_meaningful_transitions_without_poll_flood(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Creation and provider identity are journaled once; repeated pending GETs are quiet."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+
+    checkout.start(sale.id, owner_id=user.id)
+    checkout.process_payment(sale.id, owner_id=user.id)
+    count_after_identity = session.scalar(
+        select(func.count(FinancialOperationEvent.id)).where(
+            FinancialOperationEvent.sale_id == sale.id
+        )
+    )
+    checkout.process_payment(sale.id, owner_id=user.id)
+    events = list_financial_events(session, sale_id=sale.id)
+
+    assert provider.payment_polls == 1
+    assert len(events) == count_after_identity
+    assert [event.event_type for event in reversed(events)] == [
+        FinancialEventType.PAYMENT_CREATED,
+        FinancialEventType.PAYMENT_COMMAND_PREPARED,
+        FinancialEventType.PAYMENT_OPERATION_ID_RECEIVED,
+    ]
+
+
+def test_financial_state_and_event_rollback_together(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """A rolled-back domain transition cannot leave orphan audit evidence."""
+    user, variant, _, _, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    attempt = sale.payments[0]
+    baseline = session.scalar(select(func.count(FinancialOperationEvent.id)))
+
+    attempt.status = PaymentStatus.UNKNOWN
+    append_financial_event(
+        session,
+        sale_id=sale.id,
+        entity_type=FinancialEntityType.PAYMENT_ATTEMPT,
+        entity_id=attempt.id,
+        event_type=FinancialEventType.PAYMENT_OUTCOME_UNKNOWN,
+        correlation_id=attempt.job.correlation_id,
+        actor_type=FinancialActorType.SYSTEM,
+        previous_status=PaymentStatus.PENDING.value,
+        new_status=PaymentStatus.UNKNOWN.value,
+    )
+    session.flush()
+    session.rollback()
+    session.expire_all()
+
+    assert session.get(PaymentAttempt, attempt.id).status is PaymentStatus.PENDING
+    assert session.scalar(select(func.count(FinancialOperationEvent.id))) == baseline
+
+
+def test_financial_events_are_immutable_through_orm(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Normal ORM writes cannot rewrite append-only financial evidence."""
+    user, variant, _, _, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    event = session.scalar(
+        select(FinancialOperationEvent).where(FinancialOperationEvent.sale_id == sale.id)
+    )
+
+    event.safe_message = "rewritten"
+    with pytest.raises(RuntimeError, match="immutable"):
+        session.commit()
+    session.rollback()
+
+
+def test_operation_detail_enforces_sale_ownership(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """The journal is never exposed to an unrelated authenticated operator."""
+    owner, variant, _, _, binding = checkout_setup
+    outsider = User(email="outsider@example.com", full_name="Outsider", password_hash="unused")
+    session.add(outsider)
+    session.commit()
+    sale = _sale_with_item(session, owner, variant)
+    CheckoutService(session, binding).start(sale.id, owner_id=owner.id)
+
+    with pytest.raises(HTTPException) as error:
+        checkout_operation_detail(sale.id, session, outsider, 100, None)
+
+    assert error.value.status_code == 404
+
+
+def test_operation_detail_identifies_older_unknown_attempt_for_manual_review(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """A later bookkeeping payment cannot hide an older unresolved provider attempt."""
+    user, variant, _, _, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    unresolved = sale.payments[0]
+    unresolved.status = PaymentStatus.UNKNOWN
+    unresolved.provider_metadata = {"accounting_superseded": True}
+    sale.status = SaleStatus.COMPLETED
+    replacement = PaymentAttempt(
+        sale_id=sale.id,
+        payment_method=PaymentMethod.CASH,
+        requested_amount=sale.total_amount,
+        fiscalization_required=False,
+        status=PaymentStatus.SUCCEEDED,
+        idempotency_key=f"sale:{sale.id}:payment:2",
+        attempt_number=2,
+    )
+    session.add(replacement)
+    session.commit()
+
+    detail = checkout_operation_detail(sale.id, session, user, 100, None)
+
+    assert detail.manual_review_required is True
+    assert detail.manual_review_payment_id == unresolved.id
+
+
+def test_missing_provider_id_reconciliation_is_idempotent_manual_review(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Repeated checks without a provider ID create no command and one review marker pair."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    attempt = sale.payments[0]
+    attempt.status = PaymentStatus.UNKNOWN
+    attempt.job.status = payment_jobs_module.PaymentJobStatus.FAILED
+    session.commit()
+
+    for _ in range(2):
+        with pytest.raises(HTTPException) as error:
+            sales_routes_module.reconcile_checkout_operation(sale.id, session, user)
+        assert error.value.status_code == 409
+
+    review_events = session.scalars(
+        select(FinancialOperationEvent).where(
+            FinancialOperationEvent.correlation_id == attempt.job.correlation_id,
+            FinancialOperationEvent.event_type.in_(
+                {
+                    FinancialEventType.RECONCILIATION_INCONCLUSIVE,
+                    FinancialEventType.MANUAL_REVIEW_REQUIRED,
+                }
+            ),
+        )
+    ).all()
+    assert len(review_events) == 2
+    assert provider.payment_initiations == []
+    assert (
+        session.scalar(
+            select(func.count(PaymentAttempt.id)).where(PaymentAttempt.sale_id == sale.id)
+        )
+        == 1
+    )
+def test_known_id_reconciliation_reuses_payment_and_inventory_once(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator check queues authoritative GET and completes through normal business logic."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    attempt = sale.payments[0]
+    attempt.external_id = "known-payment-operation"
+    attempt.status = PaymentStatus.UNKNOWN
+    attempt.job.status = payment_jobs_module.PaymentJobStatus.FAILED
+    attempt.job.attempt_count = payment_jobs_module.MAX_UNKNOWN_QUERY_RUNS
+    session.commit()
+    wakeups: list[object] = []
+    monkeypatch.setattr(
+        sales_routes_module, "enqueue_sale_payment", lambda sale_id: wakeups.append(sale_id)
+    )
+
+    sales_routes_module.reconcile_checkout_operation(sale.id, session, user)
+    sales_routes_module.reconcile_checkout_operation(sale.id, session, user)
+
+    assert wakeups == [sale.id]
+    assert provider.payment_initiations == []
+    assert session.scalar(
+        select(func.count(FinancialOperationEvent.id)).where(
+            FinancialOperationEvent.correlation_id == attempt.job.correlation_id,
+            FinancialOperationEvent.event_type == FinancialEventType.RECONCILIATION_REQUESTED,
+        )
+    ) == 1
+    provider.payment_state = _succeeded_payment("known-payment-operation")
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(payment_jobs_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        payment_jobs_module,
+        "CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
+        )(),
+    )
+    monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0,))
+    monkeypatch.setattr(payment_jobs_module, "enqueue_sale_fiscalization", lambda sale_id: True)
+
+    assert payment_jobs_module.run_payment_job(str(attempt.job.id)) == "completed"
+    session.expire_all()
+    completed = session.get(Sale, sale.id)
+
+    assert completed.payments[0].status is PaymentStatus.SUCCEEDED
+    assert provider.payment_initiations == []
+    assert provider.payment_polls == 1
+    assert session.query(StockMovement).count() == 1
+    assert completed.fiscalization_job is not None
+    with pytest.raises(HTTPException):
+        sales_routes_module.reconcile_checkout_operation(sale.id, session, user)
+    assert session.query(StockMovement).count() == 1
+
+
+def test_emergency_fallback_preserves_unknown_attempt_and_completes_once(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """External POS confirmation reuses Sale accounting without another provider command."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant, quantity=2)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    checkout.process_payment(sale.id, owner_id=user.id)
+    provider.payment_state = ProviderOperation(
+        ProviderOutcomeState.UNKNOWN,
+        external_id="payment-operation-1",
+        error_code="provider_pending",
+    )
+    unknown = checkout.process_payment(sale.id, owner_id=user.id)
+    original = unknown.payments[0]
+
+    completed = checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    repeated = checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+
+    assert completed.status is repeated.status is SaleStatus.COMPLETED
+    assert len(completed.payments) == 2
+    assert original.status is PaymentStatus.UNKNOWN
+    assert original.external_id == "payment-operation-1"
+    assert original.accounting_superseded is True
+    fallback = completed.payments[1]
+    assert fallback.status is PaymentStatus.SUCCEEDED
+    assert fallback.emergency_fallback is True
+    assert fallback.provider_metadata["source"] == "EXTERNAL_POS"
+    assert fallback.provider_metadata["confirmation"] == "OPERATOR_CONFIRMED"
+    assert fallback.requested_amount == completed.total_amount
+    assert fallback.linked_payment_attempt_id == str(original.id)
+    assert completed.fiscalization.status is FiscalizationStatus.SKIPPED
+    assert completed.fiscalization.external_receipt_confirmed is True
+    assert completed.fiscalization_job is None
+    assert session.query(StockMovement).count() == 1
+    assert len(provider.payment_initiations) == 1
+    assert provider.fiscal_initiations == []
+    assert (
+        session.scalar(
+            select(func.count(Sale.id)).where(
+                Sale.id == sale.id,
+                Sale.status == SaleStatus.COMPLETED,
+            )
+        )
+        == 1
+    )
+    period = resolve_sales_period(
+        SalesPeriodPreset.TODAY,
+        "UTC",
+        now=completed.completed_at,
+    )
+    analytics = SalesAnalyticsReadService(session, "UTC")
+    summary = analytics.summary(period)
+    methods = analytics.payment_methods(period)
+    assert summary.sale_count == 1
+    assert summary.sales_revenue == completed.total_amount
+    assert [(item.payment_method, item.revenue) for item in methods] == [
+        (PaymentMethod.CASH.value, completed.total_amount)
+    ]
+    event_types = {
+        event.event_type for event in list_financial_events(session, sale_id=sale.id)
+    }
+    assert {
+        FinancialEventType.EMERGENCY_FALLBACK_REQUESTED,
+        FinancialEventType.EMERGENCY_FALLBACK_CONFIRMED,
+        FinancialEventType.EXTERNAL_PAYMENT_RECORDED,
+        FinancialEventType.MANUAL_REVIEW_REQUIRED,
+    }.issubset(event_types)
+
+
+def test_emergency_fallback_without_provider_id_retains_manual_review(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """A missing AQSI operation ID never becomes a provider failure or a new charge."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    original = sale.payments[0]
+    original.status = PaymentStatus.UNKNOWN
+    original.job.status = payment_jobs_module.PaymentJobStatus.FAILED
+    session.commit()
+
+    completed = CheckoutService(session, binding).confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+
+    assert completed.status is SaleStatus.COMPLETED
+    assert original.status is PaymentStatus.UNKNOWN
+    assert original.external_id is None
+    assert original.job.status is payment_jobs_module.PaymentJobStatus.FAILED
+    assert provider.payment_initiations == []
+    detail = checkout_operation_detail(sale.id, session, user, 100, None)
+    assert detail.manual_review_required is True
+    assert detail.emergency_fallback_recorded is True
+    assert detail.manual_review_payment_id == original.id
+
+
+def test_payment_approval_wins_race_and_rejects_emergency_fallback(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """A durably applied provider approval blocks a second effective payment fact."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    provider.payment_state = _succeeded_payment()
+    approved = checkout.process_payment(sale.id, owner_id=user.id)
+
+    with pytest.raises(CheckoutStateError, match="уже подтверждена"):
+        checkout.confirm_external_pos_payment(
+            sale.id,
+            owner_id=user.id,
+            risk_acknowledged=True,
+        )
+
+    assert approved.status is SaleStatus.FISCALIZATION_PENDING
+    assert len(approved.payments) == 1
+    assert session.query(StockMovement).count() == 1
+
+
+def test_fallback_wins_race_and_late_approval_creates_duplicate_risk(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Late AQSI approval is retained but cannot repost stock, revenue or fiscalization."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = _succeeded_payment(original.external_id)
+
+    completed = checkout.process_payment(
+        sale.id,
+        owner_id=user.id,
+        attempt_id=original.id,
+    )
+
+    assert completed.status is SaleStatus.COMPLETED
+    assert original.status is PaymentStatus.SUCCEEDED
+    assert original.duplicate_payment_risk is True
+    assert original.accounting_superseded is True
+    assert len([item for item in completed.payments if not item.accounting_superseded]) == 1
+    assert session.query(StockMovement).count() == 1
+    assert completed.fiscalization.status is FiscalizationStatus.SKIPPED
+    assert completed.fiscalization_job is None
+    assert provider.fiscal_initiations == []
+    detail = checkout_operation_detail(sale.id, session, user, 100, None)
+    assert detail.duplicate_payment_risk is True
+    assert detail.recovery_state == "duplicate_payment_risk"
+    assert FinancialEventType.LATE_PROVIDER_APPROVAL_DETECTED in {
+        event.event_type for event in detail.events
+    }
+
+
+def test_emergency_fallback_endpoint_requires_admin_and_reconciliation_remains_read_only(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an administrator can override accounting, while later checks only poll by ID."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    checkout.process_payment(sale.id, owner_id=user.id)
+    request = EmergencyFallbackRequest(risk_acknowledged=True)
+
+    with pytest.raises(HTTPException) as forbidden:
+        sales_routes_module.confirm_external_pos_payment(sale.id, request, session, user)
+    assert forbidden.value.status_code == 403
+
+    user.is_admin = True
+    session.commit()
+    completed = sales_routes_module.confirm_external_pos_payment(sale.id, request, session, user)
+    wakeups: list[object] = []
+    monkeypatch.setattr(
+        sales_routes_module, "enqueue_sale_payment", lambda sale_id: wakeups.append(sale_id)
+    )
+    sales_routes_module.reconcile_checkout_operation(sale.id, session, user)
+
+    assert completed.status is SaleStatus.COMPLETED
+    assert wakeups == [sale.id]
+    assert len(provider.payment_initiations) == 1
+    assert session.query(StockMovement).count() == 1
+
+
+def test_payment_worker_records_late_approval_against_original_attempt(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restarted worker targets its own attempt and never the newer fallback fact."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = _succeeded_payment(original.external_id)
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(payment_jobs_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        payment_jobs_module,
+        "CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
+        )(),
+    )
+    monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0,))
+    monkeypatch.setattr(payment_jobs_module, "enqueue_sale_fiscalization", lambda sale_id: False)
+
+    assert payment_jobs_module.run_payment_job(str(original.job.id)) == "completed"
+    session.expire_all()
+    completed = session.get(Sale, sale.id)
+    original = next(item for item in completed.payments if not item.emergency_fallback)
+
+    assert completed.status is SaleStatus.COMPLETED
+    assert original.status is PaymentStatus.SUCCEEDED
+    assert original.duplicate_payment_risk is True
+    assert provider.payment_polls == 1
+    assert len(provider.payment_initiations) == 1
+    assert session.query(StockMovement).count() == 1
+    assert completed.fiscalization_job is None
+
+
+def test_payment_recovery_never_reopens_completed_external_pos_sale(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery quarantines a command without an ID while preserving fallback completion."""
+    user, variant, _, _, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    original = sale.payments[0]
+    original.status = PaymentStatus.UNKNOWN
+    session.commit()
+    CheckoutService(session, binding).confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    original.job.status = payment_jobs_module.PaymentJobStatus.QUEUED
+    original.job.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+    session.commit()
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(payment_jobs_module, "SessionLocal", factory)
+    monkeypatch.setattr(payment_jobs_module, "get_checkout_queue", lambda: object())
+
+    assert payment_jobs_module.recover_payment_jobs() == 0
+    session.expire_all()
+    recovered = session.get(Sale, sale.id)
+
+    assert recovered.status is SaleStatus.COMPLETED
+    assert recovered.payments[0].status is PaymentStatus.UNKNOWN
+    assert recovered.payments[0].job.status is payment_jobs_module.PaymentJobStatus.FAILED
+    assert session.query(StockMovement).count() == 1
+
+
+def test_worker_health_reports_heartbeat_and_stalled_durable_jobs(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RQ liveness and PostgreSQL queue age remain separate observable facts."""
+    user, variant, _, _, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    sale = CheckoutService(session, binding).start(sale.id, owner_id=user.id)
+    now = datetime.now(UTC)
+
+    class QueueStub:
+        name = "checkout"
+
+    class WorkerStub:
+        queues = [QueueStub()]
+        last_heartbeat = now
+
+    monkeypatch.setattr(sales_health_module.Worker, "all", lambda connection: [WorkerStub()])
+    settings = Settings(
+        jwt_secret="test",
+        redis_url="redis://unused:6379/0",
+        checkout_queued_job_stale_seconds=60,
+        checkout_processing_job_stale_seconds=120,
+        _env_file=None,
+    )
+
+    healthy = sales_health_module.collect_checkout_worker_health(session, settings, now=now)
+
+    assert healthy.running is True
+    assert healthy.queued_jobs == 1
+    assert healthy.stalled_jobs == 0
+
+    session.execute(
+        payment_jobs_module.PaymentJob.__table__.update()
+        .where(payment_jobs_module.PaymentJob.id == sale.payments[0].job.id)
+        .values(created_at=now - timedelta(seconds=120))
+    )
+    session.commit()
+    stale = sales_health_module.collect_checkout_worker_health(session, settings, now=now)
+    assert stale.oldest_queued_age_seconds == 120
+    assert stale.stalled_jobs == 1
+    assert sale in list_checkout_operations(
+        session,
+        settings,
+        user,
+        state="attention",
+        date_from=None,
+        date_to=None,
+        limit=100,
+    )
+
+    monkeypatch.setattr(sales_health_module.Worker, "all", lambda connection: [])
+    missing = sales_health_module.collect_checkout_worker_health(session, settings, now=now)
+    assert missing.running is False

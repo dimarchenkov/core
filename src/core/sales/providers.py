@@ -21,14 +21,53 @@ class ProviderOutcomeState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProviderErrorKind(StrEnum):
+    """Provider-neutral failure categories used by financial orchestration."""
+
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    DEFINITIVE_FAILURE = "definitive_failure"
+    TEMPORARY_STATUS_QUERY_FAILURE = "temporary_status_query_failure"
+    UNSUPPORTED_OPERATION = "unsupported_operation"
+
+
 class ProviderCallError(Exception):
     """Sanitized provider failure safe to persist and expose to operators."""
 
-    def __init__(self, code: str, message: str, *, outcome_unknown: bool) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        outcome_unknown: bool | None = None,
+        kind: ProviderErrorKind | None = None,
+    ) -> None:
         """Create an error without secret headers or raw payloads."""
+        if kind is None:
+            if outcome_unknown is None:
+                raise TypeError("ProviderCallError requires outcome_unknown or kind.")
+            kind = (
+                ProviderErrorKind.OUTCOME_UNKNOWN
+                if outcome_unknown
+                else ProviderErrorKind.DEFINITIVE_FAILURE
+            )
         self.code = code[:128]
-        self.outcome_unknown = outcome_unknown
+        self.kind = kind
+        self.outcome_unknown = kind is ProviderErrorKind.OUTCOME_UNKNOWN
         super().__init__(message[:1000])
+
+    @classmethod
+    def temporary_status_query(cls, code: str, message: str) -> ProviderCallError:
+        """Create a retry-safe error for a non-mutating provider status read."""
+        return cls(code, message, kind=ProviderErrorKind.TEMPORARY_STATUS_QUERY_FAILURE)
+
+    @classmethod
+    def unsupported(cls, operation: str) -> ProviderCallError:
+        """Describe an intentionally unsupported optional provider operation."""
+        return cls(
+            "unsupported_operation",
+            f"Provider operation is not supported: {operation}.",
+            kind=ProviderErrorKind.UNSUPPORTED_OPERATION,
+        )
 
 
 @dataclass(frozen=True)
@@ -92,6 +131,7 @@ class ProviderHealth:
     reachable: bool
     checked_at: str
     message: str
+    physical_device_ready: bool | None = None
 
 
 class PaymentProvider(Protocol):
@@ -119,16 +159,49 @@ class FiscalProvider(Protocol):
     def get_fiscalization(self, external_id: str, request: FiscalRequest) -> ProviderOperation:
         """Read authoritative fiscal state without creating another receipt."""
 
+    def check_health(self) -> ProviderHealth:
+        """Check provider API/configuration without mutating fiscal state."""
+
 
 @dataclass
 class CheckoutProviderBinding:
-    """Resolved Integration plus its independent payment/fiscal capabilities."""
+    """Resolved, independently selectable payment and fiscal capabilities.
+
+    The original fields describe the payment selection and stay intact for
+    compatibility.  Fiscal-specific fields may point at another Integration;
+    when omitted they deliberately fall back to the payment selection used by
+    all historical AQSI records.
+    """
 
     integration_id: UUIDv7
     integration_name: str
     provider: IntegrationProvider
     provider_display_name: str
     payment_display_name: str
-    payment: PaymentProvider
-    fiscal: FiscalProvider
+    payment: PaymentProvider | None
+    fiscal: FiscalProvider | None
     close: Callable[[], None] | None = None
+    fiscal_integration_id: UUIDv7 | None = None
+    fiscal_integration_name: str | None = None
+    fiscal_provider_kind: IntegrationProvider | None = None
+    fiscal_provider_display_name: str | None = None
+
+    @property
+    def resolved_fiscal_integration_id(self) -> UUIDv7:
+        """Return the selected fiscal Integration, including legacy fallback."""
+        return self.fiscal_integration_id or self.integration_id
+
+    @property
+    def resolved_fiscal_integration_name(self) -> str:
+        """Return the selected fiscal Integration name."""
+        return self.fiscal_integration_name or self.integration_name
+
+    @property
+    def resolved_fiscal_provider(self) -> IntegrationProvider:
+        """Return the selected fiscal provider kind."""
+        return self.fiscal_provider_kind or self.provider
+
+    @property
+    def resolved_fiscal_provider_display_name(self) -> str:
+        """Return the selected fiscal provider display name."""
+        return self.fiscal_provider_display_name or self.provider_display_name

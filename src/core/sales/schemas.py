@@ -9,6 +9,9 @@ from pydantic import ConfigDict, Field, computed_field
 from core.integrations.enums import IntegrationProvider
 from core.sales.enums import (
     CheckoutPaymentOption,
+    FinancialActorType,
+    FinancialEntityType,
+    FinancialEventType,
     FiscalizationJobStatus,
     FiscalizationStatus,
     PaymentJobStatus,
@@ -96,6 +99,9 @@ class PaymentJobRead(PydanticBaseModel):
     next_retry_at: datetime | None
     last_attempt_at: datetime | None
     completed_at: datetime | None
+    correlation_id: str
+    dispatch_started_at: datetime | None
+    reconciliation_requested_at: datetime | None
     last_error: str | None
     created_at: datetime
     updated_at: datetime
@@ -116,6 +122,9 @@ class PaymentAttemptRead(PydanticBaseModel):
     external_id: str | None
     status: PaymentStatus
     accounting_superseded: bool = False
+    emergency_fallback: bool = False
+    duplicate_payment_risk: bool = False
+    linked_payment_attempt_id: str | None = None
     attempt_number: int
     error_code: str | None
     error_message: str | None
@@ -136,6 +145,7 @@ class FiscalizationRead(PydanticBaseModel):
     external_receipt_id: str | None
     status: FiscalizationStatus
     operator_dismissed: bool = False
+    external_receipt_confirmed: bool = False
     attempt_count: int
     fiscal_amount: Decimal
     currency: str
@@ -156,6 +166,10 @@ class FiscalizationJobRead(PydanticBaseModel):
     next_retry_at: datetime | None
     last_attempt_at: datetime | None
     completed_at: datetime | None
+    correlation_id: str
+    dispatch_started_at: datetime | None
+    reconciliation_requested_at: datetime | None
+    provider_operation_id: str | None
     aqsi_operation_id: str | None
     last_error: str | None
     created_at: datetime
@@ -218,6 +232,12 @@ class CheckoutContextRead(PydanticBaseModel):
     integration_id: UUIDv7 | None = None
     integration_name: str | None = None
     provider_name: str | None = None
+    payment_integration_id: UUIDv7 | None = None
+    payment_integration_name: str | None = None
+    payment_provider_name: str | None = None
+    fiscal_integration_id: UUIDv7 | None = None
+    fiscal_integration_name: str | None = None
+    fiscal_provider_name: str | None = None
     acquiring_label: str | None = None
     fiscalization_available: bool = False
     stock_warnings: list[CheckoutStockWarningRead] = Field(default_factory=list)
@@ -231,14 +251,78 @@ class CheckoutStartRequest(PydanticBaseModel):
     payment_option: CheckoutPaymentOption = CheckoutPaymentOption.CARD
 
 
+class EmergencyFallbackRequest(PydanticBaseModel):
+    """Explicit acknowledgement for a sensitive external-POS accounting override."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    risk_acknowledged: bool
+
+
 class CheckoutHealthRead(PydanticBaseModel):
     """Multi-signal provider state without overstating physical readiness."""
 
     status: str
     api_reachable: bool | None
+    payment_provider_reachable: bool | None = None
+    fiscal_provider_reachable: bool | None = None
+    physical_device_ready: bool | None = None
     configured: bool
+    payment_provider_configured: bool = False
+    fiscal_provider_configured: bool = False
     active_operation: bool
+    local_active_operation: bool = False
+    global_active_operation: bool = False
     manual_review_required: bool = False
+    worker_running: bool = False
+    worker_last_heartbeat: datetime | None = None
+    queued_job_count: int = 0
+    processing_job_count: int = 0
+    oldest_queued_job_age_seconds: int | None = None
+    stalled_job_count: int = 0
+    last_worker_error: str | None = None
     message: str
     checked_at: datetime
     integration_name: str | None = None
+    payment_integration_name: str | None = None
+    fiscal_integration_name: str | None = None
+    failed_fiscalization_count: int = 0
+
+
+class FinancialOperationEventRead(PydanticBaseModel):
+    """Sanitized immutable event exposed only through an owned Sale detail."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUIDv7
+    entity_type: FinancialEntityType
+    entity_id: UUIDv7
+    event_type: FinancialEventType
+    previous_status: str | None
+    new_status: str | None
+    provider: IntegrationProvider | None
+    provider_operation_id: str | None
+    actor_type: FinancialActorType
+    actor_id: UUIDv7 | None
+    correlation_id: str
+    error_code: str | None
+    safe_message: str | None
+    metadata_json: dict[str, object]
+    occurred_at: datetime
+
+
+class CheckoutOperationDetailRead(PydanticBaseModel):
+    """Owned Sale plus bounded recovery diagnostics and immutable timeline."""
+
+    sale: SaleRead
+    events: list[FinancialOperationEventRead]
+    recovery_state: str
+    manual_review_required: bool
+    manual_review_payment_id: UUIDv7 | None = None
+    emergency_fallback_recorded: bool = False
+    emergency_fallback_eligible: bool = False
+    duplicate_payment_risk: bool = False
+    operator_instruction: str | None = None
+    provider_identity: str | None = None
+    correlation_ids: list[str] = Field(default_factory=list)
+    provider_operation_ids: list[str] = Field(default_factory=list)

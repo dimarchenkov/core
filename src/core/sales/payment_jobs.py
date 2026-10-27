@@ -10,6 +10,7 @@ from redis.exceptions import RedisError
 from rq import Queue, Repeat
 from rq.job import JobStatus
 from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
 
 import core.identity.models  # noqa: F401
 from core.config import get_settings
@@ -17,7 +18,15 @@ from core.database import SessionLocal
 from core.integrations.checkout import CheckoutProviderFactory
 from core.jobs import CHECKOUT_QUEUE_NAME, get_checkout_queue
 from core.sales.checkout import CheckoutService
-from core.sales.enums import PaymentJobStatus, PaymentStatus, SaleStatus
+from core.sales.enums import (
+    FinancialActorType,
+    FinancialEntityType,
+    FinancialEventType,
+    PaymentJobStatus,
+    PaymentStatus,
+    SaleStatus,
+)
+from core.sales.financial_events import append_financial_event
 from core.sales.fiscalization_jobs import enqueue_sale_fiscalization
 from core.sales.models import PaymentJob
 
@@ -73,21 +82,38 @@ def run_payment_job(job_id: str) -> str:
     claimed = _claim_job(UUID(job_id))
     if claimed is None:
         return "not_claimed"
-    sale_id, owner_id, integration_id, attempt_number, provider_operation_id = claimed
+    (
+        sale_id,
+        owner_id,
+        integration_id,
+        fiscal_integration_id,
+        payment_attempt_id,
+        attempt_number,
+        provider_operation_id,
+    ) = claimed
     final = "queued"
     provider_status: object = None
     error: str | None = None
     manual_review = False
     try:
         with SessionLocal() as session:
-            binding = CheckoutProviderFactory(session, get_settings()).for_recovery(integration_id)
+            binding = CheckoutProviderFactory(session, get_settings()).for_recovery(
+                payment_integration_id=integration_id,
+                fiscal_integration_id=fiscal_integration_id,
+            )
             try:
-                checkout = CheckoutService(session, binding)
+                checkout = CheckoutService(session, binding, actor_type=FinancialActorType.WORKER)
                 for delay in PAYMENT_POLL_DELAYS:
                     if delay:
                         sleep(delay)
-                    sale = checkout.process_payment(sale_id, owner_id=owner_id)
-                    payment = max(sale.payments, key=lambda item: item.attempt_number)
+                    sale = checkout.process_payment(
+                        sale_id,
+                        owner_id=owner_id,
+                        attempt_id=payment_attempt_id,
+                    )
+                    payment = next(
+                        item for item in sale.payments if item.id == payment_attempt_id
+                    )
                     provider_operation_id = payment.external_id
                     provider_status = payment.provider_metadata.get("provider_status")
                     _sync_operation(UUID(job_id), provider_operation_id)
@@ -103,6 +129,18 @@ def run_payment_job(job_id: str) -> str:
                     ):
                         final = "failed"
                         error = payment.error_message or "Payment outcome is ambiguous."
+                        manual_review = True
+                        break
+                    if (
+                        sale.status is SaleStatus.COMPLETED
+                        and payment.accounting_superseded
+                        and payment.external_id is None
+                    ):
+                        final = "failed"
+                        error = (
+                            "Emergency fallback is effective; payment command without a "
+                            "provider ID cannot be dispatched again."
+                        )
                         manual_review = True
                         break
             finally:
@@ -128,7 +166,7 @@ def run_payment_job(job_id: str) -> str:
     elif final == "completed":
         enqueue_sale_fiscalization(sale_id)
     logger.info(
-        "Payment job finished sale=%s job=%s attempt=%s aqsi_operation_id=%s "
+        "Payment job finished sale=%s job=%s attempt=%s provider_operation_id=%s "
         "provider_status=%s duration_ms=%.1f final_status=%s",
         sale_id,
         job_id,
@@ -141,7 +179,9 @@ def run_payment_job(job_id: str) -> str:
     return final
 
 
-def _claim_job(job_id: UUID) -> tuple[UUID, UUID, UUID, int, str | None] | None:
+def _claim_job(
+    job_id: UUID,
+) -> tuple[UUID, UUID, UUID, UUID | None, UUID, int, str | None] | None:
     with SessionLocal() as session:
         job = session.scalar(
             select(PaymentJob).where(PaymentJob.id == job_id).with_for_update(skip_locked=True)
@@ -153,12 +193,31 @@ def _claim_job(job_id: UUID) -> tuple[UUID, UUID, UUID, int, str | None] | None:
             or (job.next_retry_at is not None and _as_utc(job.next_retry_at) > now)
         ):
             return None
+        emergency_fallback = any(item.emergency_fallback for item in job.sale.payments)
+        if (
+            emergency_fallback
+            and job.payment_attempt.accounting_superseded
+            and job.payment_attempt.external_id is None
+        ):
+            job.status = PaymentJobStatus.FAILED
+            job.next_retry_at = None
+            job.last_error = (
+                "Emergency fallback recorded; payment command cannot be dispatched again."
+            )
+            _append_manual_review_event(session, job, job.last_error)
+            session.commit()
+            return None
         if job.payment_attempt.status is PaymentStatus.UNKNOWN and (
-            job.payment_attempt.external_id is None or job.attempt_count >= MAX_UNKNOWN_QUERY_RUNS
+            job.payment_attempt.external_id is None
+            or (
+                job.attempt_count >= MAX_UNKNOWN_QUERY_RUNS
+                and job.reconciliation_requested_at is None
+            )
         ):
             job.status = PaymentJobStatus.FAILED
             job.next_retry_at = None
             job.last_error = "Payment outcome requires manual review; automatic retry is blocked."
+            _append_manual_review_event(session, job, job.last_error)
             session.commit()
             return None
         integration_id = job.payment_attempt.integration_id
@@ -169,10 +228,27 @@ def _claim_job(job_id: UUID) -> tuple[UUID, UUID, UUID, int, str | None] | None:
         job.last_attempt_at = now
         job.next_retry_at = None
         job.last_error = None
+        if job.payment_attempt.external_id is None and job.dispatch_started_at is None:
+            job.dispatch_started_at = now
+            append_financial_event(
+                session,
+                sale_id=job.sale_id,
+                entity_type=FinancialEntityType.PAYMENT_JOB,
+                entity_id=job.id,
+                event_type=FinancialEventType.PAYMENT_DISPATCH_STARTED,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.WORKER,
+                previous_status=PaymentJobStatus.QUEUED.value,
+                new_status=PaymentJobStatus.PROCESSING.value,
+                provider=job.payment_attempt.provider,
+                metadata={"dispatch_started_at": now.isoformat()},
+            )
         result = (
             job.sale_id,
             job.sale.owner_id,
             integration_id,
+            job.payment_attempt.selected_fiscal_integration_id,
+            job.payment_attempt_id,
             job.attempt_count,
             job.payment_attempt.external_id,
         )
@@ -200,6 +276,32 @@ def _finish_job(job_id: UUID, status: str, error: str | None) -> None:
         job.last_error = error[:1000] if error else None
         job.next_retry_at = now + timedelta(seconds=5) if status == "queued" else None
         job.completed_at = now if status == "completed" else None
+        if job.reconciliation_requested_at is not None:
+            append_financial_event(
+                session,
+                sale_id=job.sale_id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=job.payment_attempt_id,
+                event_type=(
+                    FinancialEventType.RECONCILIATION_SUCCEEDED
+                    if status == "completed"
+                    else FinancialEventType.RECONCILIATION_INCONCLUSIVE
+                ),
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.WORKER,
+                previous_status=job.payment_attempt.status.value,
+                new_status=job.payment_attempt.status.value,
+                provider=job.payment_attempt.provider,
+                provider_operation_id=job.payment_attempt.external_id,
+                error_code=job.payment_attempt.error_code,
+                safe_message=error
+                or (
+                    "Provider status was checked successfully."
+                    if status == "completed"
+                    else "Provider operation is still pending."
+                ),
+            )
+            job.reconciliation_requested_at = None
         session.commit()
 
 
@@ -214,7 +316,24 @@ def _quarantine_job(job_id: UUID, error: str) -> None:
         job.next_retry_at = None
         job.completed_at = None
         job.payment_attempt.status = PaymentStatus.UNKNOWN
-        job.sale.status = SaleStatus.PAYMENT_PENDING
+        if not any(item.emergency_fallback for item in job.sale.payments):
+            job.sale.status = SaleStatus.PAYMENT_PENDING
+        if job.reconciliation_requested_at is not None:
+            append_financial_event(
+                session,
+                sale_id=job.sale_id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=job.payment_attempt_id,
+                event_type=FinancialEventType.RECONCILIATION_INCONCLUSIVE,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.WORKER,
+                provider=job.payment_attempt.provider,
+                provider_operation_id=job.payment_attempt.external_id,
+                error_code=job.payment_attempt.error_code,
+                safe_message=job.last_error,
+            )
+            job.reconciliation_requested_at = None
+        _append_manual_review_event(session, job, job.last_error)
         session.commit()
 
 
@@ -261,7 +380,9 @@ def recover_payment_jobs() -> int:
                     "Payment outcome requires manual review; automatic retry is blocked."
                 )
                 job.payment_attempt.status = PaymentStatus.UNKNOWN
-                job.sale.status = SaleStatus.PAYMENT_PENDING
+                if not any(item.emergency_fallback for item in job.sale.payments):
+                    job.sale.status = SaleStatus.PAYMENT_PENDING
+                _append_manual_review_event(session, job, job.last_error)
                 continue
             job.status = PaymentJobStatus.QUEUED
             job.next_retry_at = now
@@ -302,3 +423,21 @@ def ensure_payment_recovery_schedule(redis_connection: Redis) -> None:
             ),
         )
     recover_payment_jobs()
+
+
+def _append_manual_review_event(session: Session, job: PaymentJob, message: str) -> None:
+    append_financial_event(
+        session,
+        sale_id=job.sale_id,
+        entity_type=FinancialEntityType.PAYMENT_JOB,
+        entity_id=job.id,
+        event_type=FinancialEventType.MANUAL_REVIEW_REQUIRED,
+        correlation_id=job.correlation_id,
+        actor_type=FinancialActorType.SYSTEM,
+        previous_status=PaymentJobStatus.PROCESSING.value,
+        new_status=PaymentJobStatus.FAILED.value,
+        provider=job.payment_attempt.provider,
+        provider_operation_id=job.payment_attempt.external_id,
+        error_code=job.payment_attempt.error_code,
+        safe_message=message,
+    )

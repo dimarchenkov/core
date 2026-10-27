@@ -22,6 +22,8 @@ AQSI_CONFIGURATION_KEYS = frozenset(
         "default_group_name",
         "catalog_sync_enabled",
         "acquiring_mode",
+        "payment_enabled",
+        "fiscalization_enabled",
     }
 )
 
@@ -182,6 +184,12 @@ class IntegrationService:
             catalog_sync_enabled = configuration.get("catalog_sync_enabled")
             if catalog_sync_enabled is not None and not isinstance(catalog_sync_enabled, bool):
                 raise IntegrationConfigurationError("AQSI catalog_sync_enabled must be a boolean.")
+            for capability_flag in ("payment_enabled", "fiscalization_enabled"):
+                value = configuration.get(capability_flag)
+                if value is not None and not isinstance(value, bool):
+                    raise IntegrationConfigurationError(
+                        f"AQSI {capability_flag} must be a boolean."
+                    )
             tax_code = configuration.get("tax_code")
             if tax_code is not None and (
                 not isinstance(tax_code, int) or not 1 <= tax_code <= 10

@@ -331,6 +331,41 @@ def test_aqsi_catalog_sync_configuration_requires_boolean(
         )
 
 
+def test_checkout_capability_assignments_require_booleans(
+    session: Session,
+    admin: User,
+) -> None:
+    """Payment and fiscal provider selection stays explicit and unambiguous."""
+    service = IntegrationService(session)
+    integration = create_aqsi(service, admin)
+
+    updated = service.update(
+        integration.id,
+        IntegrationUpdate(
+            configuration={
+                **integration.configuration,
+                "payment_enabled": True,
+                "fiscalization_enabled": False,
+            }
+        ),
+        actor_id=admin.id,
+    )
+
+    assert updated.configuration["payment_enabled"] is True
+    assert updated.configuration["fiscalization_enabled"] is False
+    with pytest.raises(IntegrationConfigurationError, match="must be a boolean"):
+        service.update(
+            integration.id,
+            IntegrationUpdate(
+                configuration={
+                    **updated.configuration,
+                    "fiscalization_enabled": "yes",
+                }
+            ),
+            actor_id=admin.id,
+        )
+
+
 def test_admin_can_queue_full_aqsi_catalog_sync(
     session: Session,
     settings: Settings,

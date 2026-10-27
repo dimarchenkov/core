@@ -9,6 +9,7 @@ from redis.exceptions import RedisError
 from rq import Queue, Repeat
 from rq.job import JobStatus
 from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
 
 import core.identity.models  # noqa: F401
 from core.config import get_settings
@@ -16,7 +17,15 @@ from core.database import SessionLocal
 from core.integrations.checkout import CheckoutProviderFactory
 from core.jobs import CHECKOUT_QUEUE_NAME, get_checkout_queue
 from core.sales.checkout import CheckoutService
-from core.sales.enums import FiscalizationJobStatus, FiscalizationStatus, SaleStatus
+from core.sales.enums import (
+    FinancialActorType,
+    FinancialEntityType,
+    FinancialEventType,
+    FiscalizationJobStatus,
+    FiscalizationStatus,
+    SaleStatus,
+)
+from core.sales.financial_events import append_financial_event
 from core.sales.models import FiscalizationJob
 
 logger = logging.getLogger(__name__)
@@ -81,15 +90,25 @@ def run_fiscalization_job(job_id: str) -> str:
     claimed = _claim_job(UUID(job_id))
     if claimed is None:
         return "not_claimed"
-    sale_id, owner_id, integration_id, attempt, operation_id = claimed
+    (
+        sale_id,
+        owner_id,
+        payment_integration_id,
+        fiscal_integration_id,
+        attempt,
+        operation_id,
+    ) = claimed
     final = "queued"
     final_error: str | None = None
     manual_review = False
     try:
         with SessionLocal() as session:
-            binding = CheckoutProviderFactory(session, get_settings()).for_recovery(integration_id)
+            binding = CheckoutProviderFactory(session, get_settings()).for_recovery(
+                payment_integration_id=payment_integration_id,
+                fiscal_integration_id=fiscal_integration_id,
+            )
             try:
-                checkout = CheckoutService(session, binding)
+                checkout = CheckoutService(session, binding, actor_type=FinancialActorType.WORKER)
                 for delay in FISCALIZATION_POLL_DELAYS:
                     if delay:
                         sleep(delay)
@@ -145,7 +164,7 @@ def run_fiscalization_job(job_id: str) -> str:
             logger.warning("Fiscalization retry wakeup failed; sweep will recover job=%s", job_id)
     logger.info(
         "Fiscalization job finished sale=%s job=%s attempt=%s "
-        "aqsi_operation_id=%s duration_ms=%.1f status=%s",
+        "provider_operation_id=%s duration_ms=%.1f status=%s",
         sale_id,
         job_id,
         attempt,
@@ -156,7 +175,9 @@ def run_fiscalization_job(job_id: str) -> str:
     return final
 
 
-def _claim_job(job_id: UUID) -> tuple[UUID, UUID, UUID, int, str | None] | None:
+def _claim_job(
+    job_id: UUID,
+) -> tuple[UUID, UUID, UUID | None, UUID, int, str | None] | None:
     with SessionLocal() as session:
         job = session.scalar(
             select(FiscalizationJob)
@@ -173,13 +194,18 @@ def _claim_job(job_id: UUID) -> tuple[UUID, UUID, UUID, int, str | None] | None:
             return None
         fiscalization = job.sale.fiscalization
         if fiscalization.status is FiscalizationStatus.UNKNOWN and (
-            fiscalization.external_id is None or job.attempt_count >= MAX_UNKNOWN_QUERY_RUNS
+            fiscalization.external_id is None
+            or (
+                job.attempt_count >= MAX_UNKNOWN_QUERY_RUNS
+                and job.reconciliation_requested_at is None
+            )
         ):
             job.status = FiscalizationJobStatus.FAILED
             job.next_retry_at = None
             job.last_error = (
                 "Fiscalization outcome requires manual review; automatic retry is blocked."
             )
+            _append_manual_review_event(session, job, job.last_error)
             session.commit()
             return None
         job.status = FiscalizationJobStatus.PROCESSING
@@ -187,15 +213,36 @@ def _claim_job(job_id: UUID) -> tuple[UUID, UUID, UUID, int, str | None] | None:
         job.last_attempt_at = now
         job.next_retry_at = None
         job.last_error = None
+        if fiscalization.external_id is None and job.dispatch_started_at is None:
+            job.dispatch_started_at = now
+            append_financial_event(
+                session,
+                sale_id=job.sale_id,
+                entity_type=FinancialEntityType.FISCALIZATION_JOB,
+                entity_id=job.id,
+                event_type=FinancialEventType.FISCAL_DISPATCH_STARTED,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.WORKER,
+                previous_status=FiscalizationJobStatus.QUEUED.value,
+                new_status=FiscalizationJobStatus.PROCESSING.value,
+                provider=fiscalization.provider,
+                metadata={"dispatch_started_at": now.isoformat()},
+            )
         sale_id = job.sale_id
         owner_id = job.sale.owner_id
         integration_id = job.sale.fiscalization.integration_id
         if integration_id is None:
             raise RuntimeError("Fiscalization job has no Integration.")
+        payment = next(
+            item
+            for item in job.sale.payments
+            if item.id == job.sale.fiscalization.payment_attempt_id
+        )
         session.commit()
         return (
             sale_id,
             owner_id,
+            payment.integration_id,
             integration_id,
             job.attempt_count,
             job.sale.fiscalization.external_id,
@@ -205,8 +252,8 @@ def _claim_job(job_id: UUID) -> tuple[UUID, UUID, UUID, int, str | None] | None:
 def _sync_operation(job_id: str, operation_id: str | None) -> None:
     with SessionLocal() as session:
         job = session.get(FiscalizationJob, UUID(job_id))
-        if job is not None and operation_id and job.aqsi_operation_id != operation_id:
-            job.aqsi_operation_id = operation_id
+        if job is not None and operation_id and job.provider_operation_id != operation_id:
+            job.provider_operation_id = operation_id
             session.commit()
 
 
@@ -222,6 +269,33 @@ def _finish_job(job_id: UUID, status: str, error: str | None) -> None:
         job.last_error = error[:1000] if error else None
         job.next_retry_at = now + timedelta(seconds=5) if status == "queued" else None
         job.completed_at = now if status == "completed" else None
+        if job.reconciliation_requested_at is not None:
+            fiscalization = job.sale.fiscalization
+            append_financial_event(
+                session,
+                sale_id=job.sale_id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=fiscalization.id,
+                event_type=(
+                    FinancialEventType.RECONCILIATION_SUCCEEDED
+                    if status == "completed"
+                    else FinancialEventType.RECONCILIATION_INCONCLUSIVE
+                ),
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.WORKER,
+                previous_status=fiscalization.status.value,
+                new_status=fiscalization.status.value,
+                provider=fiscalization.provider,
+                provider_operation_id=fiscalization.external_id,
+                error_code=fiscalization.error_code,
+                safe_message=error
+                or (
+                    "Provider status was checked successfully."
+                    if status == "completed"
+                    else "Provider operation is still pending."
+                ),
+            )
+            job.reconciliation_requested_at = None
         if status == "queued":
             job.sale.status = SaleStatus.FISCALIZATION_PENDING
             if job.sale.fiscalization.status is FiscalizationStatus.FAILED:
@@ -249,6 +323,23 @@ def _quarantine_job(job_id: UUID, error: str) -> None:
         job.completed_at = None
         job.sale.fiscalization.status = FiscalizationStatus.UNKNOWN
         job.sale.status = SaleStatus.FISCALIZATION_PENDING
+        if job.reconciliation_requested_at is not None:
+            fiscalization = job.sale.fiscalization
+            append_financial_event(
+                session,
+                sale_id=job.sale_id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=fiscalization.id,
+                event_type=FinancialEventType.RECONCILIATION_INCONCLUSIVE,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.WORKER,
+                provider=fiscalization.provider,
+                provider_operation_id=fiscalization.external_id,
+                error_code=fiscalization.error_code,
+                safe_message=job.last_error,
+            )
+            job.reconciliation_requested_at = None
+        _append_manual_review_event(session, job, job.last_error)
         session.commit()
 
 
@@ -298,6 +389,7 @@ def recover_fiscalization_jobs() -> int:
                 )
                 fiscalization.status = FiscalizationStatus.UNKNOWN
                 job.sale.status = SaleStatus.FISCALIZATION_PENDING
+                _append_manual_review_event(session, job, job.last_error)
                 continue
             job.status = FiscalizationJobStatus.QUEUED
             job.next_retry_at = now
@@ -343,3 +435,22 @@ def ensure_fiscalization_recovery_schedule(redis_connection: object) -> None:
             ),
         )
     recover_fiscalization_jobs()
+
+
+def _append_manual_review_event(session: Session, job: FiscalizationJob, message: str) -> None:
+    fiscalization = job.sale.fiscalization
+    append_financial_event(
+        session,
+        sale_id=job.sale_id,
+        entity_type=FinancialEntityType.FISCALIZATION_JOB,
+        entity_id=job.id,
+        event_type=FinancialEventType.MANUAL_REVIEW_REQUIRED,
+        correlation_id=job.correlation_id,
+        actor_type=FinancialActorType.SYSTEM,
+        previous_status=FiscalizationJobStatus.PROCESSING.value,
+        new_status=FiscalizationJobStatus.FAILED.value,
+        provider=fiscalization.provider,
+        provider_operation_id=fiscalization.external_id,
+        error_code=fiscalization.error_code,
+        safe_message=message,
+    )

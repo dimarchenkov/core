@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from core.catalog.barcodes import BarcodeValidationError
@@ -18,6 +18,8 @@ from core.integrations.checkout import (
     CheckoutIntegrationUnavailableError,
     CheckoutProviderFactory,
 )
+from core.integrations.enums import IntegrationProvider
+from core.integrations.models import Integration
 from core.inventory.service import InventoryService
 from core.rental.enums import AssetPurpose
 from core.rental.models import RentalAssetRecord
@@ -29,21 +31,33 @@ from core.sales.checkout import (
 )
 from core.sales.enums import (
     CheckoutPaymentOption,
+    FinancialActorType,
+    FinancialEntityType,
+    FinancialEventType,
     FiscalizationJobStatus,
     FiscalizationStatus,
     PaymentJobStatus,
     PaymentStatus,
     SaleStatus,
 )
+from core.sales.financial_events import (
+    append_financial_event,
+    financial_event_exists,
+    list_financial_events,
+)
 from core.sales.fiscalization_jobs import enqueue_sale_fiscalization
-from core.sales.models import Fiscalization, FiscalizationJob, PaymentAttempt, Sale
+from core.sales.health import collect_checkout_worker_health
+from core.sales.models import Fiscalization, FiscalizationJob, PaymentAttempt, PaymentJob, Sale
 from core.sales.payment_jobs import enqueue_sale_payment
 from core.sales.providers import CheckoutProviderBinding
+from core.sales.repository import SaleRepository
 from core.sales.schemas import (
     CheckoutContextRead,
     CheckoutHealthRead,
+    CheckoutOperationDetailRead,
     CheckoutStartRequest,
     CheckoutStockWarningRead,
+    EmergencyFallbackRequest,
     SaleDiscountUpdate,
     SaleItemAddBarcode,
     SaleItemAddManual,
@@ -95,18 +109,24 @@ def _checkout_binding(
             return None
         if sale.fiscalization.integration_id is None:
             raise CheckoutIntegrationUnavailableError("Не найдена касса для фискального чека")
-        return factory.for_recovery(sale.fiscalization.integration_id)
+        latest = max(sale.payments, key=lambda item: item.attempt_number)
+        return factory.for_recovery(
+            payment_integration_id=latest.integration_id,
+            fiscal_integration_id=sale.fiscalization.integration_id,
+        )
     latest = max(sale.payments, key=lambda item: item.attempt_number)
     if not latest.fiscalization_required:
         return None
-    if latest.integration_id is None:
+    fiscal_integration_id = latest.selected_fiscal_integration_id
+    if latest.integration_id is None and fiscal_integration_id is None:
         return factory.for_new_checkout()
-    return factory.for_recovery(latest.integration_id)
+    return factory.for_recovery(
+        payment_integration_id=latest.integration_id,
+        fiscal_integration_id=fiscal_integration_id,
+    )
 
 
-def _sellable_balances(
-    session: Session, variant_ids: list[UUIDv7]
-) -> dict[UUIDv7, Decimal]:
+def _sellable_balances(session: Session, variant_ids: list[UUIDv7]) -> dict[UUIDv7, Decimal]:
     """Apply the established sale read-model rule without consuming RentalAsset identity."""
     balances = InventoryService(session).get_balances(variant_ids)
     if not variant_ids:
@@ -120,7 +140,9 @@ def _sellable_balances(
                 RentalAssetRecord.deleted_at.is_(None),
             )
             .group_by(RentalAssetRecord.variant_id)
-        ).tuples().all()
+        )
+        .tuples()
+        .all()
     )
     return {
         variant_id: balance - reserved.get(variant_id, 0)
@@ -149,6 +171,7 @@ def list_draft_sales(
 @router.get("/operations/history", response_model=list[SaleRead])
 def list_checkout_operations(
     session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     current_user: Annotated[User, Depends(get_current_user)],
     state: str = Query(default="all", pattern="^(all|attention|pending|failed|completed)$"),
     date_from: datetime | None = None,
@@ -166,12 +189,49 @@ def list_checkout_operations(
     if date_to is not None:
         statement = statement.where(Sale.created_at <= date_to)
     if state == "attention":
+        checked_at = datetime.now(UTC)
+        queued_before = checked_at - timedelta(
+            seconds=settings.checkout_queued_job_stale_seconds
+        )
+        processing_before = checked_at - timedelta(
+            seconds=settings.checkout_processing_job_stale_seconds
+        )
         statement = statement.where(
-            Sale.payments.any(
-                PaymentAttempt.status.in_({PaymentStatus.PENDING, PaymentStatus.UNKNOWN})
-                & PaymentAttempt.provider_metadata[
-                    "accounting_superseded"
-                ].as_boolean().is_(True)
+            or_(
+                Sale.payments.any(PaymentAttempt.status == PaymentStatus.UNKNOWN),
+                Sale.fiscalization.has(Fiscalization.status == FiscalizationStatus.UNKNOWN),
+                Sale.fiscalization.has(
+                    (Fiscalization.status == FiscalizationStatus.FAILED)
+                    & func.coalesce(
+                        Fiscalization.provider_metadata[
+                            "operator_dismissed"
+                        ].as_boolean(),
+                        False,
+                    ).is_(False)
+                ),
+                Sale.payments.any(
+                    PaymentAttempt.status.in_({PaymentStatus.PENDING, PaymentStatus.UNKNOWN})
+                    & PaymentAttempt.provider_metadata[
+                        "accounting_superseded"
+                    ].as_boolean().is_(True)
+                ),
+                Sale.payments.any(
+                    PaymentAttempt.provider_metadata[
+                        "late_provider_approval_detected"
+                    ].as_boolean().is_(True)
+                ),
+                Sale.payment_jobs.any(
+                    ((PaymentJob.status == PaymentJobStatus.QUEUED)
+                    & (PaymentJob.created_at < queued_before))
+                    | ((PaymentJob.status == PaymentJobStatus.PROCESSING)
+                    & (PaymentJob.updated_at < processing_before))
+                ),
+                Sale.fiscalization_job.has(
+                    ((FiscalizationJob.status == FiscalizationJobStatus.QUEUED)
+                    & (FiscalizationJob.created_at < queued_before))
+                    | ((FiscalizationJob.status == FiscalizationJobStatus.PROCESSING)
+                    & (FiscalizationJob.updated_at < processing_before))
+                ),
             )
         )
     elif state == "pending":
@@ -198,10 +258,9 @@ def checkout_health(
     settings: Annotated[Settings, Depends(get_settings)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> CheckoutHealthRead:
-    """Combine AQSI Cloud reachability and unresolved-operation signals."""
-    del current_user
+    """Keep provider, worker and operator-owned operation health distinct."""
     checked_at = datetime.now(UTC)
-    active_payment = session.scalar(
+    global_active_payment = session.scalar(
         select(func.count(PaymentAttempt.id)).where(
             PaymentAttempt.status.in_({PaymentStatus.PENDING, PaymentStatus.UNKNOWN}),
             func.coalesce(
@@ -209,57 +268,316 @@ def checkout_health(
             ).is_(False),
         )
     )
-    active_fiscal = session.scalar(
+    global_active_fiscal = session.scalar(
         select(func.count(FiscalizationJob.id)).where(
             FiscalizationJob.status.in_(
                 {FiscalizationJobStatus.QUEUED, FiscalizationJobStatus.PROCESSING}
             )
         )
     )
-    manual_review = bool(session.scalar(
-        select(func.count(PaymentAttempt.id)).where(
+    local_active_payment = session.scalar(
+        select(func.count(PaymentAttempt.id))
+        .join(Sale, Sale.id == PaymentAttempt.sale_id)
+        .where(
+            Sale.owner_id == current_user.id,
             PaymentAttempt.status.in_({PaymentStatus.PENDING, PaymentStatus.UNKNOWN}),
-            PaymentAttempt.provider_metadata["accounting_superseded"].as_boolean().is_(True),
+            func.coalesce(
+                PaymentAttempt.provider_metadata["accounting_superseded"].as_boolean(), False
+            ).is_(False),
         )
-    ))
-    active = bool(active_payment or active_fiscal)
+    )
+    local_active_fiscal = session.scalar(
+        select(func.count(FiscalizationJob.id))
+        .join(Sale, Sale.id == FiscalizationJob.sale_id)
+        .where(
+            Sale.owner_id == current_user.id,
+            FiscalizationJob.status.in_(
+                {FiscalizationJobStatus.QUEUED, FiscalizationJobStatus.PROCESSING}
+            ),
+        )
+    )
+    manual_review = bool(
+        session.scalar(
+            select(func.count(PaymentAttempt.id)).where(
+                PaymentAttempt.sale.has(Sale.owner_id == current_user.id),
+                (
+                    (PaymentAttempt.status == PaymentStatus.UNKNOWN)
+                    | (
+                        PaymentAttempt.status.in_({PaymentStatus.PENDING, PaymentStatus.UNKNOWN})
+                        & PaymentAttempt.provider_metadata[
+                            "accounting_superseded"
+                        ].as_boolean().is_(True)
+                    )
+                    | PaymentAttempt.provider_metadata[
+                        "late_provider_approval_detected"
+                    ].as_boolean().is_(True)
+                ),
+            )
+        )
+    ) or bool(
+        session.scalar(
+            select(func.count(Fiscalization.id)).where(
+                Fiscalization.sale.has(Sale.owner_id == current_user.id),
+                Fiscalization.status == FiscalizationStatus.UNKNOWN,
+            )
+        )
+    )
+    failed_fiscalizations = int(
+        session.scalar(
+            select(func.count(Fiscalization.id)).where(
+                Fiscalization.sale.has(Sale.owner_id == current_user.id),
+                Fiscalization.status == FiscalizationStatus.FAILED,
+                func.coalesce(
+                    Fiscalization.provider_metadata["operator_dismissed"].as_boolean(),
+                    False,
+                ).is_(False),
+            )
+        )
+        or 0
+    )
+    global_active = bool(global_active_payment or global_active_fiscal)
+    local_active = bool(local_active_payment or local_active_fiscal)
+    worker = collect_checkout_worker_health(session, settings, now=checked_at)
+    worker_attention = not worker.running or worker.stalled_jobs > 0
+    common = {
+        "active_operation": local_active,
+        "local_active_operation": local_active,
+        "global_active_operation": global_active,
+        "manual_review_required": manual_review,
+        "worker_running": worker.running,
+        "worker_last_heartbeat": worker.last_heartbeat,
+        "queued_job_count": worker.queued_jobs,
+        "processing_job_count": worker.processing_jobs,
+        "oldest_queued_job_age_seconds": worker.oldest_queued_age_seconds,
+        "stalled_job_count": worker.stalled_jobs,
+        "last_worker_error": worker.last_error,
+        "failed_fiscalization_count": failed_fiscalizations,
+    }
     try:
-        binding = CheckoutProviderFactory(session, settings).for_new_checkout()
+        binding = CheckoutProviderFactory(session, settings).for_health_check()
     except CheckoutIntegrationUnavailableError as exc:
         return CheckoutHealthRead(
             status="degraded",
             api_reachable=None,
             configured=False,
-            active_operation=active,
-            manual_review_required=manual_review,
             message=str(exc),
             checked_at=checked_at,
+            **common,
         )
     try:
-        health = binding.payment.check_health()
-        overall = "attention" if active or manual_review else (
-            "healthy" if health.reachable else "degraded"
+        payment_configured = binding.payment is not None
+        fiscal_configured = binding.fiscal is not None
+        payment_health = binding.payment.check_health() if binding.payment is not None else None
+        fiscal_health = (
+            payment_health
+            if binding.fiscal is binding.payment
+            else binding.fiscal.check_health()
+            if binding.fiscal is not None
+            else None
+        )
+        payment_reachable = payment_health.reachable if payment_health is not None else None
+        fiscal_reachable = fiscal_health.reachable if fiscal_health is not None else None
+        reachable_values = [
+            value for value in (payment_reachable, fiscal_reachable) if value is not None
+        ]
+        api_reachable = (
+            all(reachable_values)
+            if reachable_values and payment_configured and fiscal_configured
+            else False
+            if False in reachable_values
+            else None
+        )
+        device_values = [
+            value
+            for value in (
+                payment_health.physical_device_ready if payment_health is not None else None,
+                fiscal_health.physical_device_ready if fiscal_health is not None else None,
+            )
+            if value is not None
+        ]
+        physical_device_ready = (
+            False if False in device_values else True if device_values else None
+        )
+        configured = payment_configured and fiscal_configured
+        overall = (
+            "attention"
+            if local_active
+            or manual_review
+            or failed_fiscalizations
+            or worker_attention
+            else "healthy"
+            if configured and api_reachable is True
+            else "degraded"
         )
         message = (
-            "Продажи сверены. Старая операция AQSI требует проверки."
-            if manual_review else
-            "Есть незавершённая операция. CORE продолжает проверку на сервере."
-            if active
-            else health.message
+            "Есть операция, которая требует ручной проверки."
+            if manual_review
+            else "Есть оплата с подтверждённым результатом, но чек не сформирован."
+            if failed_fiscalizations
+            else "Фоновая обработка не отвечает. Новые команды не запускайте."
+            if not worker.running
+            else "Есть зависшая фоновая операция."
+            if worker.stalled_jobs
+            else "Есть незавершённая операция. CORE продолжает проверку на сервере."
+            if local_active
+            else "Не настроен провайдер оплаты."
+            if not payment_configured
+            else "Не настроен провайдер фискализации."
+            if not fiscal_configured
+            else "Провайдер оплаты недоступен."
+            if payment_reachable is False
+            else "Провайдер фискализации недоступен."
+            if fiscal_reachable is False
+            else "Физическая касса сообщает о недоступности."
+            if physical_device_ready is False
+            else "Провайдеры доступны; готовность физической кассы API не подтверждает."
+            if physical_device_ready is None
+            else "Провайдеры и физическая касса доступны."
         )
         return CheckoutHealthRead(
             status=overall,
-            api_reachable=health.reachable,
-            configured=True,
-            active_operation=active,
-            manual_review_required=manual_review,
+            api_reachable=api_reachable,
+            payment_provider_reachable=payment_reachable,
+            fiscal_provider_reachable=fiscal_reachable,
+            physical_device_ready=physical_device_ready,
+            configured=configured,
+            payment_provider_configured=payment_configured,
+            fiscal_provider_configured=fiscal_configured,
             message=message,
-            checked_at=datetime.fromisoformat(health.checked_at),
+            checked_at=checked_at,
             integration_name=binding.integration_name,
+            payment_integration_name=(
+                binding.integration_name if payment_configured else None
+            ),
+            fiscal_integration_name=(
+                binding.resolved_fiscal_integration_name if fiscal_configured else None
+            ),
+            **common,
         )
     finally:
         if binding.close is not None:
             binding.close()
+
+
+@router.get("/operations/{sale_id}/detail", response_model=CheckoutOperationDetailRead)
+def checkout_operation_detail(
+    sale_id: UUIDv7,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    event_limit: int = Query(default=100, ge=1, le=200),
+    event_before: datetime | None = None,
+) -> CheckoutOperationDetailRead:
+    """Return bounded diagnostics only after enforcing Sale ownership."""
+    sale = _execute(lambda: SaleService(session).get_sale(sale_id, owner_id=current_user.id))
+    events = list_financial_events(session, sale_id=sale.id, limit=event_limit, before=event_before)
+    payment = max(sale.payments, key=lambda item: item.attempt_number) if sale.payments else None
+    fallback = next((item for item in reversed(sale.payments) if item.emergency_fallback), None)
+    duplicate_payment = next(
+        (item for item in reversed(sale.payments) if item.duplicate_payment_risk),
+        None,
+    )
+    review_payment = max(
+        (
+            item
+            for item in sale.payments
+            if item.status is PaymentStatus.UNKNOWN
+            or (
+                item.accounting_superseded
+                and item.status in {PaymentStatus.PENDING, PaymentStatus.UNKNOWN}
+            )
+            or item.duplicate_payment_risk
+        ),
+        key=lambda item: item.attempt_number,
+        default=None,
+    )
+    fiscal = sale.fiscalization
+    manual_review = bool(
+        review_payment or (fiscal and fiscal.status is FiscalizationStatus.UNKNOWN)
+    )
+    emergency_eligible = bool(
+        fallback is None
+        and sale.status is SaleStatus.PAYMENT_PENDING
+        and payment is not None
+        and payment.payment_method.value == "card"
+        and payment.status in {PaymentStatus.PENDING, PaymentStatus.UNKNOWN}
+        and fiscal is None
+        and (current_user.is_admin or current_user.is_superuser)
+    )
+    active = sale.status in {SaleStatus.PAYMENT_PENDING, SaleStatus.FISCALIZATION_PENDING}
+    recovery_state = (
+        "duplicate_payment_risk"
+        if duplicate_payment
+        else "manual_review_required"
+        if manual_review
+        else "external_pos_completed"
+        if fallback
+        else "processing"
+        if active
+        else "completed"
+        if sale.status is SaleStatus.COMPLETED
+        else "failed"
+        if sale.status in {SaleStatus.PAYMENT_FAILED, SaleStatus.FISCALIZATION_FAILED}
+        else "idle"
+    )
+    instruction = (
+        "Возможное двойное списание: проверьте провайдера и примите отдельное решение "
+        "о возврате."
+        if duplicate_payment
+        else "Результат исходной операции неизвестен. Проверьте её у провайдера."
+        if fallback
+        else (
+            "Результат операции неизвестен. Не повторяйте списание без проверки "
+            "записей провайдера."
+        )
+        if manual_review
+        else None
+    )
+    integration_id = (
+        review_payment.integration_id
+        if review_payment is not None and review_payment.integration_id is not None
+        else fiscal.integration_id
+        if fiscal is not None and fiscal.integration_id is not None
+        else payment.integration_id
+        if payment
+        else None
+    )
+    integration = session.get(Integration, integration_id) if integration_id else None
+    provider_identity = None
+    if integration is not None:
+        device_id = integration.configuration.get("device_id")
+        provider_identity = (
+            f"{integration.name} · устройство {device_id}" if device_id else integration.name
+        )
+    correlation_ids = list(
+        dict.fromkeys(
+            [
+                *(job.correlation_id for job in sale.payment_jobs),
+                *([sale.fiscalization_job.correlation_id] if sale.fiscalization_job else []),
+            ]
+        )
+    )
+    provider_operation_ids = list(
+        dict.fromkeys(
+            [
+                *(item.external_id for item in sale.payments if item.external_id),
+                *([fiscal.external_id] if fiscal and fiscal.external_id else []),
+            ]
+        )
+    )
+    return CheckoutOperationDetailRead(
+        sale=SaleRead.model_validate(sale),
+        events=list(events),
+        recovery_state=recovery_state,
+        manual_review_required=manual_review,
+        manual_review_payment_id=review_payment.id if review_payment else None,
+        emergency_fallback_recorded=fallback is not None,
+        emergency_fallback_eligible=emergency_eligible,
+        duplicate_payment_risk=duplicate_payment is not None,
+        operator_instruction=instruction,
+        provider_identity=provider_identity,
+        correlation_ids=correlation_ids,
+        provider_operation_ids=provider_operation_ids,
+    )
 
 
 @router.post("/operations/{sale_id}/reconcile", response_model=SaleRead)
@@ -269,37 +587,218 @@ def reconcile_checkout_operation(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Sale:
     """Requeue read-only provider reconciliation without creating a new charge."""
-    sale = _execute(
-        lambda: SaleService(session).get_sale(sale_id, owner_id=current_user.id)
-    )
+    sale = SaleRepository(session).get_owned_for_update(sale_id, current_user.id)
+    if sale is None:
+        raise HTTPException(status_code=404, detail="Sale not found.")
     queued = False
-    if sale.status is SaleStatus.PAYMENT_PENDING and sale.payments:
-        payment = max(sale.payments, key=lambda item: item.attempt_number)
+    payment_reconciliation = False
+    fallback = next((item for item in reversed(sale.payments) if item.emergency_fallback), None)
+    fallback_original = max(
+        (
+            item
+            for item in sale.payments
+            if item.accounting_superseded
+            and not item.emergency_fallback
+            and item.status in {PaymentStatus.PENDING, PaymentStatus.UNKNOWN}
+        ),
+        key=lambda item: item.attempt_number,
+        default=None,
+    )
+    if (sale.status is SaleStatus.PAYMENT_PENDING and sale.payments) or (
+        fallback is not None and fallback_original is not None
+    ):
+        payment = fallback_original or max(
+            sale.payments, key=lambda item: item.attempt_number
+        )
+        payment_reconciliation = True
         job = payment.job
         if job is None:
             raise HTTPException(status_code=409, detail="Задание проверки оплаты отсутствует")
-        if payment.external_id is None and payment.status is PaymentStatus.UNKNOWN:
+        if payment.external_id is None:
+            _record_missing_provider_id_review(
+                session,
+                sale=sale,
+                entity_id=payment.id,
+                correlation_id=job.correlation_id,
+                current_user=current_user,
+                provider=payment.provider,
+                previous_status=payment.status.value,
+                message="Идентификатор провайдера отсутствует; автоматическая сверка невозможна.",
+                instruction="Не повторяйте списание без проверки записей провайдера.",
+            )
+            session.commit()
             raise HTTPException(
                 status_code=409,
-                detail="Идентификатор AQSI неизвестен; повторная оплата заблокирована",
+                detail="Идентификатор провайдера неизвестен; повторная оплата заблокирована",
             )
-        job.status = PaymentJobStatus.QUEUED
-        job.next_retry_at = datetime.now(UTC)
-        job.last_error = None
-        queued = True
+        if job.status is PaymentJobStatus.PROCESSING:
+            session.commit()
+            return sale
+        if job.status is PaymentJobStatus.QUEUED:
+            if job.reconciliation_requested_at is not None:
+                session.commit()
+                return sale
+            queued = True
+            job.next_retry_at = datetime.now(UTC)
+            job.reconciliation_requested_at = datetime.now(UTC)
+            append_financial_event(
+                session,
+                sale_id=sale.id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=payment.id,
+                event_type=FinancialEventType.RECONCILIATION_REQUESTED,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.OPERATOR,
+                actor_id=current_user.id,
+                previous_status=PaymentJobStatus.QUEUED.value,
+                new_status=PaymentJobStatus.QUEUED.value,
+                provider=payment.provider,
+                provider_operation_id=payment.external_id,
+            )
+        else:
+            previous_status = job.status
+            job.status = PaymentJobStatus.QUEUED
+            job.next_retry_at = datetime.now(UTC)
+            job.reconciliation_requested_at = datetime.now(UTC)
+            job.last_error = None
+            append_financial_event(
+                session,
+                sale_id=sale.id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=payment.id,
+                event_type=FinancialEventType.RECONCILIATION_REQUESTED,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.OPERATOR,
+                actor_id=current_user.id,
+                previous_status=previous_status.value,
+                new_status=PaymentJobStatus.QUEUED.value,
+                provider=payment.provider,
+                provider_operation_id=payment.external_id,
+            )
+            queued = True
     elif sale.status is SaleStatus.FISCALIZATION_PENDING and sale.fiscalization_job:
-        sale.fiscalization_job.status = FiscalizationJobStatus.QUEUED
-        sale.fiscalization_job.next_retry_at = datetime.now(UTC)
-        sale.fiscalization_job.last_error = None
-        queued = True
+        job = sale.fiscalization_job
+        fiscal = sale.fiscalization
+        if fiscal is None or fiscal.external_id is None:
+            correlation_id = job.correlation_id
+            _record_missing_provider_id_review(
+                session,
+                sale=sale,
+                entity_id=fiscal.id if fiscal else job.id,
+                correlation_id=correlation_id,
+                current_user=current_user,
+                provider=fiscal.provider if fiscal else None,
+                previous_status=fiscal.status.value if fiscal else None,
+                message="Идентификатор чека отсутствует; автоматическая сверка невозможна.",
+                instruction="Не создавайте новый чек без проверки записей провайдера.",
+            )
+            session.commit()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Идентификатор провайдера неизвестен; повторное создание чека заблокировано"
+                ),
+            )
+        if job.status is FiscalizationJobStatus.PROCESSING:
+            session.commit()
+            return sale
+        if job.status is FiscalizationJobStatus.QUEUED:
+            if job.reconciliation_requested_at is not None:
+                session.commit()
+                return sale
+            queued = True
+            job.reconciliation_requested_at = datetime.now(UTC)
+            append_financial_event(
+                session,
+                sale_id=sale.id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=fiscal.id,
+                event_type=FinancialEventType.RECONCILIATION_REQUESTED,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.OPERATOR,
+                actor_id=current_user.id,
+                previous_status=FiscalizationJobStatus.QUEUED.value,
+                new_status=FiscalizationJobStatus.QUEUED.value,
+                provider=fiscal.provider,
+                provider_operation_id=fiscal.external_id,
+            )
+        else:
+            previous_status = job.status
+            job.status = FiscalizationJobStatus.QUEUED
+            job.next_retry_at = datetime.now(UTC)
+            job.reconciliation_requested_at = datetime.now(UTC)
+            job.last_error = None
+            append_financial_event(
+                session,
+                sale_id=sale.id,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=fiscal.id,
+                event_type=FinancialEventType.RECONCILIATION_REQUESTED,
+                correlation_id=job.correlation_id,
+                actor_type=FinancialActorType.OPERATOR,
+                actor_id=current_user.id,
+                previous_status=previous_status.value,
+                new_status=FiscalizationJobStatus.QUEUED.value,
+                provider=fiscal.provider,
+                provider_operation_id=fiscal.external_id,
+            )
+            queued = True
     if not queued:
         raise HTTPException(status_code=409, detail="Операция не требует сверки")
     session.commit()
-    if sale.status is SaleStatus.PAYMENT_PENDING:
+    if payment_reconciliation:
         enqueue_sale_payment(sale.id)
     else:
         enqueue_sale_fiscalization(sale.id)
     return sale
+
+
+def _record_missing_provider_id_review(
+    session: Session,
+    *,
+    sale: Sale,
+    entity_id: UUIDv7,
+    correlation_id: str,
+    current_user: User,
+    provider: IntegrationProvider | None,
+    previous_status: str | None,
+    message: str,
+    instruction: str,
+) -> None:
+    """Persist one bounded manual-review marker for a command that cannot be queried."""
+    if financial_event_exists(
+        session,
+        correlation_id=correlation_id,
+        event_type=FinancialEventType.MANUAL_REVIEW_REQUIRED,
+    ):
+        return
+    append_financial_event(
+        session,
+        sale_id=sale.id,
+        entity_type=FinancialEntityType.RECONCILIATION,
+        entity_id=entity_id,
+        event_type=FinancialEventType.RECONCILIATION_INCONCLUSIVE,
+        correlation_id=correlation_id,
+        actor_type=FinancialActorType.OPERATOR,
+        actor_id=current_user.id,
+        previous_status=previous_status,
+        new_status=previous_status,
+        provider=provider,
+        error_code="missing_provider_operation_id",
+        safe_message=message,
+    )
+    append_financial_event(
+        session,
+        sale_id=sale.id,
+        entity_type=FinancialEntityType.RECONCILIATION,
+        entity_id=entity_id,
+        event_type=FinancialEventType.MANUAL_REVIEW_REQUIRED,
+        correlation_id=correlation_id,
+        actor_type=FinancialActorType.OPERATOR,
+        actor_id=current_user.id,
+        provider=provider,
+        safe_message=instruction,
+    )
 
 
 @router.post("/auto/items/by-variant", response_model=SaleRead, status_code=status.HTTP_201_CREATED)
@@ -373,6 +872,18 @@ def checkout_context(
             integration_id=binding.integration_id,
             integration_name=binding.integration_name,
             provider_name=binding.provider_display_name,
+            payment_integration_id=(
+                binding.integration_id if binding.payment is not None else None
+            ),
+            payment_integration_name=(
+                binding.integration_name if binding.payment is not None else None
+            ),
+            payment_provider_name=(
+                binding.provider_display_name if binding.payment is not None else None
+            ),
+            fiscal_integration_id=binding.resolved_fiscal_integration_id,
+            fiscal_integration_name=binding.resolved_fiscal_integration_name,
+            fiscal_provider_name=binding.resolved_fiscal_provider_display_name,
             acquiring_label=binding.payment_display_name,
             fiscalization_available=True,
             stock_warnings=warnings,
@@ -442,6 +953,31 @@ def retry_fiscalization(
     return _run_checkout(session, settings, sale_id, current_user.id, "retry_fiscalization")
 
 
+@router.post("/{sale_id}/checkout/external-pos", response_model=SaleRead)
+def confirm_external_pos_payment(
+    sale_id: UUIDv7,
+    data: EmergencyFallbackRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Sale:
+    """Record an administrator-confirmed payment and receipt on the physical POS."""
+    if not (current_user.is_admin or current_user.is_superuser):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Для аварийного подтверждения требуются права администратора.",
+        )
+    try:
+        return CheckoutService(session, None).confirm_external_pos_payment(
+            sale_id,
+            owner_id=current_user.id,
+            risk_acknowledged=data.risk_acknowledged,
+        )
+    except SaleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
+    except CheckoutStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _run_checkout(
     session: Session,
     settings: Settings,
@@ -458,11 +994,8 @@ def _run_checkout(
             session,
             settings,
             sale,
-            for_new=command in {"start", "retry_payment"}
-            and sale.status is SaleStatus.DRAFT,
-            payment_option=(
-                payment_option if command in {"start", "retry_payment"} else None
-            ),
+            for_new=command in {"start", "retry_payment"} and sale.status is SaleStatus.DRAFT,
+            payment_option=(payment_option if command in {"start", "retry_payment"} else None),
         )
     except SaleNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
@@ -559,9 +1092,7 @@ def update_discount(
 ) -> Sale:
     """Set the authoritative percentage discount on one owned DRAFT Sale."""
     return _execute(
-        lambda: service.set_discount(
-            sale_id, data.discount_value, owner_id=current_user.id
-        )
+        lambda: service.set_discount(sale_id, data.discount_value, owner_id=current_user.id)
     )
 
 
