@@ -96,11 +96,25 @@ idempotency identity и результат. `CARD` использует acquirin
 запрещает слепую новую оплату. `fiscalization_required` фиксирует выбор конкретной продажи;
 для CARD он всегда `true`.
 
+Для асинхронного checkout PaymentAttempt также фиксирует выбранную FiscalProvider Integration в
+provider-neutral metadata. Это позволяет PaymentProvider и FiscalProvider быть разными, не меняя
+frozen сумму, payment state machine или исторические строки, где обе роли выполняла одна касса.
+
+Аварийное «Оплачено на кассе» создаёт отдельный эффективный `CASH`-факт с источником
+`EXTERNAL_POS` и подтверждением оператора. Исходная CARD-попытка не удаляется и не меняет свой
+неизвестный результат только из-за ручного подтверждения; её поздний provider outcome остаётся
+предметом сверки. Для учёта Sale эффективен ровно один PaymentAttempt.
+
 ## Fiscalization
 
 Отдельный факт обработки чека по SaleItem snapshots. Required-варианты используют собственную
 Integration/FiscalProvider; явный cash-without-receipt создаёт `SKIPPED` без внешнего вызова.
+PaymentProvider и FiscalProvider выбираются независимо; Fiscalization хранит собственную
+Integration и не выводит её из provider оплаты после создания.
 Состояние и retry не изменяют успешный PaymentAttempt и не создают повторные Inventory movements.
+При аварийном внешнем платеже `SKIPPED` означает, что CORE намеренно не создавал второй чек,
+поскольку оператор подтвердил уже сформированный чек на физической кассе; это не равнозначно
+обычной продаже «без чека».
 
 ## SaleItem
 

@@ -137,6 +137,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .button.secondary:hover { background: #dcd8cc; }
 .button.ghost { min-height: 40px; padding: 8px 11px; color: var(--muted); background: transparent; }
 .button.danger { color: var(--red); background: #f7e5e2; }
+.button.warning { color: #fff; background: #9a6500; }
+.button.warning:hover { background: #7d5200; }
 .button.compact { min-height: 38px; padding: 7px 11px; border-radius: 11px; }
 
 .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 18px 0; }
@@ -673,6 +675,8 @@ body.catalog-drawer-open { overflow: hidden; }
 .checkout-method-note { grid-column: 1 / -1; }
 .checkout-warnings { padding: 12px; color: #744f0b; background: #fff2cf; border-radius: 12px; }
 .checkout-warnings p { margin: 5px 0 0; }
+.emergency-pos-warning { display: grid; gap: 8px; padding: 14px; color: #70421f; background: #fff2dd; border: 1px solid #e0b06c; border-radius: 13px; }
+.emergency-pos-warning p { margin: 0; }
 .sale-cancelled-note { margin: 0; padding: 13px 15px; color: var(--red); background: #f7e5e2; border-radius: 14px; }
 .sale-cart.cancelled { opacity: .88; }
 .sale-empty p { margin-bottom: 0; }
@@ -897,4 +901,16 @@ body.catalog-drawer-open { overflow: hidden; }
 .operation-card { display: grid; grid-template-columns: minmax(10rem, 1fr) minmax(12rem, 2fr) auto; gap: 1rem; align-items: center; padding: 1rem; border: 1px solid #ded9ca; border-radius: 1rem; background: #fffdfa; }
 .operation-card-attention { border-color: #d3a947; background: #fff9e9; }
 .operation-card > div { display: grid; gap: .3rem; }
+.operation-health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .75rem; margin-bottom: 1rem; }
+.operation-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; margin-bottom: 1rem; }
+.operation-health-grid article, .operation-detail-grid article { display: grid; gap: .3rem; min-height: 5.5rem; padding: 1rem; border: 1px solid #ded9ca; border-radius: 1rem; background: #fffdfa; }
+.operation-health-message { margin: -.25rem 0 1rem; color: var(--muted, #69736d); }
+.operation-identifiers, .operation-error, .financial-timeline { margin-top: 1rem; padding: 1rem; border: 1px solid #ded9ca; border-radius: 1rem; background: #fffdfa; }
+.operation-identifier { display: grid; grid-template-columns: minmax(9rem, auto) minmax(0, 1fr) auto; align-items: center; gap: .75rem; padding: .5rem 0; }
+.operation-identifier code, .financial-event code { overflow-wrap: anywhere; }
+.financial-timeline ol { display: grid; gap: .75rem; margin: 1rem 0 0; padding: 0; list-style: none; }
+.financial-event { display: grid; grid-template-columns: 11rem minmax(0, 1fr); gap: 1rem; padding-top: .75rem; border-top: 1px solid #ece7da; }
+.financial-event > div { display: grid; gap: .25rem; }
+.financial-event p { margin: 0; }
 @media (max-width: 700px) { .checkout-health { grid-template-columns: 2rem minmax(0, 1fr) auto; min-height: 5.5rem; } .checkout-health-context { grid-column: 2 / -1; white-space: normal; } .operation-card { grid-template-columns: 1fr; } .sale-heading-actions { width: 100%; } }
+@media (max-width: 700px) { .operation-health-grid, .operation-detail-grid { grid-template-columns: 1fr; } .operation-identifier { grid-template-columns: 1fr auto; } .operation-identifier span { grid-column: 1 / -1; } .financial-event { grid-template-columns: 1fr; } }

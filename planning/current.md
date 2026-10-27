@@ -42,6 +42,12 @@ Deposit UX correction отделяет вычисляемый `required_deposit_
 **Sprint 5.20 — Sales Analytics: Revenue Dashboard: implemented, real-data and device UAT
 pending.**
 
+**Phase C — Emergency Checkout Fallback: implemented, physical UAT pending.**
+
+**Phase D — Payment & Fiscal Provider Isolation: implemented, physical UAT pending.**
+
+**Phase E — Sales Operational Reliability & UX: implemented, physical UAT pending.**
+
 This user-requested vertical slice does not replace the active Epic 9 Catalog roadmap. It adds
 operator-owned persistent `DRAFT`/`CANCELLED` Sales, multiple resumable carts, a browser-scoped
 active Sale, global shell indicator, Catalog add actions, a dedicated cart workspace and
@@ -49,6 +55,9 @@ context-aware HID scanner routing with Intake priority. Epic 5.2 adds durable ca
 separate Fiscalization, unknown-outcome recovery, exact-once Inventory `SALE` movements after
 confirmed payment, receipt-level percentage discount, manual/open fiscal lines without Inventory,
 terminal cancellation recovery, AQSI card/QR acquiring, explicit cash receipt/skipped choice and checkout UI.
+Phase D keeps the same financial state machines and durable jobs while selecting payment and
+fiscalization capabilities independently. Existing AQSI Integrations remain compatible by default;
+future split selection uses the boolean `payment_enabled` and `fiscalization_enabled` assignments.
 Customer/Loyalty and refunds/returns remain outside this slice. Architecture
 and UAT details are recorded in [`docs/21_sales_workspace.md`](../docs/21_sales_workspace.md) and
 [`docs/22_checkout_payment_fiscalization.md`](../docs/22_checkout_payment_fiscalization.md).

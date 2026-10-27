@@ -183,11 +183,120 @@ Checkout читает только `Integration`/`IntegrationCredential`; legacy
 Логи и API содержат только Sale/attempt/external IDs, состояния и безопасные ошибки. Будущий
 Cloud/local SDK/device bridge может реализовать те же provider ports без изменения Sales domain.
 
+## Phase B: журнал, сверка и наблюдаемость
+
+`FinancialOperationEvent` — append-only доказательная история значимых переходов оплаты,
+фискализации, фоновых заданий и сверки. Текущее состояние по-прежнему определяется
+`Sale`/`PaymentAttempt`/`Fiscalization` и job-моделями; журнал не является вторым state machine.
+Событие записывается той же PostgreSQL-транзакцией, что и соответствующее изменение состояния.
+Обычный ORM запрещает update/delete события. В журнал не попадают API keys, headers, данные карты
+и необработанные ответы AQSI; сохраняются только безопасные ошибки, идентификаторы и ограниченные
+metadata.
+
+Перед финансовым POST job уже существует с устойчивым `correlation_id`. Worker отдельной
+транзакцией переводит его в `PROCESSING`, сохраняет `dispatch_started_at` и событие
+`*_DISPATCH_STARTED`, а затем начинает provider call. Если процесс завершился после marker, но до
+сохранения provider operation ID, повторить POST безопасно невозможно: recovery переводит факт в
+`UNKNOWN`/`MANUAL_REVIEW_REQUIRED`. Это консервативная at-most-one-automatic-dispatch граница, а
+не обещание exactly-once у внешнего провайдера.
+
+При наличии provider operation ID кнопка «Проверить статус» ставит существующий job в очередь
+только для authoritative GET. Row lock и повторная проверка состояния объединяют одновременные
+нажатия. Подтверждённая оплата проходит через обычный completion path: StockMovement создаётся
+один раз, а FiscalizationJob — по существующим уникальным ограничениям. При отсутствии provider
+ID API не создаёт новый charge/receipt, один раз фиксирует inconclusive/manual-review и показывает
+correlation ID, сумму, время и настроенную identity кассы для ручного сопоставления. Поиск AQSI по
+локальному correlation ID не используется: подтверждённого provider API для такого поиска нет.
+
+Экран «Чеки и операции» показывает ограниченную timeline последних событий и позволяет копировать
+correlation/provider IDs. Доступ проверяется через ownership Sale; чужая финансовая история не
+выдаётся. История не удаляется после разрешения инцидента. Старые production-инциденты не
+исправляются автоматически и отражаются в их сохранённом состоянии.
+
+Health endpoint разделяет:
+
+- доступность AQSI Cloud;
+- heartbeat RQ worker очереди `checkout`;
+- количество PostgreSQL jobs в `QUEUED` и `PROCESSING`;
+- возраст самого старого ожидающего job и число зависших jobs;
+- локальную операцию текущего пользователя и глобальное наличие фоновой работы.
+
+Порог heartbeat, долгого `QUEUED` и stale `PROCESSING` задаётся через
+`CORE_CHECKOUT_WORKER_STALE_SECONDS`, `CORE_CHECKOUT_QUEUED_JOB_STALE_SECONDS` и
+`CORE_CHECKOUT_PROCESSING_JOB_STALE_SECONDS`. Баннер использует один устойчивый компонент и четыре
+состояния `READY/BUSY/ATTENTION/OFFLINE`; polling не связан с перерисовкой Sale, параллельные
+запросы объединяются, устаревшие ответы игнорируются, визуальная смена сглаживается на 650 мс.
+
+### Ручной UAT Phase B
+
+Все финансовые сценарии выполняются только оператором на месте и малыми суммами. Автотесты не
+посылают команды в реальную AQSI.
+
+1. Карта и QR: создать две малые Sale, выбрать «Карта / QR», проверить показ суммы/QR на кассе,
+   завершение оплаты, единственный StockMovement, чек и timeline событий.
+2. Наличные: отдельно проверить «Наличными + чек» и «Наличными без чека»; acquiring screen не
+   должен открыться, а fiscal status должен соответственно завершиться или стать `SKIPPED`.
+3. Во время `PAYMENT_PENDING`/`FISCALIZATION_PENDING` уйти в другой раздел и вернуться: обработка
+   продолжается на сервере, Sale и события остаются доступными.
+4. На тестовой незавершённой операции перезапустить worker: при известном provider ID должен
+   продолжиться только status GET; без ID должна появиться ручная проверка без нового POST.
+5. Для `UNKNOWN` с известным ID нажать «Проверить статус» дважды: новая оплата/чек и повторное
+   списание остатков не создаются. Для `UNKNOWN` без ID проверить понятную блокировку и diagnostics.
+6. Остановить worker и затем запустить обратно: баннер показывает проблему worker независимо от
+   AQSI Cloud; после heartbeat состояние стабилизируется без мерцания.
+7. Открыть завершённую и историческую Sale в «Чеки и операции»: проверить статусы, provider ID,
+   correlation ID, безопасную ошибку и хронологию; чужой оператор не должен видеть Sale.
+
 Для аварийного восстановления сначала сверяются acquiring operation, `slip.id`, сумма и список
 чеков AQSI. Эквайринговый slip подтверждает оплату, но сам не является фискальным чеком. Если
 оплата `Completed`, а чека по этому slip нет, выполняется только обычный `receipt.process` с
 исходным slip и frozen SaleItem; повторный purchase запрещён. После неизвестного результата
 `receipt.process` новая попытка допустима только после повторной однозначной сверки списка чеков.
+
+## Phase C: аварийное «Оплачено на кассе»
+
+Если исходная CARD/QR-операция остаётся `PENDING` или `UNKNOWN`, администратор — владелец Sale
+может явно подтвердить, что оплата принята и фискальный чек уже сформирован непосредственно на
+физической кассе. Действие не зависит от health AQSI, не вызывает acquiring/fiscal provider и
+завершает исходную Sale через тот же exactly-once Inventory path, что и
+`cash_without_receipt`.
+
+CORE создаёт отдельный эффективный `PaymentAttempt(CASH, SUCCEEDED)` с безопасными metadata
+`source=EXTERNAL_POS`, `confirmation=OPERATOR_CONFIRMED`, ссылкой на исходную CARD-попытку и
+подтверждением риска. Исходная попытка, provider operation ID, correlation ID, ошибки и события
+сохраняются. Для неё устанавливается только учётная связь `accounting_superseded`: это не меняет
+фактический provider status и не означает отмену.
+
+Один `Fiscalization(SKIPPED)` фиксирует `external_receipt_confirmed=true`. Здесь `SKIPPED`
+означает «CORE не создаёт второй чек», а не «чек не требовался». FiscalizationJob не создаётся.
+Если фискальная команда уже существует, аварийное действие отклоняется и требует отдельной
+сверки.
+
+Sale блокируется `FOR UPDATE`; повторный POST возвращает тот же результат. Если approval AQSI
+зафиксирован первым, аварийное подтверждение отклоняется. Если первым завершился внешний POS,
+поздний `APPROVED` сохраняется в исходном PaymentAttempt, помечается как неэффективный для
+повторного revenue и создаёт `LATE_PROVIDER_APPROVAL_DETECTED` плюс ручной инцидент. Inventory,
+Sale revenue и чек CORE повторно не создаются; автоматический refund не выполняется.
+
+Worker всегда продолжает конкретный `payment_attempt_id` своего durable job, а не последнюю
+попытку Sale. После fallback команда без provider operation ID блокируется; известный ID можно
+только читать. Recovery не возвращает завершённую внешним POS Sale в `PAYMENT_PENDING`.
+
+### Ручной UAT Phase C
+
+1. Создать малую CARD/QR Sale и дождаться `PENDING`/`UNKNOWN`; убедиться, что обычный unsafe retry
+   отсутствует, а администратору доступно «Оплачено на кассе».
+2. Нажать действие, проверить текст риска, выбрать «Назад» — финансовые факты не меняются.
+3. Повторить и подтвердить только после реальной оплаты и чека на кассе: AQSI payment/receipt
+   screen не должен открываться, Sale становится `COMPLETED`, Inventory списан один раз.
+4. В «Чеки и операции» проверить «Оплачено на кассе вручную», исходную AQSI-попытку,
+   correlation/provider IDs и timeline событий.
+5. При известном provider ID выполнить «Проверить статус»: отправляется только status GET. Если
+   AQSI позднее вернёт `APPROVED`, UI показывает возможное двойное списание и рекомендацию
+   расследовать возврат; автоматического refund нет.
+6. Повторно нажать аварийное подтверждение и перезапустить worker: второй платёж, чек, Sale или
+   StockMovement не появляются.
+7. Проверить, что обычный оператор без admin/superuser получает `403`, а чужая Sale — `404`.
 
 ## Производительность фискализации
 
@@ -223,3 +332,84 @@ T5 браузер отрисовал результат
 время от первого отображения fiscal pending через `performance.now()`. В логи не попадают API key,
 PAN, card data или полный acquiring slip. `receipt.process` по-прежнему не считается успехом в T2:
 Sale становится `COMPLETED` только после authoritative `Completed` в T3 и durable commit в T4.
+
+## Phase D: изоляция payment и fiscal providers
+
+Sales использует только provider-neutral `PaymentProvider` и `FiscalProvider`. Статусы внешней
+системы нормализуются адаптером в `PENDING`, `SUCCEEDED`, `FAILED`, `CANCELED` или `UNKNOWN`;
+provider-specific status не участвует в переходах Sale. Ошибки дополнительно различают
+неизвестный исход команды, окончательную ошибку, временную ошибку status query и неподдерживаемую
+операцию. Raw response и credentials в Sales/UI не передаются.
+
+`CheckoutProviderFactory` выбирает payment и fiscal capability отдельно. Для существующей AQSI
+Integration оба назначения по умолчанию включены, поэтому старые настройки и historical rows
+работают без миграции. Если роли требуется разделить между двумя Integrations, у первой задаётся
+`payment_enabled=true, fiscalization_enabled=false`, у второй — обратная комбинация. Эти флаги
+являются простыми assignments, а не module toggles: Sales и финансовая история всегда остаются
+доступны.
+
+Выбранная fiscal Integration записывается в безопасные metadata PaymentAttempt до фоновой
+обработки оплаты. После подтверждения оплаты Fiscalization получает собственные `integration_id`
+и `provider`. Payment/fiscal workers восстанавливают обе сохранённые ссылки и при известном
+operation ID выполняют только status query. Durable intent, dispatch boundary, correlation ID,
+UNKNOWN quarantine, event journal, exactly-once local Inventory и emergency fallback не менялись.
+
+Persisted `FiscalizationJob.aqsi_operation_id` пока не переименован: это историческая колонка.
+Generic worker обращается к ней через provider-neutral `provider_operation_id`, а API временно
+возвращает оба имени для обратной совместимости. Cancellation, refund и отдельный receipt-details
+workflow не реализованы; capability registry их не заявляет для AQSI.
+
+### Ручной UAT Phase D
+
+1. На текущей единственной AQSI Integration выполнить малую CARD/QR оплату и cash-with-receipt:
+   поведение, чек, Inventory и журнал должны совпасть с Phase B/C.
+2. Перезапустить checkout worker при известных payment/fiscal operation IDs: должны выполняться
+   только status GET без второго purchase/receipt POST.
+3. Проверить emergency «Оплачено на кассе»: исходная provider operation и timeline сохраняются,
+   повторная внешняя команда не создаётся.
+4. Отдельную физическую конфигурацию двух провайдеров не проверять до появления второго реального
+   адаптера; её readiness покрывается fake provider contract tests.
+
+## Phase E: operational reliability и кассовый UX
+
+Health endpoint хранит сигналы раздельно: конфигурация и API-доступность PaymentProvider,
+конфигурация и API-доступность FiscalProvider, подтверждаемая провайдером готовность физического
+устройства, heartbeat worker, размеры очереди и stale jobs. Успешный read-only запрос AQSI Cloud
+не считается доказательством готовности кассы: текущий AQSI adapter возвращает
+`physical_device_ready=null`, а UI честно пишет, что готовность проверяется во время операции.
+Health probe использует только безопасное чтение списка shops и не создаёт payment/receipt command.
+
+Если payment и fiscal capabilities обслуживает один adapter, один health poll вызывает его ровно
+один раз. При раздельных Integrations endpoint возвращает отдельные имена и результаты. In-flight
+checkout и worker recovery по-прежнему используют сохранённые IDs, поэтому изменение текущей
+конфигурации не перенаправляет историческую операцию.
+
+Sales сохраняет один постоянный баннер `READY/BUSY/ATTENTION/OFFLINE`. До первого ответа он
+показывает «Проверяем состояние», а не ложное «Касса готова». Компонент переживает Sale rerender,
+объединяет параллельные запросы, игнорирует устаревшие ответы, опрашивается отдельно раз в 15 секунд
+и применяет presentation-only coalescing 650 мс. `READY` означает готовность CORE, worker и provider
+API, но не неподтверждённую физическую готовность устройства.
+
+Основной checkout показывает только понятный итог: подтверждена ли оплата, определён ли результат,
+что происходит с чеком и какое безопасное действие доступно. Provider operation ID, correlation ID,
+job attempts и sanitized technical error сохранены в «Чеки и операции». Фильтр «Требуют внимания»
+включает UNKNOWN, manual review, late approval/double-payment risk, неотмеченную failed
+fiscalization и jobs, действительно превысившие configured stale threshold.
+
+### Ручной UAT Phase E
+
+1. Провести малую оплату картой и отдельно QR; проверить сумму на устройстве, завершение оплаты,
+   единственный чек и историю событий.
+2. Провести наличные с чеком: acquiring screen не открывается, receipt и Inventory завершаются
+   независимо.
+3. Во время оплаты и формирования чека перейти в Catalog и вернуться: worker продолжает работу,
+   баннер не прыгает и Sale восстанавливает состояние.
+4. При доступном AQSI Cloud убедиться, что UI не заявляет физическую готовность кассы, если API её
+   не подтверждает. При выключенном/недоступном устройстве проверять только штатную безопасную
+   ошибку; не создавать специально UNKNOWN payment или второй чек.
+5. Перезапустить worker во время операции с уже сохранённым operation ID: должен выполняться только
+   status GET, без повторного purchase/receipt POST.
+6. В «Чеки и операции» проверить payment/fiscal timings, provider/correlation IDs, failed receipt,
+   stale job и late-approval предупреждение. Технические IDs не должны появляться в основной кассе.
+7. Для заранее подготовленного безопасного сценария Phase C проверить отображение «Оплачено на
+   кассе» и сохранение исходной операции; не провоцировать неоднозначное реальное списание.

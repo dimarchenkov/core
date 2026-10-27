@@ -43,13 +43,53 @@ test('Reconciled sales do not imply a stuck remote AQSI operation is ready', asy
   s.context.api = async () => ({
     configured:true, api_reachable:true, status:'attention',
     active_operation:false, manual_review_required:true,
+    worker_running:true, stalled_job_count:0,
   });
   let view;
   s.context.scheduleCheckoutHealthView = next => { view = next; };
   await s.context.hydrateCheckoutHealth();
   assert.equal(view.state, 'ATTENTION');
-  assert.match(view.detail, /Старая операция AQSI/);
+  assert.match(view.detail, /ручной проверки/);
   assert.doesNotMatch(view.detail, /продолжает проверку|готова/);
+});
+
+test('Checkout health polling is coalesced and stale responses are ignored', async () => {
+  const s = setup();
+  const resolvers = [];
+  const rendered = [];
+  s.context.document.querySelector = selector => selector === '#checkout-health' ? {} : null;
+  s.context.api = () => new Promise(resolve => resolvers.push(resolve));
+  s.context.renderCheckoutHealth = health => rendered.push(health.marker);
+
+  const first = s.context.hydrateCheckoutHealth();
+  const coalesced = s.context.hydrateCheckoutHealth();
+  assert.equal(resolvers.length, 1);
+  resolvers[0]({marker:'first'});
+  await Promise.all([first, coalesced]);
+  assert.deepEqual(rendered, ['first']);
+
+  const stale = s.context.hydrateCheckoutHealth();
+  vm.runInContext('checkoutHealthRequestInFlight = null', s.context);
+  const current = s.context.hydrateCheckoutHealth();
+  assert.equal(resolvers.length, 3);
+  resolvers[2]({marker:'current'});
+  await current;
+  resolvers[1]({marker:'stale'});
+  await stale;
+  assert.deepEqual(rendered, ['first', 'current']);
+});
+
+test('Checkout health UI keeps one stable four-state component', () => {
+  assert.match(source, /READY: \["✓", "CORE готов к работе"\]/);
+  assert.match(source, /BUSY: \["…", "Операция выполняется"\]/);
+  assert.match(source, /ATTENTION: \["!", "Требует внимания"\]/);
+  assert.match(source, /OFFLINE: \["×", "Провайдер недоступен"\]/);
+  assert.match(styles, /\.checkout-health\s*\{[^}]*min-height:/s);
+  assert.match(source, /provider_operation_ids/);
+  assert.doesNotMatch(
+    source.slice(source.indexOf('async function openCheckoutOperations'), source.indexOf('const financialEventLabels')),
+    /<code>.*providerId/,
+  );
 });
 
 test('Manual-review AQSI payment is selected for operation details', () => {
@@ -61,7 +101,24 @@ test('Manual-review AQSI payment is selected for operation details', () => {
   assert.equal(payment.external_id, 'old-aqsi');
   assert.match(source, /openCheckoutOperations\(\s*checkoutHealthView\.state === "ATTENTION" \? "attention" : "all"/);
   assert.match(source, /\["attention", "Требуют внимания"\]/);
-  assert.match(source, /Старая операция: требует проверки/);
+  assert.match(source, /Исходная операция: требует проверки/);
+});
+
+test('Emergency checkout fallback is explicit, admin-only in UI and never an unsafe retry', () => {
+  assert.match(source, /Оплачено на кассе/);
+  assert.match(source, /Подтвердите, что оплата принята и фискальный чек сформирован непосредственно на кассе/);
+  assert.match(source, /предыдущая операция через CORE может ещё завершиться списанием денег/);
+  assert.match(source, /checkout\/external-pos/);
+  assert.match(source, /risk_acknowledged: true/);
+  assert.match(source, /state\.user\?\.is_admin \|\| state\.user\?\.is_superuser/);
+  assert.match(source, /Оплачено на кассе вручную/);
+  assert.match(source, /Возможное двойное списание/);
+  assert.match(source, /Сформирован на кассе вручную/);
+  const pendingBlock = source.slice(
+    source.indexOf('const emergencyAction = sale.status === "payment_pending"'),
+    source.indexOf('const action = sale.status === "draft"'),
+  );
+  assert.doesNotMatch(pendingBlock, /Повторить оплату/);
 });
 
 function setup() {
@@ -1057,8 +1114,8 @@ test('Checkout UI selects cash or card/QR and recovers persisted provider states
   assert.match(source, /name="payment_option" value="cash_with_receipt"/);
   assert.match(source, /name="payment_option" value="cash_without_receipt"/);
   assert.match(source, /payment_option: paymentOption/);
-  assert.match(source, /Оплата и чек через AQSI/);
-  assert.match(source, /Наличные, фискальный чек через AQSI/);
+  assert.match(source, /Оплата через \$\{escapeHtml\(paymentProviderName\)\}/);
+  assert.match(source, /фискальный чек через \$\{escapeHtml\(fiscalProviderName\)\}/);
   assert.match(source, /Продажа будет учтена в Core без отправки на кассу/);
   assert.match(source, /— Не формировался/);
   assert.match(source, /фискальный чек не формировался/);
@@ -1077,20 +1134,27 @@ test('Checkout UI selects cash or card/QR and recovers persisted provider states
   assert.match(source, /\/api\/sales\/operations\/history/);
   assert.match(source, /\/api\/sales\/operations\/health/);
   assert.match(source, /data-reconcile-operation/);
-  assert.match(source, /Касса готова/);
+  assert.match(source, /Проверяем состояние/);
+  assert.match(source, /CORE готов к работе/);
   assert.match(source, /Операция выполняется/);
   assert.match(source, /Требует внимания/);
-  assert.match(source, /Нет связи с кассой/);
-  assert.match(source, /Нет связи с AQSI\. CORE повторит проверку автоматически/);
+  assert.match(source, /Провайдер недоступен/);
+  assert.match(source, /Нет связи с провайдером оплаты/);
+  assert.match(source, /Нет связи с провайдером фискализации/);
+  assert.match(source, /Готовность устройства проверяется при операции/);
   assert.match(source, /replaceWith\(persistentCheckoutHealth\)/);
   assert.match(source, /scheduleCheckoutHealthView/);
   assert.match(source, /650/);
   assert.doesNotMatch(source, /checkout-health[^\n]*external_id/);
   assert.match(source, /elapsed < 8000 \? 500/);
   assert.match(source, /Checkout timing stage=T5/);
-  assert.match(source, /AQSI обрабатывает чек/);
+  assert.match(source, /Провайдер обрабатывает чек/);
   assert.match(source, /Фискализация продолжается на сервере/);
-  assert.match(source, /Фоновая задача/);
+  const primaryCheckout = source.slice(
+    source.indexOf('function renderCheckoutState'),
+    source.indexOf('async function hydrateCheckoutButton'),
+  );
+  assert.doesNotMatch(primaryCheckout, /payment\.external_id|paymentJob|last_error|Фоновая задача/);
   assert.match(source, /retry-payment/);
   assert.match(source, /retry-fiscalization/);
   assert.match(source, /stock_warnings/);

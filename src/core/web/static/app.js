@@ -11,6 +11,11 @@ let salesProgressStartedAt = 0;
 let salesFiscalPendingObservedAt = 0;
 let checkoutHealthTimer = null;
 let checkoutHealthView = { state: "READY", detail: "", context: "" };
+let checkoutHealthPollTimer = null;
+let checkoutHealthRequestSequence = 0;
+let checkoutHealthRequestInFlight = null;
+let checkoutHealthCache = null;
+let checkoutHealthFetchedAt = 0;
 let intakeRealtimeController = null;
 let intakeRealtimeSessionId = null;
 let intakeRealtimeReconnectTimer = null;
@@ -43,6 +48,7 @@ function routeUrl(route) {
   if (route.name === "intake") return `${window.location.pathname}#intake/${route.sessionId}`;
   if (route.name === "sale") return `${window.location.pathname}#sale${route.saleId ? `/${route.saleId}` : ""}`;
   if (route.name === "operations") return `${window.location.pathname}#operations${route.state && route.state !== "all" ? `?state=${route.state}` : ""}`;
+  if (route.name === "operation-detail") return `${window.location.pathname}#operation/${route.saleId}`;
   if (route.name === "analytics") {
     const params = new URLSearchParams();
     params.set("period", route.period || "today");
@@ -72,6 +78,7 @@ function routeFromLocation() {
     const params = new URLSearchParams(queryString);
     return { name, state: params.get("state") || "all" };
   }
+  if (name === "operation" && id) return { name: "operation-detail", saleId: id };
   if (name === "analytics") {
     const params = new URLSearchParams(queryString);
     return {
@@ -114,6 +121,7 @@ async function restoreRoute(route) {
     else if (route.name === "settings") await openSettings();
     else if (route.name === "sale") await openSalesWorkspace(route.saleId);
     else if (route.name === "operations") await openCheckoutOperations(route.state);
+    else if (route.name === "operation-detail") await openCheckoutOperationDetail(route.saleId);
     else if (route.name === "analytics") await openSalesAnalytics(route);
     else if (route.name === "customer") await selectRentalCustomer(route.customerId);
     else if (route.name === "order") await openRentalOrder(route.orderId);
@@ -1297,9 +1305,9 @@ function renderSalesWorkspace(sale = state.sales.active) {
     : '<div class="empty">В продаже пока нет товаров</div>';
   root.innerHTML = `<div class="shell sale-shell">
     ${topbar(true)}
-    <section id="checkout-health" class="checkout-health checkout-health-ready" aria-live="polite">
-      <span class="checkout-health-icon" aria-hidden="true">✓</span>
-      <div class="checkout-health-copy"><strong>Касса готова</strong><small></small></div>
+    <section id="checkout-health" class="checkout-health checkout-health-busy" aria-live="polite">
+      <span class="checkout-health-icon" aria-hidden="true">…</span>
+      <div class="checkout-health-copy"><strong>Проверяем состояние</strong><small>Получаем данные CORE и провайдеров…</small></div>
       <span class="checkout-health-context"></span>
       <button class="button ghost compact checkout-health-details" type="button">Подробнее</button>
     </section>
@@ -1361,44 +1369,96 @@ function renderSalesWorkspace(sale = state.sales.active) {
   document.querySelector("#retry-draft-payment")?.addEventListener("click", () => openCheckoutConfirmation(sale));
   document.querySelector("#return-to-sale")?.addEventListener("click", () => document.querySelector(".sale-items")?.scrollIntoView({ behavior: "smooth" }));
   document.querySelector("#retry-fiscalization")?.addEventListener("click", () => executeCheckoutCommand(sale.id, "retry-fiscalization"));
+  document.querySelector("#emergency-pos-payment")?.addEventListener("click", () => openEmergencyFallbackConfirmation(sale));
   document.querySelector("#defer-sale")?.addEventListener("click", deferActiveSale);
   document.querySelector("#cancel-sale")?.addEventListener("click", () => cancelSale(sale.id));
   if (editable && sale.items.length) void hydrateCheckoutButton(sale.id);
   scheduleCheckoutProgress(sale);
-  void hydrateCheckoutHealth();
+  ensureCheckoutHealthPolling();
 }
 
 async function hydrateCheckoutHealth() {
   const target = document.querySelector("#checkout-health");
   if (!target) return;
-  try {
-    const health = await api("/api/sales/operations/health");
-    if (!document.querySelector("#checkout-health")) return;
-    const sale = state.sales.active;
-    const payment = sale?.payments?.[sale.payments.length - 1];
-    const needsAttention = payment?.status === "unknown"
-      || sale?.fiscalization?.status === "unknown"
-      || (sale?.status === "fiscalization_failed" && !sale?.fiscalization?.operator_dismissed);
-    let view;
-    if (!health.configured || health.api_reachable === false || health.status === "degraded") {
-      view = { state: "OFFLINE", detail: "Нет связи с AQSI. CORE повторит проверку автоматически.", context: "" };
-    } else if (health.manual_review_required) {
-      view = { state: "ATTENTION", detail: "Продажи сверены. Старая операция AQSI требует проверки.", context: "" };
-    } else if (needsAttention) {
-      view = { state: "ATTENTION", detail: "Последняя операция требует проверки.", context: checkoutHealthSaleContext(sale) };
-    } else if (health.active_operation) {
-      view = {
-        state: "BUSY",
-        detail: sale?.status === "fiscalization_pending" ? "Фискализируем чек…" : "Проверяем состояние оплаты…",
-        context: checkoutHealthSaleContext(sale),
-      };
-    } else {
-      view = { state: "READY", detail: "", context: "" };
+  if (checkoutHealthRequestInFlight) return checkoutHealthRequestInFlight;
+  const requestSequence = ++checkoutHealthRequestSequence;
+  checkoutHealthRequestInFlight = (async () => {
+    try {
+      const health = await api("/api/sales/operations/health");
+      if (requestSequence !== checkoutHealthRequestSequence) return;
+      checkoutHealthCache = health;
+      checkoutHealthFetchedAt = Date.now();
+      if (!document.querySelector("#checkout-health")) return;
+      renderCheckoutHealth(health);
+    } catch (error) {
+      if (requestSequence !== checkoutHealthRequestSequence) return;
+      scheduleCheckoutHealthView({ state: "OFFLINE", detail: "Не удалось получить состояние CORE и AQSI.", context: "" });
+    } finally {
+      if (requestSequence === checkoutHealthRequestSequence) checkoutHealthRequestInFlight = null;
     }
-    scheduleCheckoutHealthView(view);
-  } catch (error) {
-    scheduleCheckoutHealthView({ state: "OFFLINE", detail: "Нет связи с AQSI. CORE повторит проверку автоматически.", context: "" });
+  })();
+  return checkoutHealthRequestInFlight;
+}
+
+function ensureCheckoutHealthPolling() {
+  if (checkoutHealthCache && Date.now() - checkoutHealthFetchedAt < 5000) {
+    renderCheckoutHealth(checkoutHealthCache);
+  } else {
+    void hydrateCheckoutHealth();
   }
+  if (checkoutHealthPollTimer) return;
+  checkoutHealthPollTimer = setInterval(() => {
+    if (document.querySelector("#checkout-health")) void hydrateCheckoutHealth();
+  }, 15000);
+}
+
+function renderCheckoutHealth(health) {
+  const sale = state.sales.active;
+  const payment = sale?.payments?.[sale.payments.length - 1];
+  const paymentConfigured = health.payment_provider_configured ?? health.configured;
+  const fiscalConfigured = health.fiscal_provider_configured ?? health.configured;
+  const paymentReachable = health.payment_provider_reachable ?? health.api_reachable;
+  const fiscalReachable = health.fiscal_provider_reachable ?? health.api_reachable;
+  const needsAttention = payment?.status === "unknown"
+    || sale?.fiscalization?.status === "unknown"
+    || (sale?.status === "fiscalization_failed" && !sale?.fiscalization?.operator_dismissed);
+  let view;
+  if (!paymentConfigured) {
+    view = { state: "OFFLINE", detail: "Провайдер оплаты не настроен.", context: "" };
+  } else if (!fiscalConfigured) {
+    view = { state: "OFFLINE", detail: "Провайдер фискализации не настроен.", context: "" };
+  } else if (paymentReachable === false) {
+    view = { state: "OFFLINE", detail: "Нет связи с провайдером оплаты. CORE повторит проверку автоматически.", context: "" };
+  } else if (fiscalReachable === false) {
+    view = { state: "OFFLINE", detail: "Нет связи с провайдером фискализации. CORE повторит проверку автоматически.", context: "" };
+  } else if (health.physical_device_ready === false) {
+    view = { state: "OFFLINE", detail: "Физическая касса сообщает о недоступности.", context: "" };
+  } else if (!health.worker_running) {
+    view = { state: "ATTENTION", detail: "Фоновая обработка не отвечает. Откройте подробности.", context: "" };
+  } else if (health.stalled_job_count > 0) {
+    view = { state: "ATTENTION", detail: "Есть зависшая фоновая операция.", context: "" };
+  } else if (health.manual_review_required) {
+    view = { state: "ATTENTION", detail: "Операция требует ручной проверки.", context: "" };
+  } else if (health.failed_fiscalization_count > 0) {
+    view = { state: "ATTENTION", detail: "Оплата подтверждена, но есть несформированный чек.", context: "" };
+  } else if (needsAttention) {
+    view = { state: "ATTENTION", detail: "Последняя операция требует проверки.", context: checkoutHealthSaleContext(sale) };
+  } else if (health.local_active_operation) {
+    view = {
+      state: "BUSY",
+      detail: sale?.status === "fiscalization_pending" ? "Фискализируем чек…" : "Проверяем состояние оплаты…",
+      context: checkoutHealthSaleContext(sale),
+    };
+  } else {
+    view = {
+      state: "READY",
+      detail: health.physical_device_ready === true
+        ? "Провайдеры и физическая касса доступны."
+        : "Провайдеры доступны. Готовность устройства проверяется при операции.",
+      context: "",
+    };
+  }
+  scheduleCheckoutHealthView(view);
 }
 
 function checkoutHealthSaleContext(sale) {
@@ -1420,10 +1480,10 @@ function applyCheckoutHealthView(view) {
   const target = document.querySelector("#checkout-health");
   if (!target) return;
   const labels = {
-    READY: ["✓", "Касса готова"],
+    READY: ["✓", "CORE готов к работе"],
     BUSY: ["…", "Операция выполняется"],
     ATTENTION: ["!", "Требует внимания"],
-    OFFLINE: ["×", "Нет связи с кассой"],
+    OFFLINE: ["×", "Провайдер недоступен"],
   };
   const [icon, title] = labels[view.state];
   target.className = `checkout-health checkout-health-${view.state.toLowerCase()}`;
@@ -1436,8 +1496,9 @@ function applyCheckoutHealthView(view) {
 }
 
 function manualReviewPayment(sale) {
-  return (sale.payments || []).find((payment) => payment.accounting_superseded
-    && ["pending", "unknown"].includes(payment.status));
+  return (sale.payments || []).find((payment) => payment.duplicate_payment_risk)
+    || (sale.payments || []).find((payment) => payment.accounting_superseded
+      && ["pending", "unknown"].includes(payment.status));
 }
 
 async function openCheckoutOperations(filterState = "all") {
@@ -1449,20 +1510,32 @@ async function openCheckoutOperations(filterState = "all") {
     recordRoute("operations", { state: filterState });
     logicalParent = () => openSalesWorkspace();
     const paymentLabel = (value) => ({ pending: "Выполняется", unknown: "Требует сверки", succeeded: "Завершена", failed: "Ошибка", canceled: "Отменена" }[value] || "—");
-    const fiscalLabel = (sale) => sale.fiscalization?.operator_dismissed ? "Неактуальна · чек не сформирован" : sale.fiscalization?.status === "succeeded" ? "Фискализирован" : sale.fiscalization?.status === "failed" ? "Ошибка" : sale.fiscalization?.status === "skipped" ? "Без чека" : sale.fiscalization ? "Выполняется" : "Не начата";
+    const fiscalLabel = (sale) => sale.fiscalization?.operator_dismissed ? "Неактуальна · чек не сформирован" : sale.fiscalization?.external_receipt_confirmed ? "Сформирован на кассе вручную" : sale.fiscalization?.status === "succeeded" ? "Фискализирован" : sale.fiscalization?.status === "failed" ? "Ошибка" : sale.fiscalization?.status === "skipped" ? "Без чека" : sale.fiscalization ? "Выполняется" : "Не начата";
+    const providerHealthLabel = (configured, reachable) => !configured
+      ? "⚠ Не настроен"
+      : reachable === false ? "⚠ Недоступен" : reachable === true ? "● Доступен" : "— Не проверен";
+    const deviceHealthLabel = health.physical_device_ready === true
+      ? "● Доступна"
+      : health.physical_device_ready === false ? "⚠ Недоступна" : "— Готовность неизвестна";
     const rows = operations.length ? operations.map((sale) => {
       const reviewPayment = manualReviewPayment(sale);
+      const fallback = sale.payments?.find((item) => item.emergency_fallback);
       const payment = reviewPayment || sale.payments?.[sale.payments.length - 1];
-      const needsReconcile = !reviewPayment && ["payment_pending", "fiscalization_pending"].includes(sale.status);
-      const paymentStatus = reviewPayment ? "Старая операция: требует проверки" : paymentLabel(payment?.status);
-      const reviewNote = reviewPayment ? "<small>Продажа сверена, автоматическая обработка этой операции отключена.</small>" : "";
-      return `<article class="operation-card${reviewPayment ? " operation-card-attention" : ""}"><div><small>${new Date(sale.created_at).toLocaleString("ru-RU")}</small><h3>Продажа #${sale.sale_number}</h3><strong>${formatMoney(sale.total_amount)}</strong></div><div><span>Оплата: <strong>${paymentStatus}</strong></span><span>Чек: <strong>${fiscalLabel(sale)}</strong></span><small>AQSI: ${escapeHtml(payment?.external_id || sale.fiscalization_job?.aqsi_operation_id || "—")}</small>${reviewNote}</div><div class="operation-actions"><button class="button secondary compact" data-open-operation="${sale.id}" type="button">Подробнее</button>${needsReconcile ? `<button class="button compact" data-reconcile-operation="${sale.id}" type="button">Проверить</button>` : ""}</div></article>`;
+      const duplicateRisk = Boolean(reviewPayment?.duplicate_payment_risk);
+      const unknown = payment?.status === "unknown" || sale.fiscalization?.status === "unknown" || duplicateRisk;
+      const providerId = payment?.external_id || sale.fiscalization?.external_id;
+      const needsReconcile = Boolean(providerId) && ((reviewPayment && ["pending", "unknown"].includes(reviewPayment.status)) || ["payment_pending", "fiscalization_pending"].includes(sale.status));
+      const paymentStatus = duplicateRisk ? "Возможное двойное списание" : fallback ? "Оплачено на кассе вручную" : reviewPayment ? "Исходная операция: требует проверки" : paymentLabel(payment?.status);
+      const reviewNote = fallback ? `<small>Исходная операция провайдера: ${duplicateRisk ? "позднее подтверждена · требуется проверка" : "результат не завершён"}.</small>` : reviewPayment ? "<small>Продажа сверена, автоматическая обработка этой операции отключена.</small>" : "";
+      const canFallback = !fallback && !sale.fiscalization && sale.status === "payment_pending" && payment?.payment_method === "card" && ["pending", "unknown"].includes(payment?.status) && (state.user?.is_admin || state.user?.is_superuser);
+      return `<article class="operation-card${reviewPayment || unknown ? " operation-card-attention" : ""}"><div><small>${new Date(sale.created_at).toLocaleString("ru-RU")}</small><h3>Продажа #${sale.sale_number}</h3><strong>${formatMoney(sale.total_amount)}</strong></div><div><span>Оплата: <strong>${paymentStatus}</strong></span><span>Чек: <strong>${fiscalLabel(sale)}</strong></span>${unknown && !providerId ? "<small>Идентификатор провайдера не получен · нужна ручная проверка</small>" : ""}${reviewNote}</div><div class="operation-actions"><button class="button secondary compact" data-open-operation="${sale.id}" type="button">Подробнее</button>${needsReconcile ? `<button class="button compact" data-reconcile-operation="${sale.id}" type="button">Проверить</button>` : ""}${canFallback ? `<button class="button warning compact" data-emergency-operation="${sale.id}" data-emergency-number="${sale.sale_number}" data-emergency-total="${sale.total_amount}" type="button">Оплачено на кассе</button>` : ""}</div></article>`;
     }).join("") : '<section class="empty"><strong>Операций нет</strong><p>Для выбранного фильтра история пуста.</p></section>';
-    root.innerHTML = `<div class="shell operations-shell">${topbar(true)}<div class="page-title"><div><p class="eyebrow">Касса</p><h1>Чеки и операции</h1></div><button class="button secondary" id="operations-back" type="button">К продажам</button></div><section class="checkout-health checkout-health-${health.status}"><span>AQSI</span><strong>${health.api_reachable ? "● Cloud API доступен" : "⚠ Требует внимания"}</strong><small>${escapeHtml(health.message)}</small></section><nav class="operation-filters">${[["all", "Все"], ["attention", "Требуют внимания"], ["pending", "В процессе"], ["failed", "Ошибки"], ["completed", "Завершённые"]].map(([value, label]) => `<button class="button ${filterState === value ? "" : "secondary"} compact" data-operation-filter="${value}" type="button">${label}</button>`).join("")}</nav><section class="operation-list">${rows}</section></div>`;
+    root.innerHTML = `<div class="shell operations-shell">${topbar(true)}<div class="page-title"><div><p class="eyebrow">Касса</p><h1>Чеки и операции</h1></div><button class="button secondary" id="operations-back" type="button">К продажам</button></div><section class="operation-health-grid"><article><span>Провайдер оплаты</span><strong>${providerHealthLabel(health.payment_provider_configured ?? health.configured, health.payment_provider_reachable ?? health.api_reachable)}</strong><small>${escapeHtml(health.payment_integration_name || "Не назначен")}</small></article><article><span>Провайдер чека</span><strong>${providerHealthLabel(health.fiscal_provider_configured ?? health.configured, health.fiscal_provider_reachable ?? health.api_reachable)}</strong><small>${escapeHtml(health.fiscal_integration_name || "Не назначен")}</small></article><article><span>Физическая касса</span><strong>${deviceHealthLabel}</strong><small>${health.physical_device_ready == null ? "Cloud API не подтверждает готовность устройства" : "Состояние получено от провайдера"}</small></article><article><span>Фоновая обработка</span><strong>${health.worker_running ? "● Работает" : "⚠ Не отвечает"}</strong><small>${health.queued_job_count} ожидают · ${health.processing_job_count} выполняются${health.stalled_job_count ? ` · зависших ${health.stalled_job_count}` : ""}</small></article></section>${health.message ? `<p class="operation-health-message">${escapeHtml(health.message)}</p>` : ""}<nav class="operation-filters">${[["all", "Все"], ["attention", "Требуют внимания"], ["pending", "В процессе"], ["failed", "Ошибки"], ["completed", "Завершённые"]].map(([value, label]) => `<button class="button ${filterState === value ? "" : "secondary"} compact" data-operation-filter="${value}" type="button">${label}</button>`).join("")}</nav><section class="operation-list">${rows}</section></div>`;
     bindTopbar();
     document.querySelector("#operations-back")?.addEventListener("click", () => openSalesWorkspace());
     document.querySelectorAll("[data-operation-filter]").forEach((button) => button.addEventListener("click", () => openCheckoutOperations(button.dataset.operationFilter)));
-    document.querySelectorAll("[data-open-operation]").forEach((button) => button.addEventListener("click", () => openSalesWorkspace(button.dataset.openOperation)));
+    document.querySelectorAll("[data-open-operation]").forEach((button) => button.addEventListener("click", () => openCheckoutOperationDetail(button.dataset.openOperation)));
+    document.querySelectorAll("[data-emergency-operation]").forEach((button) => button.addEventListener("click", () => openEmergencyFallbackConfirmation({ id: button.dataset.emergencyOperation, sale_number: button.dataset.emergencyNumber, total_amount: button.dataset.emergencyTotal })));
     document.querySelectorAll("[data-reconcile-operation]").forEach((button) => button.addEventListener("click", async () => {
       button.disabled = true;
       try {
@@ -1470,6 +1543,73 @@ async function openCheckoutOperations(filterState = "all") {
         await openCheckoutOperations(filterState);
       } catch (error) { showToast(error.message, true); button.disabled = false; }
     }));
+  } catch (error) { showToast(error.message, true); }
+}
+
+const financialEventLabels = {
+  payment_created: "Создана попытка оплаты",
+  payment_command_prepared: "Команда оплаты подготовлена",
+  payment_dispatch_started: "Отправка команды оплаты начата",
+  payment_operation_id_received: "Получен ID операции оплаты",
+  payment_approved: "Оплата подтверждена",
+  payment_declined: "Оплата отклонена",
+  payment_canceled: "Оплата отменена",
+  payment_outcome_unknown: "Результат оплаты неизвестен",
+  fiscalization_created: "Создано обязательство сформировать чек",
+  fiscal_command_prepared: "Команда чека подготовлена",
+  fiscal_dispatch_started: "Отправка команды чека начата",
+  fiscal_operation_id_received: "Получен ID операции чека",
+  fiscalization_succeeded: "Чек сформирован",
+  fiscalization_failed: "Чек не сформирован",
+  fiscal_outcome_unknown: "Результат формирования чека неизвестен",
+  reconciliation_requested: "Запрошена сверка",
+  reconciliation_succeeded: "Сверка завершена",
+  reconciliation_inconclusive: "Сверка не дала окончательного результата",
+  manual_review_required: "Требуется ручная проверка",
+  emergency_fallback_requested: "Запрошено аварийное завершение",
+  emergency_fallback_confirmed: "Аварийное завершение подтверждено",
+  external_payment_recorded: "Оплата на кассе записана",
+  late_provider_approval_detected: "Обнаружено возможное двойное списание",
+};
+
+async function openCheckoutOperationDetail(saleId) {
+  try {
+    const detail = await api(`/api/sales/operations/${saleId}/detail`);
+    const sale = detail.sale;
+    recordRoute("operation-detail", { saleId });
+    logicalParent = () => openCheckoutOperations();
+    const payment = sale.payments?.find((item) => item.id === detail.manual_review_payment_id)
+      || sale.payments?.[sale.payments.length - 1];
+    const fiscal = sale.fiscalization;
+    const identifiers = [
+      ...detail.correlation_ids.map((value) => ["Correlation ID", value]),
+      ...detail.provider_operation_ids.map((value) => ["Provider operation ID", value]),
+    ];
+    const identifierRows = identifiers.length
+      ? identifiers.map(([label, value]) => `<div class="operation-identifier"><span>${label}</span><code>${escapeHtml(value)}</code><button class="button ghost compact" data-copy-operation-id="${escapeHtml(value)}" type="button">Копировать</button></div>`).join("")
+      : "<p class=\"muted\">Provider ID не получен.</p>";
+    const timeline = detail.events.length
+      ? detail.events.map((event) => `<li class="financial-event"><time>${formatDate(event.occurred_at)}</time><div><strong>${escapeHtml(financialEventLabels[event.event_type] || event.event_type)}</strong>${event.previous_status || event.new_status ? `<small>${escapeHtml(event.previous_status || "—")} → ${escapeHtml(event.new_status || "—")}</small>` : ""}${event.safe_message ? `<p>${escapeHtml(event.safe_message)}</p>` : ""}${event.provider_operation_id ? `<code>${escapeHtml(event.provider_operation_id)}</code>` : ""}</div></li>`).join("")
+      : '<li class="empty">События появятся после следующего значимого перехода.</li>';
+    const canReconcile = detail.provider_operation_ids.length > 0 && (["payment_pending", "fiscalization_pending"].includes(sale.status) || (detail.emergency_fallback_recorded && payment && ["pending", "unknown"].includes(payment.status)));
+    const paymentHeading = detail.duplicate_payment_risk ? "Возможное двойное списание" : detail.emergency_fallback_recorded ? "Оплачено на кассе вручную" : payment?.status || "не начата";
+    const fiscalHeading = fiscal?.external_receipt_confirmed ? "Чек сформирован на кассе вручную" : fiscal?.status || "не начата";
+    const detailActions = `${canReconcile ? `<button class="button compact" id="detail-reconcile" type="button">Проверить статус</button>` : ""}${detail.emergency_fallback_eligible ? `<button class="button warning compact" id="detail-emergency-pos" type="button">Оплачено на кассе</button>` : ""}`;
+    root.innerHTML = `<div class="shell operations-shell">${topbar(true)}<div class="page-title"><div><p class="eyebrow">Операция</p><h1>Продажа #${sale.sale_number}</h1><p>${formatMoney(sale.total_amount)} · ${formatDate(sale.created_at)}</p></div><button class="button secondary" id="operation-detail-back" type="button">К операциям</button></div>${detail.manual_review_required ? `<section class="checkout-state checkout-fiscalization_failed"><strong>${detail.duplicate_payment_risk ? "Возможное двойное списание" : "Требует ручной проверки"}</strong><p>${escapeHtml(detail.operator_instruction || "Проверьте операцию у провайдера.")}</p></section>` : ""}<section class="operation-detail-grid"><article><span>Оплата</span><strong>${escapeHtml(paymentHeading)}</strong><small>${payment ? `${payment.payment_method === "cash" ? "Наличными" : "Карта / QR"} · ${formatMoney(payment.requested_amount)}` : "—"}</small></article><article><span>Фискальный чек</span><strong>${escapeHtml(fiscalHeading)}</strong><small>${fiscal?.external_receipt_id ? `Чек ${escapeHtml(fiscal.external_receipt_id)}` : "—"}</small></article><article><span>Восстановление</span><strong>${escapeHtml(detail.recovery_state)}</strong><small>${escapeHtml(detail.provider_identity || "Провайдер не назначен")}</small></article></section><section class="operation-identifiers"><h2>Идентификаторы</h2>${identifierRows}</section>${payment?.error_message || fiscal?.error_message ? `<section class="operation-error"><h2>Последняя безопасная ошибка</h2><p>${escapeHtml(payment?.error_message || fiscal?.error_message)}</p></section>` : ""}<section class="financial-timeline"><div class="section-heading"><h2>История событий</h2><div class="operation-actions">${detailActions}</div></div><ol>${timeline}</ol></section></div>`;
+    bindTopbar();
+    document.querySelector("#operation-detail-back")?.addEventListener("click", () => openCheckoutOperations());
+    document.querySelectorAll("[data-copy-operation-id]").forEach((button) => button.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(button.dataset.copyOperationId);
+      showToast("Идентификатор скопирован");
+    }));
+    document.querySelector("#detail-reconcile")?.addEventListener("click", async (event) => {
+      event.currentTarget.disabled = true;
+      try {
+        await api(`/api/sales/operations/${saleId}/reconcile`, { method: "POST" });
+        await openCheckoutOperationDetail(saleId);
+      } catch (error) { showToast(error.message, true); event.currentTarget.disabled = false; }
+    });
+    document.querySelector("#detail-emergency-pos")?.addEventListener("click", () => openEmergencyFallbackConfirmation(sale));
   } catch (error) { showToast(error.message, true); }
 }
 
@@ -1483,6 +1623,7 @@ function renderSaleDiscount(sale) {
 function renderCheckoutState(sale) {
   const payment = sale.payments?.[sale.payments.length - 1];
   const fiscal = sale.fiscalization;
+  const fallback = sale.payments?.find((item) => item.emergency_fallback);
   if (fiscal?.operator_dismissed) {
     return `<section class="checkout-state"><strong>Операция неактуальна</strong><p>Отмечена по решению оператора. Оплата ${formatMoney(sale.total_amount)} подтверждена, чек не сформирован.</p><small>История сохранена. Повторная обработка отключена.</small></section>`;
   }
@@ -1490,18 +1631,20 @@ function renderCheckoutState(sale) {
   if (sale.status === "draft" && !["canceled", "failed"].includes(payment?.status)) return "";
   const messages = {
     payment_pending: payment?.status === "unknown"
-      ? ["⚠ Результат оплаты пока неизвестен", "Проверяем состояние AQSI. Не запускайте новую оплату."]
-      : ["Ожидаем оплату на кассе…", "Следуйте подсказкам на устройстве AQSI."],
+      ? ["⚠ Результат оплаты пока неизвестен", "Не запускайте новую оплату. CORE продолжает безопасную проверку статуса."]
+      : ["Ожидаем оплату на кассе…", "Следуйте подсказкам на платёжном устройстве."],
     paid: ["✓ Оплата прошла", "Фиксируем продажу в учёте…"],
     fiscalization_pending: fiscal?.status === "unknown"
-      ? ["⚠ Оплата прошла, статус чека пока неизвестен", "Проверяем AQSI. Повторная оплата запрещена."]
+      ? ["⚠ Оплата прошла, статус чека пока неизвестен", "CORE проверяет чек. Не повторяйте оплату или формирование чека."]
       : [
           "✓ Оплата прошла",
           salesFiscalPendingObservedAt && performance.now() - salesFiscalPendingObservedAt >= 5000
-            ? `AQSI обрабатывает чек ${Math.round((performance.now() - salesFiscalPendingObservedAt) / 1000)} сек. Новая оплата заблокирована.`
+            ? `Провайдер обрабатывает чек ${Math.round((performance.now() - salesFiscalPendingObservedAt) / 1000)} сек. Новая оплата заблокирована.`
             : "Формируем фискальный чек…",
         ],
-    completed: fiscal?.status === "skipped"
+    completed: fiscal?.external_receipt_confirmed
+      ? ["✓ Оплачено на кассе вручную", "Продажа учтена в CORE. Оплата и фискальный чек подтверждены оператором на физической кассе."]
+      : fiscal?.status === "skipped"
       ? ["✓ Продажа завершена", "Оплата подтверждена, товар списан, фискальный чек не формировался."]
       : ["✓ Продажа завершена", "Оплата подтверждена, товар списан, чек фискализирован."],
     payment_failed: ["⚠ Оплата не выполнена", "Можно явно создать новую попытку оплаты."],
@@ -1512,31 +1655,35 @@ function renderCheckoutState(sale) {
     : ["Оплата не выполнена", "Деньги не списаны. Продажу можно изменить и оплатить снова."];
   const [title, detail] = sale.status === "draft" ? draftOutcome : messages[sale.status] || ["Состояние продажи", sale.status];
   const paymentLabels = { succeeded: "✓ Оплачено", canceled: "Отменено на терминале", failed: "Не выполнено", unknown: "Результат неизвестен", pending: "Ожидается" };
-  const paymentMethodLabel = payment?.payment_method === "cash" ? "Наличными" : "Карта / QR";
+  const paymentMethodLabel = payment?.emergency_fallback ? "Оплачено на кассе вручную" : payment?.payment_method === "cash" ? "Наличными" : "Карта / QR";
   const paidLabel = payment?.status === "succeeded" ? `✓ ${paymentMethodLabel}` : paymentMethodLabel;
-  const paymentJob = payment?.job;
-  const paymentJobDetails = paymentJob ? `<small>Фоновая задача: ${escapeHtml(paymentJob.status)} · попыток ${paymentJob.attempt_count}${paymentJob.last_attempt_at ? ` · последняя ${formatDate(paymentJob.last_attempt_at)}` : ""}${paymentJob.last_error ? ` · ${escapeHtml(paymentJob.last_error)}` : ""}</small>` : "";
   const effectivePayments = (sale.payments || []).filter((item) => item.status === "succeeded" && !item.accounting_superseded);
   const paymentSummary = effectivePayments.length > 1
     ? `<div><span>Оплата</span>${effectivePayments.map((item) => `<strong>✓ ${item.payment_method === "cash" ? "Наличными" : "Карта / QR"} · ${formatMoney(item.requested_amount)}</strong>`).join("")}</div>`
-    : payment ? `<div><span>Оплата</span><strong>${paidLabel} · ${formatMoney(payment.requested_amount)}</strong><small>${escapeHtml(paymentLabels[payment.status] || payment.status)}${payment.external_id ? ` · ${escapeHtml(payment.external_id)}` : ""}</small>${paymentJobDetails}</div>` : "";
+    : payment ? `<div><span>Оплата</span><strong>${paidLabel} · ${formatMoney(payment.requested_amount)}</strong><small>${escapeHtml(paymentLabels[payment.status] || payment.status)}</small></div>` : "";
   const fiscalStatusLabel = fiscal?.status === "succeeded"
     ? "✓ Фискализирован"
+    : fiscal?.external_receipt_confirmed
+      ? "✓ Сформирован на кассе вручную"
     : fiscal?.status === "skipped"
       ? "— Не формировался"
       : fiscal?.status;
-  const fiscalJob = sale.fiscalization_job;
-  const jobDetails = fiscalJob
-    ? `<small>Фоновая задача: ${escapeHtml(fiscalJob.status)} · попыток ${fiscalJob.attempt_count}${fiscalJob.last_attempt_at ? ` · последняя ${formatDate(fiscalJob.last_attempt_at)}` : ""}${fiscalJob.last_error ? ` · ${escapeHtml(fiscalJob.last_error)}` : ""}</small>`
+  const fiscalSummary = fiscal ? `<div><span>Фискальный чек</span><strong>${escapeHtml(fiscalStatusLabel)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}</div>` : "";
+  const emergencyAction = sale.status === "payment_pending"
+    && !fallback
+    && !fiscal
+    && payment?.payment_method === "card"
+    && ["pending", "unknown"].includes(payment?.status)
+    && (state.user?.is_admin || state.user?.is_superuser)
+    ? '<button class="button warning" id="emergency-pos-payment" type="button">Оплачено на кассе</button>'
     : "";
-  const fiscalSummary = fiscal ? `<div><span>Фискальный чек</span><strong>${escapeHtml(fiscalStatusLabel)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}${jobDetails}</div>` : "";
   const action = sale.status === "draft" && ["canceled", "failed"].includes(payment?.status)
     ? '<div class="checkout-recovery-actions"><button class="button" id="retry-draft-payment" type="button">Повторить оплату</button><button class="button secondary" id="return-to-sale" type="button">Вернуться к продаже</button></div>'
     : sale.status === "payment_failed"
     ? '<button class="button" id="retry-payment" type="button">Повторить оплату</button>'
     : sale.status === "fiscalization_failed"
       ? '<button class="button" id="retry-fiscalization" type="button">Повторить формирование чека</button>'
-      : "";
+      : emergencyAction;
   return `<section class="checkout-state checkout-${sale.status}"><strong>${title}</strong><p>${detail}</p>${paymentSummary || fiscalSummary ? `<div class="transaction-summary">${paymentSummary}${fiscalSummary}</div>` : ""}${action}</section>`;
 }
 
@@ -1567,10 +1714,13 @@ async function openCheckoutConfirmation(sale) {
     const dialog = document.createElement("dialog");
     dialog.className = "label-dialog checkout-dialog";
     const acquiringLabel = context.acquiring_label || "Карта / QR";
+    const paymentProviderName = context.payment_provider_name || context.provider_name || "провайдера оплаты";
+    const fiscalProviderName = context.fiscal_provider_name || context.provider_name || "провайдера чека";
+    const fiscalIntegrationName = context.fiscal_integration_name || context.integration_name;
     const providerDisabled = context.fiscalization_available ? "" : "disabled";
     const defaultCard = context.fiscalization_available ? "checked" : "";
     const defaultCashWithoutReceipt = context.fiscalization_available ? "" : "checked";
-    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">Подтверждение оплаты</p><h2>Продажа #${sale.sale_number}</h2><div class="checkout-facts"><span>${sale.item_quantity} поз.</span><span>Подытог: ${formatMoney(sale.subtotal_amount)}</span>${Number(sale.discount_amount) > 0 ? `<span>Скидка: −${formatMoney(sale.discount_amount)}</span>` : ""}<strong>К оплате: ${formatMoney(sale.total_amount)}</strong></div><fieldset class="checkout-method-options"><legend>Способ оплаты</legend><label><input type="radio" name="payment_option" value="card" ${defaultCard} ${providerDisabled}> <span><strong>${escapeHtml(acquiringLabel)}</strong><small>Оплата и чек через AQSI</small></span></label><label><input type="radio" name="payment_option" value="cash_with_receipt" ${providerDisabled}> <span><strong>Наличными + чек</strong><small>Наличные, фискальный чек через AQSI</small></span></label><label><input type="radio" name="payment_option" value="cash_without_receipt" ${defaultCashWithoutReceipt}> <span><strong>Наличными без чека</strong><small>Продажа будет учтена в Core без отправки на кассу</small></span></label></fieldset><div class="cash-amount hidden" id="cash-amount"><span>К получению</span><strong>${formatMoney(sale.total_amount)}</strong></div><div class="checkout-method"><span class="muted small">Касса для фискального чека</span><strong id="checkout-fiscal-provider">${context.fiscalization_available ? escapeHtml(context.integration_name) : "Не настроена"}</strong><span class="muted small checkout-method-note" id="checkout-method-note"></span></div>${warnings}<div class="sale-actions"><button class="button secondary" value="cancel">Отмена</button><button class="button" id="confirm-checkout" value="default"></button></div></form>`;
+    dialog.innerHTML = `<form method="dialog"><p class="eyebrow">Подтверждение оплаты</p><h2>Продажа #${sale.sale_number}</h2><div class="checkout-facts"><span>${sale.item_quantity} поз.</span><span>Подытог: ${formatMoney(sale.subtotal_amount)}</span>${Number(sale.discount_amount) > 0 ? `<span>Скидка: −${formatMoney(sale.discount_amount)}</span>` : ""}<strong>К оплате: ${formatMoney(sale.total_amount)}</strong></div><fieldset class="checkout-method-options"><legend>Способ оплаты</legend><label><input type="radio" name="payment_option" value="card" ${defaultCard} ${providerDisabled}> <span><strong>${escapeHtml(acquiringLabel)}</strong><small>Оплата через ${escapeHtml(paymentProviderName)}, чек через ${escapeHtml(fiscalProviderName)}</small></span></label><label><input type="radio" name="payment_option" value="cash_with_receipt" ${providerDisabled}> <span><strong>Наличными + чек</strong><small>Наличные, фискальный чек через ${escapeHtml(fiscalProviderName)}</small></span></label><label><input type="radio" name="payment_option" value="cash_without_receipt" ${defaultCashWithoutReceipt}> <span><strong>Наличными без чека</strong><small>Продажа будет учтена в Core без отправки на кассу</small></span></label></fieldset><div class="cash-amount hidden" id="cash-amount"><span>К получению</span><strong>${formatMoney(sale.total_amount)}</strong></div><div class="checkout-method"><span class="muted small">Касса для фискального чека</span><strong id="checkout-fiscal-provider">${context.fiscalization_available ? escapeHtml(fiscalIntegrationName) : "Не настроена"}</strong><span class="muted small checkout-method-note" id="checkout-method-note"></span></div>${warnings}<div class="sale-actions"><button class="button secondary" value="cancel">Отмена</button><button class="button" id="confirm-checkout" value="default"></button></div></form>`;
     document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove());
     const confirm = dialog.querySelector("#confirm-checkout");
@@ -1582,11 +1732,11 @@ async function openCheckoutConfirmation(sale) {
       dialog.querySelector("#checkout-method-note").textContent = option === "cash_without_receipt"
         ? "На кассу ничего не отправляется"
         : option === "cash_with_receipt"
-          ? "Acquiring не запускается; на AQSI отправляется только наличный чек"
+          ? `Эквайринг не запускается; ${fiscalProviderName} получает только наличный чек`
           : `На устройстве откроется экран ${acquiringLabel.toLowerCase()}, затем сформируется чек`;
       dialog.querySelector("#checkout-fiscal-provider").textContent = option === "cash_without_receipt"
         ? "Не используется"
-        : context.integration_name || "Не настроена";
+        : fiscalIntegrationName || "Не настроена";
     };
     dialog.querySelectorAll('input[name="payment_option"]').forEach((input) => input.addEventListener("change", updateMethod));
     updateMethod();
@@ -1600,6 +1750,34 @@ async function openCheckoutConfirmation(sale) {
     });
     dialog.showModal();
   } catch (error) { showToast(error.message, true); }
+}
+
+async function openEmergencyFallbackConfirmation(sale) {
+  const dialog = document.createElement("dialog");
+  dialog.className = "label-dialog checkout-dialog";
+  dialog.innerHTML = `<form method="dialog"><p class="eyebrow">Аварийное завершение</p><h2>Продажа #${escapeHtml(String(sale.sale_number))}</h2><div class="checkout-facts"><strong>К оплате: ${formatMoney(sale.total_amount)}</strong></div><section class="emergency-pos-warning"><strong>Подтвердите, что оплата принята и фискальный чек сформирован непосредственно на кассе.</strong><p>Внимание: предыдущая операция через CORE может ещё завершиться списанием денег.</p></section><div class="sale-actions"><button class="button secondary" value="cancel">Назад</button><button class="button warning" id="confirm-emergency-pos" value="default">Подтвердить</button></div></form>`;
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.querySelector("#confirm-emergency-pos").addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.currentTarget.disabled = true;
+    try {
+      const updated = await api(`/api/sales/${sale.id}/checkout/external-pos`, {
+        method: "POST",
+        body: JSON.stringify({ risk_acknowledged: true }),
+      });
+      dialog.close();
+      rememberSale(updated);
+      const route = window.history.state?.coreRoute;
+      if (route?.name === "operation-detail") await openCheckoutOperationDetail(sale.id);
+      else if (route?.name === "operations") await openCheckoutOperations(route.state || "all");
+      else renderSalesWorkspace(updated);
+    } catch (error) {
+      showToast(error.message, true);
+      event.currentTarget.disabled = false;
+    }
+  });
+  dialog.showModal();
 }
 
 async function executeCheckoutCommand(saleId, suffix, paymentOption = null) {
