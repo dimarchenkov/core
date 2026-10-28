@@ -118,6 +118,12 @@ class FinancialEventType(StrEnum):
     EMERGENCY_FALLBACK_CONFIRMED = "emergency_fallback_confirmed"
     EXTERNAL_PAYMENT_RECORDED = "external_payment_recorded"
     LATE_PROVIDER_APPROVAL_DETECTED = "late_provider_approval_detected"
+    PAYMENT_INCIDENT_REVIEWED = "payment_incident_reviewed"
+    SINGLE_CHARGE_OPERATOR_CONFIRMED = "single_charge_operator_confirmed"
+    PAYMENT_INCIDENT_RESOLVED = "payment_incident_resolved"
+    FISCAL_RECEIPT_MISSING_REPORTED = "fiscal_receipt_missing_reported"
+    FISCAL_RECEIPT_VERIFIED = "fiscal_receipt_verified"
+    FISCAL_VERIFICATION_UNKNOWN_RECORDED = "fiscal_verification_unknown_recorded"
 
 
 class FinancialActorType(StrEnum):
@@ -126,3 +132,47 @@ class FinancialActorType(StrEnum):
     OPERATOR = "operator"
     WORKER = "worker"
     SYSTEM = "system"
+
+
+class IncidentKind(StrEnum):
+    """Independent operator-review tracks for one financial incident."""
+
+    PAYMENT_DUPLICATE_RISK = "payment_duplicate_risk"
+    FISCAL_RECEIPT_VERIFICATION = "fiscal_receipt_verification"
+
+
+class IncidentResolutionType(StrEnum):
+    """Auditable operator conclusion without rewriting provider facts."""
+
+    SINGLE_CHARGE_OPERATOR_CONFIRMED = "single_charge_operator_confirmed"
+    EXTERNAL_POS_PAYMENT_CONFIRMED = "external_pos_payment_confirmed"
+    ORIGINAL_OPERATION_CANCELED_CONFIRMED = "original_operation_canceled_confirmed"
+    MANUAL_REVIEW_CONFIRMED = "manual_review_confirmed"
+    FISCAL_RECEIPT_VERIFIED = "fiscal_receipt_verified"
+    FISCAL_RECEIPT_MISSING = "fiscal_receipt_missing"
+    FISCAL_VERIFICATION_UNKNOWN = "fiscal_verification_unknown"
+
+
+class IncidentResolutionStatus(StrEnum):
+    """Whether a review closes its track or still requires action."""
+
+    RESOLVED = "resolved"
+    REQUIRES_ACTION = "requires_action"
+    UNKNOWN = "unknown"
+
+
+class FiscalVerificationOutcome(StrEnum):
+    """Operator-facing fiscal review outcomes kept separate from FiscalizationStatus."""
+
+    VERIFIED = "verified"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
+class IncidentResolutionChoice(StrEnum):
+    """Compact operator choices mapped to existing payment and fiscal review tracks."""
+
+    CORRECTION_RECEIPT_FORMED = "correction_receipt_formed"
+    EXTERNAL_POS_PAYMENT_CONFIRMED = "external_pos_payment_confirmed"
+    ORIGINAL_OPERATION_CANCELED = "original_operation_canceled"
+    MANUAL_REVIEWED = "manual_reviewed"

@@ -28,6 +28,9 @@ from core.sales.enums import (
     FinancialEventType,
     FiscalizationJobStatus,
     FiscalizationStatus,
+    IncidentKind,
+    IncidentResolutionStatus,
+    IncidentResolutionType,
     PaymentJobStatus,
     PaymentMethod,
     PaymentStatus,
@@ -149,6 +152,12 @@ class Sale(BaseModel):
         cascade="all, delete-orphan",
         lazy="selectin",
         uselist=False,
+    )
+    incident_resolutions: Mapped[list[FinancialIncidentResolution]] = relationship(
+        "FinancialIncidentResolution",
+        back_populates="sale",
+        lazy="selectin",
+        order_by="FinancialIncidentResolution.created_at",
     )
 
 
@@ -553,3 +562,62 @@ class FinancialOperationEvent(UUIDPrimaryKeyMixin, Base):
 def _prevent_financial_event_mutation(*_: object) -> None:
     """Reject ORM mutation even when callers bypass normal application APIs."""
     raise RuntimeError("Financial operation events are immutable.")
+
+
+class FinancialIncidentResolution(BaseModel):
+    """Current durable conclusion for one independently reviewable incident track."""
+
+    __tablename__ = "financial_incident_resolutions"
+    __table_args__ = (
+        UniqueConstraint(
+            "incident_kind",
+            "incident_id",
+            name="uq_financial_incident_resolution_kind_id",
+        ),
+        Index(
+            "ix_financial_incident_resolutions_sale_kind",
+            "sale_id",
+            "incident_kind",
+        ),
+    )
+
+    sale_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("sales.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    incident_id: Mapped[UUIDv7] = mapped_column(Uuid(as_uuid=True), nullable=False, index=True)
+    incident_kind: Mapped[IncidentKind] = mapped_column(
+        Enum(IncidentKind, name="incident_kind", values_callable=_enum_values),
+        nullable=False,
+    )
+    resolution_type: Mapped[IncidentResolutionType] = mapped_column(
+        Enum(
+            IncidentResolutionType,
+            name="incident_resolution_type",
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
+    resolution_status: Mapped[IncidentResolutionStatus] = mapped_column(
+        Enum(
+            IncidentResolutionStatus,
+            name="incident_resolution_status",
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
+    resolved_by_id: Mapped[UUIDv7] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    resolved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
+    )
+    evidence_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operator_note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    fiscal_fn: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fiscal_fd: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fiscal_fpd: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    sale: Mapped[Sale] = relationship("Sale", back_populates="incident_resolutions")

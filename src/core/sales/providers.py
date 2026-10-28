@@ -143,6 +143,11 @@ class PaymentProvider(Protocol):
     def get_payment(self, external_id: str, request: PaymentRequest) -> ProviderOperation:
         """Read authoritative provider payment state without creating a charge."""
 
+    def request_payment_cancellation(
+        self, external_id: str, request: PaymentRequest
+    ) -> None:
+        """Request device-command cancellation without claiming a bank reversal."""
+
     def check_health(self) -> ProviderHealth:
         """Check provider API/configuration without claiming terminal readiness."""
 

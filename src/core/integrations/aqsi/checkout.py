@@ -146,8 +146,18 @@ class AqsiCheckoutAdapter:
             physical_device_ready=None,
         )
 
+    def request_payment_cancellation(
+        self, external_id: str, request: PaymentRequest
+    ) -> None:
+        """Request AQSI device-command cancellation without claiming a reversal."""
+        del request
+        try:
+            self._client.cancel_operation(external_id)
+        except AqsiApiError as exc:
+            raise _provider_error(exc) from exc
+
     def cancel_device_operation(self, external_id: str) -> dict[str, object]:
-        """Cancel one AQSI device command without requesting an acquiring reversal."""
+        """Backward-compatible low-level device cancellation capability."""
         return self._client.cancel_operation(external_id)
 
     def list_receipts(

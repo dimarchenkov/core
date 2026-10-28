@@ -6,8 +6,9 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from core.catalog.models import CatalogProduct, CatalogVariant
-from core.sales.enums import SaleStatus
+from core.sales.enums import IncidentKind, SaleStatus
 from core.sales.models import (
+    FinancialIncidentResolution,
     FinancialOperationEvent,
     Fiscalization,
     FiscalizationJob,
@@ -60,6 +61,30 @@ class SaleRepository:
         """Append immutable financial evidence in the caller's transaction."""
         self._session.add(event)
         return event
+
+    def add_incident_resolution(
+        self, resolution: FinancialIncidentResolution
+    ) -> FinancialIncidentResolution:
+        """Stage one auditable incident conclusion in the caller's transaction."""
+        self._session.add(resolution)
+        return resolution
+
+    def get_incident_resolution_for_update(
+        self,
+        *,
+        incident_kind: IncidentKind,
+        incident_id: UUIDv7,
+    ) -> FinancialIncidentResolution | None:
+        """Serialize repeated conclusions for the same financial incident track."""
+        return self._session.scalar(
+            select(FinancialIncidentResolution)
+            .where(
+                FinancialIncidentResolution.incident_kind == incident_kind,
+                FinancialIncidentResolution.incident_id == incident_id,
+                FinancialIncidentResolution.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
 
     def next_sale_number(self) -> int:
         """Reserve the next human-readable Sale number."""

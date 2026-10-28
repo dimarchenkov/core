@@ -20,6 +20,7 @@ AQSI_ADAPTER = ProviderAdapter(
     capabilities=frozenset(
         {
             ProviderCapability.PAYMENT,
+            ProviderCapability.PAYMENT_CANCELLATION,
             ProviderCapability.FISCALIZATION,
             ProviderCapability.CATALOG_PROJECTION,
         }

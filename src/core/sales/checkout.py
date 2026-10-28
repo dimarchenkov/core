@@ -130,8 +130,9 @@ class CheckoutService:
         *,
         owner_id: UUIDv7,
         risk_acknowledged: bool,
+        operator_note: str | None = None,
     ) -> Sale:
-        """Complete the original Sale after payment and receipt on the physical POS.
+        """Complete the original Sale after operator-reported payment/receipt on the POS.
 
         The original acquiring attempt remains a provider fact and may still be
         reconciled.  A separate cash-shaped PaymentAttempt is the effective
@@ -208,6 +209,7 @@ class CheckoutService:
                 "risk_acknowledged": True,
                 "confirmed_at": now.isoformat(),
                 "linked_payment_attempt_id": str(original.id),
+                "operator_note": operator_note.strip() if operator_note else None,
             },
             created_by_id=owner_id,
             updated_by_id=owner_id,
@@ -222,14 +224,27 @@ class CheckoutService:
             "effective_payment_attempt_id": str(fallback.id),
         }
         original.updated_by_id = owner_id
-        if original.job is not None and original.external_id is None:
-            if original.job.status is not PaymentJobStatus.PROCESSING:
+        if original.job is not None:
+            if (
+                original.external_id is None
+                and original.job.status is not PaymentJobStatus.PROCESSING
+            ):
                 original.job.status = PaymentJobStatus.FAILED
                 original.job.next_retry_at = None
                 original.job.completed_at = None
                 original.job.last_error = (
                     "Emergency fallback recorded; payment command cannot be dispatched again."
                 )
+                original.job.updated_by_id = owner_id
+            elif (
+                original.external_id is not None
+                and original.job.status is not PaymentJobStatus.PROCESSING
+            ):
+                original.job.status = PaymentJobStatus.QUEUED
+                original.job.next_retry_at = now
+                original.job.completed_at = None
+                original.job.last_error = None
+                original.job.reconciliation_requested_at = now
                 original.job.updated_by_id = owner_id
         sale.status = SaleStatus.PAID
         sale.paid_at = now
@@ -243,7 +258,7 @@ class CheckoutService:
             actor_id=owner_id,
             previous_status=original.status.value,
             new_status=PaymentStatus.SUCCEEDED.value,
-            safe_message="Оператор подтвердил оплату и фискальный чек на физической кассе.",
+            safe_message="Оператор сообщил об оплате и чеке на физической кассе.",
             metadata={
                 "risk_acknowledged": True,
                 "source": "EXTERNAL_POS",
@@ -259,7 +274,11 @@ class CheckoutService:
             actor_id=owner_id,
             new_status=PaymentStatus.SUCCEEDED.value,
             safe_message="Оплачено на кассе вручную.",
-            metadata={"source": "EXTERNAL_POS", "confirmation": "OPERATOR_CONFIRMED"},
+            metadata={
+                "source": "EXTERNAL_POS",
+                "confirmation": "OPERATOR_CONFIRMED",
+                "operator_note": operator_note.strip() if operator_note else None,
+            },
         )
         self._event(
             sale=sale,
@@ -278,6 +297,96 @@ class CheckoutService:
             ),
         )
         self._stage_paid_sale(sale, fallback, owner_id=owner_id)
+        self._commit()
+        return sale
+
+    def request_emergency_payment_cancellation(
+        self,
+        sale_id: UUIDv7,
+        *,
+        owner_id: UUIDv7,
+        attempt_id: UUIDv7,
+    ) -> Sale:
+        """Request one safe device cancellation after a read-only status check.
+
+        The request is durable and never treated as evidence that a bank charge
+        was canceled.  A later provider status query remains authoritative.
+        """
+        sale = self._locked_owned(sale_id, owner_id)
+        attempt = self._payment_by_id(sale, attempt_id)
+        fallback = self._emergency_fallback_payment(sale)
+        if (
+            fallback is None
+            or not attempt.accounting_superseded
+            or attempt.status is not PaymentStatus.PENDING
+            or not attempt.external_id
+        ):
+            self._commit()
+            return sale
+        cancellation = attempt.provider_metadata.get("emergency_cancellation")
+        if isinstance(cancellation, dict) and cancellation.get("state") in {
+            "requested",
+            "unknown",
+        }:
+            self._commit()
+            return sale
+        now = datetime.now(UTC)
+        try:
+            self._require_payment_provider().request_payment_cancellation(
+                attempt.external_id,
+                self._payment_request(sale, attempt),
+            )
+        except ProviderCallError as exc:
+            attempt.provider_metadata = {
+                **attempt.provider_metadata,
+                "emergency_cancellation": {
+                    "state": "unknown",
+                    "requested_at": now.isoformat(),
+                    "error_code": exc.code,
+                },
+            }
+            self._event(
+                sale=sale,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=attempt.id,
+                event_type=FinancialEventType.RECONCILIATION_INCONCLUSIVE,
+                correlation_id=self._payment_correlation(attempt),
+                actor_id=owner_id,
+                previous_status=attempt.status.value,
+                new_status=attempt.status.value,
+                provider=attempt.provider,
+                provider_operation_id=attempt.external_id,
+                error_code=exc.code,
+                safe_message=(
+                    "Результат запроса отмены команды неизвестен. CORE продолжит "
+                    "только безопасную проверку статуса."
+                ),
+            )
+        else:
+            attempt.provider_metadata = {
+                **attempt.provider_metadata,
+                "emergency_cancellation": {
+                    "state": "requested",
+                    "requested_at": now.isoformat(),
+                },
+            }
+            self._event(
+                sale=sale,
+                entity_type=FinancialEntityType.RECONCILIATION,
+                entity_id=attempt.id,
+                event_type=FinancialEventType.RECONCILIATION_REQUESTED,
+                correlation_id=self._payment_correlation(attempt),
+                actor_id=owner_id,
+                previous_status=attempt.status.value,
+                new_status=attempt.status.value,
+                provider=attempt.provider,
+                provider_operation_id=attempt.external_id,
+                safe_message=(
+                    "Запрошена отмена команды на устройстве. Банковское списание "
+                    "считается отменённым только после финального статуса провайдера."
+                ),
+            )
+        attempt.updated_by_id = owner_id
         self._commit()
         return sale
 
@@ -917,8 +1026,8 @@ class CheckoutService:
                     new_status=FiscalizationStatus.SKIPPED.value,
                     provider=None,
                     safe_message=(
-                        "Фискальный чек подтверждён оператором на физической кассе; "
-                        "CORE не формирует второй чек."
+                        "Оператор сообщил о чеке на физической кассе; CORE не формирует "
+                        "второй чек до отдельной проверки."
                         if payment.emergency_fallback
                         else "Оператор выбрал продажу без фискального чека."
                     ),

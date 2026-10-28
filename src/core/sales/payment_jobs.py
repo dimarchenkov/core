@@ -117,6 +117,19 @@ def run_payment_job(job_id: str) -> str:
                     provider_operation_id = payment.external_id
                     provider_status = payment.provider_metadata.get("provider_status")
                     _sync_operation(UUID(job_id), provider_operation_id)
+                    if (
+                        payment.status is PaymentStatus.PENDING
+                        and payment.accounting_superseded
+                        and payment.external_id is not None
+                    ):
+                        sale = checkout.request_emergency_payment_cancellation(
+                            sale_id,
+                            owner_id=owner_id,
+                            attempt_id=payment_attempt_id,
+                        )
+                        payment = next(
+                            item for item in sale.payments if item.id == payment_attempt_id
+                        )
                     if payment.status is PaymentStatus.SUCCEEDED:
                         final = "completed"
                         break

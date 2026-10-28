@@ -36,6 +36,11 @@ from core.sales.enums import (
     FinancialEventType,
     FiscalizationJobStatus,
     FiscalizationStatus,
+    FiscalVerificationOutcome,
+    IncidentKind,
+    IncidentResolutionChoice,
+    IncidentResolutionStatus,
+    IncidentResolutionType,
     PaymentJobStatus,
     PaymentStatus,
     SaleStatus,
@@ -47,7 +52,19 @@ from core.sales.financial_events import (
 )
 from core.sales.fiscalization_jobs import enqueue_sale_fiscalization
 from core.sales.health import collect_checkout_worker_health
-from core.sales.models import Fiscalization, FiscalizationJob, PaymentAttempt, PaymentJob, Sale
+from core.sales.incident_resolutions import (
+    IncidentResolutionConflictError,
+    IncidentResolutionNotFoundError,
+    IncidentResolutionService,
+)
+from core.sales.models import (
+    FinancialIncidentResolution,
+    Fiscalization,
+    FiscalizationJob,
+    PaymentAttempt,
+    PaymentJob,
+    Sale,
+)
 from core.sales.payment_jobs import enqueue_sale_payment
 from core.sales.providers import CheckoutProviderBinding
 from core.sales.repository import SaleRepository
@@ -58,12 +75,17 @@ from core.sales.schemas import (
     CheckoutStartRequest,
     CheckoutStockWarningRead,
     EmergencyFallbackRequest,
+    EmergencyIncidentResolutionRead,
+    EmergencyIncidentResolutionRequest,
+    FiscalVerificationRequest,
+    IncidentResolutionRead,
     SaleDiscountUpdate,
     SaleItemAddBarcode,
     SaleItemAddManual,
     SaleItemAddVariant,
     SaleItemQuantityChange,
     SaleRead,
+    SingleChargeResolutionRequest,
 )
 from core.sales.service import (
     SaleBarcodeNotFoundError,
@@ -219,6 +241,30 @@ def list_checkout_operations(
                     PaymentAttempt.provider_metadata[
                         "late_provider_approval_detected"
                     ].as_boolean().is_(True)
+                )
+                & ~Sale.incident_resolutions.any(
+                    (FinancialIncidentResolution.incident_kind
+                    == IncidentKind.PAYMENT_DUPLICATE_RISK)
+                    & (FinancialIncidentResolution.resolution_status
+                    == IncidentResolutionStatus.RESOLVED)
+                    & FinancialIncidentResolution.deleted_at.is_(None)
+                ),
+                Sale.incident_resolutions.any(
+                    (FinancialIncidentResolution.incident_kind
+                    == IncidentKind.FISCAL_RECEIPT_VERIFICATION)
+                    & (FinancialIncidentResolution.resolution_status
+                    != IncidentResolutionStatus.RESOLVED)
+                    & FinancialIncidentResolution.deleted_at.is_(None)
+                ),
+                Sale.fiscalization.has(
+                    Fiscalization.provider_metadata[
+                        "external_receipt_confirmed"
+                    ].as_boolean().is_(True)
+                )
+                & ~Sale.incident_resolutions.any(
+                    (FinancialIncidentResolution.incident_kind
+                    == IncidentKind.FISCAL_RECEIPT_VERIFICATION)
+                    & FinancialIncidentResolution.deleted_at.is_(None)
                 ),
                 Sale.payment_jobs.any(
                     ((PaymentJob.status == PaymentJobStatus.QUEUED)
@@ -308,9 +354,20 @@ def checkout_health(
                             "accounting_superseded"
                         ].as_boolean().is_(True)
                     )
-                    | PaymentAttempt.provider_metadata[
-                        "late_provider_approval_detected"
-                    ].as_boolean().is_(True)
+                    | (
+                        PaymentAttempt.provider_metadata[
+                            "late_provider_approval_detected"
+                        ].as_boolean().is_(True)
+                        & ~PaymentAttempt.sale.has(
+                            Sale.incident_resolutions.any(
+                                (FinancialIncidentResolution.incident_kind
+                                == IncidentKind.PAYMENT_DUPLICATE_RISK)
+                                & (FinancialIncidentResolution.resolution_status
+                                == IncidentResolutionStatus.RESOLVED)
+                                & FinancialIncidentResolution.deleted_at.is_(None)
+                            )
+                        )
+                    )
                 ),
             )
         )
@@ -319,6 +376,32 @@ def checkout_health(
             select(func.count(Fiscalization.id)).where(
                 Fiscalization.sale.has(Sale.owner_id == current_user.id),
                 Fiscalization.status == FiscalizationStatus.UNKNOWN,
+            )
+        )
+    ) or bool(
+        session.scalar(
+            select(func.count(Sale.id)).where(
+                Sale.owner_id == current_user.id,
+                Sale.deleted_at.is_(None),
+                or_(
+                    Sale.incident_resolutions.any(
+                        (FinancialIncidentResolution.incident_kind
+                        == IncidentKind.FISCAL_RECEIPT_VERIFICATION)
+                        & (FinancialIncidentResolution.resolution_status
+                        != IncidentResolutionStatus.RESOLVED)
+                        & FinancialIncidentResolution.deleted_at.is_(None)
+                    ),
+                    Sale.fiscalization.has(
+                        Fiscalization.provider_metadata[
+                            "external_receipt_confirmed"
+                        ].as_boolean().is_(True)
+                    )
+                    & ~Sale.incident_resolutions.any(
+                        (FinancialIncidentResolution.incident_kind
+                        == IncidentKind.FISCAL_RECEIPT_VERIFICATION)
+                        & FinancialIncidentResolution.deleted_at.is_(None)
+                    ),
+                ),
             )
         )
     )
@@ -476,6 +559,40 @@ def checkout_operation_detail(
         (item for item in reversed(sale.payments) if item.duplicate_payment_risk),
         None,
     )
+    emergency_original = next(
+        (
+            item
+            for item in reversed(sale.payments)
+            if fallback is not None
+            and not item.emergency_fallback
+            and item.accounting_superseded
+            and (
+                fallback.linked_payment_attempt_id is None
+                or fallback.linked_payment_attempt_id == str(item.id)
+            )
+        ),
+        None,
+    )
+    payment_incident = duplicate_payment or emergency_original
+    payment_resolution = next(
+        (
+            item
+            for item in reversed(sale.incident_resolutions)
+            if item.incident_kind is IncidentKind.PAYMENT_DUPLICATE_RISK
+            and (payment_incident is None or item.incident_id == payment_incident.id)
+            and item.deleted_at is None
+        ),
+        None,
+    )
+    payment_incident_unresolved = bool(
+        payment_incident
+        and payment_incident.status
+        in {PaymentStatus.PENDING, PaymentStatus.UNKNOWN, PaymentStatus.SUCCEEDED}
+        and not (
+            payment_resolution
+            and payment_resolution.resolution_status is IncidentResolutionStatus.RESOLVED
+        )
+    )
     review_payment = max(
         (
             item
@@ -491,8 +608,48 @@ def checkout_operation_detail(
         default=None,
     )
     fiscal = sale.fiscalization
+    fiscal_resolution = next(
+        (
+            item
+            for item in reversed(sale.incident_resolutions)
+            if item.incident_kind is IncidentKind.FISCAL_RECEIPT_VERIFICATION
+            and (fiscal is None or item.incident_id == fiscal.id)
+            and item.deleted_at is None
+        ),
+        None,
+    )
+    fiscal_verification_state = (
+        "verified"
+        if fiscal is not None and fiscal.status is FiscalizationStatus.SUCCEEDED
+        else "verified"
+        if fiscal_resolution
+        and fiscal_resolution.resolution_type
+        is IncidentResolutionType.FISCAL_RECEIPT_VERIFIED
+        else "missing"
+        if fiscal_resolution
+        and fiscal_resolution.resolution_type
+        is IncidentResolutionType.FISCAL_RECEIPT_MISSING
+        else "unknown"
+        if fiscal_resolution
+        and fiscal_resolution.resolution_type
+        is IncidentResolutionType.FISCAL_VERIFICATION_UNKNOWN
+        else "operator_reported"
+        if fiscal is not None and fiscal.external_receipt_confirmed and fallback is not None
+        else "unknown"
+        if fiscal is not None and fiscal.status is FiscalizationStatus.UNKNOWN
+        else "not_required"
+    )
+    fiscal_action_required = fiscal_verification_state in {
+        "operator_reported",
+        "missing",
+        "unknown",
+    }
     manual_review = bool(
-        review_payment or (fiscal and fiscal.status is FiscalizationStatus.UNKNOWN)
+        (
+            review_payment
+            and (not review_payment.duplicate_payment_risk or payment_incident_unresolved)
+        )
+        or fiscal_action_required
     )
     emergency_eligible = bool(
         fallback is None
@@ -506,7 +663,13 @@ def checkout_operation_detail(
     active = sale.status in {SaleStatus.PAYMENT_PENDING, SaleStatus.FISCALIZATION_PENDING}
     recovery_state = (
         "duplicate_payment_risk"
-        if duplicate_payment
+        if payment_incident_unresolved
+        else "fiscal_receipt_missing"
+        if fiscal_verification_state == "missing"
+        else "fiscal_verification_required"
+        if fiscal_verification_state == "operator_reported"
+        else "fiscal_verification_unknown"
+        if fiscal_verification_state == "unknown"
         else "manual_review_required"
         if manual_review
         else "external_pos_completed"
@@ -520,9 +683,14 @@ def checkout_operation_detail(
         else "idle"
     )
     instruction = (
-        "Возможное двойное списание: проверьте провайдера и примите отдельное решение "
-        "о возврате."
-        if duplicate_payment
+        "Сверьте операции AQSI и подтвердите одно списание только при наличии доказательства."
+        if payment_incident_unresolved
+        else (
+            "Требуется фискализация: найден только эквайринговый слип, фискальный чек отсутствует."
+        )
+        if fiscal_verification_state == "missing"
+        else "Проверьте наличие фискального чека отдельно от эквайринговой оплаты."
+        if fiscal_action_required
         else "Результат исходной операции неизвестен. Проверьте её у провайдера."
         if fallback
         else (
@@ -573,11 +741,195 @@ def checkout_operation_detail(
         emergency_fallback_recorded=fallback is not None,
         emergency_fallback_eligible=emergency_eligible,
         duplicate_payment_risk=duplicate_payment is not None,
+        payment_incident_unresolved=payment_incident_unresolved,
+        can_confirm_single_charge=bool(
+            payment_incident_unresolved
+            and duplicate_payment is not None
+            and duplicate_payment.status is PaymentStatus.SUCCEEDED
+            and duplicate_payment.external_id
+            and len(
+                [
+                    item
+                    for item in sale.payments
+                    if item.payment_method.value == "card"
+                    and item.provider is not None
+                    and item.status is PaymentStatus.SUCCEEDED
+                ]
+            )
+            == 1
+        ),
+        payment_resolution=(
+            IncidentResolutionRead.model_validate(payment_resolution)
+            if payment_resolution
+            else None
+        ),
+        fiscal_verification_state=fiscal_verification_state,
+        fiscal_action_required=fiscal_action_required,
+        fiscal_resolution=(
+            IncidentResolutionRead.model_validate(fiscal_resolution)
+            if fiscal_resolution
+            else None
+        ),
         operator_instruction=instruction,
         provider_identity=provider_identity,
         correlation_ids=correlation_ids,
         provider_operation_ids=provider_operation_ids,
     )
+
+
+@router.post(
+    "/operations/{sale_id}/resolve-single-charge",
+    response_model=IncidentResolutionRead,
+)
+def resolve_single_charge_incident(
+    sale_id: UUIDv7,
+    data: SingleChargeResolutionRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> FinancialIncidentResolution:
+    """Record an owned operator's evidence-based one-charge conclusion."""
+    try:
+        return IncidentResolutionService(session).confirm_single_charge(
+            sale_id,
+            owner_id=current_user.id,
+            confirmation=data.confirmation,
+            evidence_reference=data.evidence_reference,
+            operator_note=data.operator_note,
+        )
+    except IncidentResolutionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
+    except IncidentResolutionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/operations/{sale_id}/fiscal-verification",
+    response_model=IncidentResolutionRead,
+)
+def record_fiscal_verification(
+    sale_id: UUIDv7,
+    data: FiscalVerificationRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> FinancialIncidentResolution:
+    """Record external fiscal evidence without issuing a receipt or payment command."""
+    try:
+        return IncidentResolutionService(session).record_fiscal_verification(
+            sale_id,
+            owner_id=current_user.id,
+            outcome=data.outcome,
+            confirmation=data.confirmation,
+            evidence_reference=data.evidence_reference,
+            operator_note=data.operator_note,
+            fiscal_fn=data.fiscal_fn,
+            fiscal_fd=data.fiscal_fd,
+            fiscal_fpd=data.fiscal_fpd,
+        )
+    except IncidentResolutionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
+    except IncidentResolutionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/operations/{sale_id}/resolve-incident",
+    response_model=EmergencyIncidentResolutionRead,
+)
+def resolve_emergency_incident(
+    sale_id: UUIDv7,
+    data: EmergencyIncidentResolutionRequest,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> EmergencyIncidentResolutionRead:
+    """Record one compact operator choice without rewriting provider facts."""
+    if not data.confirmation:
+        raise HTTPException(status_code=409, detail="Подтвердите результат проверки")
+    try:
+        service = IncidentResolutionService(session)
+        if data.choice is IncidentResolutionChoice.CORRECTION_RECEIPT_FORMED:
+            service.record_fiscal_verification(
+                sale_id,
+                owner_id=current_user.id,
+                outcome=FiscalVerificationOutcome.VERIFIED,
+                confirmation=True,
+                evidence_reference="Оператор подтвердил формирование чека коррекции",
+                operator_note=data.operator_note,
+            )
+            message = "Формирование чека коррекции записано как операторское подтверждение."
+        elif data.choice is IncidentResolutionChoice.EXTERNAL_POS_PAYMENT_CONFIRMED:
+            sale = SaleService(session).get_sale(sale_id, owner_id=current_user.id)
+            fallback = next(
+                (item for item in reversed(sale.payments) if item.emergency_fallback),
+                None,
+            )
+            if fallback is None:
+                if not (current_user.is_admin or current_user.is_superuser):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Для аварийного подтверждения требуются права администратора.",
+                    )
+                sale = CheckoutService(session, None).confirm_external_pos_payment(
+                    sale_id,
+                    owner_id=current_user.id,
+                    risk_acknowledged=True,
+                    operator_note=data.operator_note,
+                )
+                if any(
+                    item.accounting_superseded
+                    and item.external_id is not None
+                    and item.job is not None
+                    and item.job.status is PaymentJobStatus.QUEUED
+                    for item in sale.payments
+                ):
+                    enqueue_sale_payment(sale.id)
+            service.record_payment_review(
+                sale_id,
+                owner_id=current_user.id,
+                resolution_type=IncidentResolutionType.EXTERNAL_POS_PAYMENT_CONFIRMED,
+                confirmation=True,
+                operator_note=data.operator_note,
+            )
+            message = "Оплата на кассе записана; исходная операция остаётся на сверке."
+        elif data.choice is IncidentResolutionChoice.ORIGINAL_OPERATION_CANCELED:
+            service.record_payment_review(
+                sale_id,
+                owner_id=current_user.id,
+                resolution_type=(
+                    IncidentResolutionType.ORIGINAL_OPERATION_CANCELED_CONFIRMED
+                ),
+                confirmation=True,
+                operator_note=data.operator_note,
+            )
+            message = "Проверка финальной отмены исходной операции записана."
+        else:
+            sale = SaleService(session).get_sale(sale_id, owner_id=current_user.id)
+            if any(item.emergency_fallback for item in sale.payments):
+                service.record_payment_review(
+                    sale_id,
+                    owner_id=current_user.id,
+                    resolution_type=IncidentResolutionType.MANUAL_REVIEW_CONFIRMED,
+                    confirmation=True,
+                    operator_note=data.operator_note,
+                )
+            else:
+                service.record_fiscal_verification(
+                    sale_id,
+                    owner_id=current_user.id,
+                    outcome=FiscalVerificationOutcome.UNKNOWN,
+                    confirmation=True,
+                    operator_note=(
+                        data.operator_note
+                        or "Проверено вручную; результат не меняет фискальный факт."
+                    ),
+                )
+            message = "Ручная проверка записана; неизвестные факты остаются открытыми."
+        return EmergencyIncidentResolutionRead(choice=data.choice, message=message)
+    except SaleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
+    except IncidentResolutionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
+    except IncidentResolutionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/operations/{sale_id}/reconcile", response_model=SaleRead)
@@ -967,11 +1319,21 @@ def confirm_external_pos_payment(
             detail="Для аварийного подтверждения требуются права администратора.",
         )
     try:
-        return CheckoutService(session, None).confirm_external_pos_payment(
+        sale = CheckoutService(session, None).confirm_external_pos_payment(
             sale_id,
             owner_id=current_user.id,
             risk_acknowledged=data.risk_acknowledged,
+            operator_note=data.operator_note,
         )
+        if any(
+            item.accounting_superseded
+            and item.external_id is not None
+            and item.job is not None
+            and item.job.status is PaymentJobStatus.QUEUED
+            for item in sale.payments
+        ):
+            enqueue_sale_payment(sale.id)
+        return sale
     except SaleNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
     except CheckoutStateError as exc:

@@ -134,6 +134,7 @@ def test_provider_registry_exposes_only_proven_aqsi_capabilities() -> None:
     assert adapter.capabilities == frozenset(
         {
             ProviderCapability.PAYMENT,
+            ProviderCapability.PAYMENT_CANCELLATION,
             ProviderCapability.FISCALIZATION,
             ProviderCapability.CATALOG_PROJECTION,
         }

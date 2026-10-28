@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel as PydanticBaseModel
-from pydantic import ConfigDict, Field, computed_field
+from pydantic import ConfigDict, Field, computed_field, model_validator
 
 from core.integrations.enums import IntegrationProvider
 from core.sales.enums import (
@@ -14,6 +14,11 @@ from core.sales.enums import (
     FinancialEventType,
     FiscalizationJobStatus,
     FiscalizationStatus,
+    FiscalVerificationOutcome,
+    IncidentKind,
+    IncidentResolutionChoice,
+    IncidentResolutionStatus,
+    IncidentResolutionType,
     PaymentJobStatus,
     PaymentMethod,
     PaymentStatus,
@@ -176,6 +181,25 @@ class FiscalizationJobRead(PydanticBaseModel):
     updated_at: datetime
 
 
+class IncidentResolutionRead(PydanticBaseModel):
+    """Safe operator resolution state linked to immutable financial evidence."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUIDv7
+    incident_id: UUIDv7
+    incident_kind: IncidentKind
+    resolution_type: IncidentResolutionType
+    resolution_status: IncidentResolutionStatus
+    resolved_by_id: UUIDv7
+    resolved_at: datetime
+    evidence_reference: str | None
+    operator_note: str | None
+    fiscal_fn: str | None
+    fiscal_fd: str | None
+    fiscal_fpd: str | None
+
+
 class SaleRead(PydanticBaseModel):
     """Complete server-authoritative Sale cart returned to clients."""
 
@@ -201,6 +225,7 @@ class SaleRead(PydanticBaseModel):
     payments: list[PaymentAttemptRead]
     fiscalization: FiscalizationRead | None
     fiscalization_job: FiscalizationJobRead | None
+    incident_resolutions: list[IncidentResolutionRead] = Field(default_factory=list)
 
     @computed_field
     @property
@@ -257,6 +282,59 @@ class EmergencyFallbackRequest(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
 
     risk_acknowledged: bool
+    operator_note: str | None = Field(default=None, min_length=3, max_length=1000)
+
+
+class SingleChargeResolutionRequest(PydanticBaseModel):
+    """Explicit operator attestation after comparing AQSI transaction records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: bool
+    evidence_reference: str = Field(min_length=3, max_length=255)
+    operator_note: str | None = Field(default=None, min_length=3, max_length=1000)
+
+
+class FiscalVerificationRequest(PydanticBaseModel):
+    """Non-mutating fiscal evidence review; it never asks a provider to issue a receipt."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: FiscalVerificationOutcome
+    confirmation: bool
+    evidence_reference: str | None = Field(default=None, min_length=3, max_length=255)
+    operator_note: str | None = Field(default=None, min_length=3, max_length=1000)
+    fiscal_fn: str | None = Field(default=None, min_length=1, max_length=64)
+    fiscal_fd: str | None = Field(default=None, min_length=1, max_length=64)
+    fiscal_fpd: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> FiscalVerificationRequest:
+        """Require evidence for a verified receipt and a note for unresolved outcomes."""
+        if self.outcome is FiscalVerificationOutcome.VERIFIED and not any(
+            (self.evidence_reference, self.fiscal_fn, self.fiscal_fd, self.fiscal_fpd)
+        ):
+            raise ValueError("Для подтверждения чека укажите ссылку или фискальные реквизиты")
+        if self.outcome is not FiscalVerificationOutcome.VERIFIED and not self.operator_note:
+            raise ValueError("Для результата проверки добавьте комментарий оператора")
+        return self
+
+
+class EmergencyIncidentResolutionRequest(PydanticBaseModel):
+    """One explicit operator choice; it never rewrites provider facts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    choice: IncidentResolutionChoice
+    confirmation: bool
+    operator_note: str | None = Field(default=None, min_length=3, max_length=1000)
+
+
+class EmergencyIncidentResolutionRead(PydanticBaseModel):
+    """Result of recording one compact incident action."""
+
+    choice: IncidentResolutionChoice
+    message: str
 
 
 class CheckoutHealthRead(PydanticBaseModel):
@@ -322,6 +400,12 @@ class CheckoutOperationDetailRead(PydanticBaseModel):
     emergency_fallback_recorded: bool = False
     emergency_fallback_eligible: bool = False
     duplicate_payment_risk: bool = False
+    payment_incident_unresolved: bool = False
+    can_confirm_single_charge: bool = False
+    payment_resolution: IncidentResolutionRead | None = None
+    fiscal_verification_state: str = "not_required"
+    fiscal_action_required: bool = False
+    fiscal_resolution: IncidentResolutionRead | None = None
     operator_instruction: str | None = None
     provider_identity: str | None = None
     correlation_ids: list[str] = Field(default_factory=list)

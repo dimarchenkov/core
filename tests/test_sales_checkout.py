@@ -47,13 +47,27 @@ from core.sales.enums import (
     FinancialEventType,
     FiscalizationJobStatus,
     FiscalizationStatus,
+    FiscalVerificationOutcome,
+    IncidentResolutionChoice,
+    IncidentResolutionStatus,
+    IncidentResolutionType,
     PaymentMethod,
     PaymentStatus,
     SaleItemSource,
     SaleStatus,
 )
 from core.sales.financial_events import append_financial_event, list_financial_events
-from core.sales.models import FinancialOperationEvent, PaymentAttempt, Sale
+from core.sales.incident_resolutions import (
+    IncidentResolutionConflictError,
+    IncidentResolutionNotFoundError,
+    IncidentResolutionService,
+)
+from core.sales.models import (
+    FinancialIncidentResolution,
+    FinancialOperationEvent,
+    PaymentAttempt,
+    Sale,
+)
 from core.sales.providers import (
     CheckoutProviderBinding,
     FiscalLine,
@@ -67,7 +81,12 @@ from core.sales.providers import (
 )
 from core.sales.repository import SaleRepository
 from core.sales.routes import checkout_operation_detail, list_checkout_operations
-from core.sales.schemas import CheckoutStartRequest, EmergencyFallbackRequest, SaleRead
+from core.sales.schemas import (
+    CheckoutStartRequest,
+    EmergencyFallbackRequest,
+    EmergencyIncidentResolutionRequest,
+    SaleRead,
+)
 from core.sales.service import SaleNotDraftError, SaleService
 from core.shared.db import Base
 from core.shared.db.types import generate_uuid_v7
@@ -80,6 +99,9 @@ class FakeCheckoutProvider:
         """Initialize pending provider outcomes and call capture lists."""
         self.payment_initiations: list[PaymentRequest] = []
         self.payment_polls = 0
+        self.payment_cancellations: list[str] = []
+        self.payment_cancellation_error: ProviderCallError | None = None
+        self.payment_state_after_cancellation: ProviderOperation | None = None
         self.fiscal_initiations: list[FiscalRequest] = []
         self.fiscal_lookups: list[FiscalRequest] = []
         self.payment_state = ProviderOperation(
@@ -109,6 +131,17 @@ class FakeCheckoutProvider:
         if self.payment_error:
             raise self.payment_error
         return self.payment_state
+
+    def request_payment_cancellation(
+        self, external_id: str, request: PaymentRequest
+    ) -> None:
+        """Capture a device cancellation request without simulating a reversal."""
+        del request
+        self.payment_cancellations.append(external_id)
+        if self.payment_cancellation_error:
+            raise self.payment_cancellation_error
+        if self.payment_state_after_cancellation is not None:
+            self.payment_state = self.payment_state_after_cancellation
 
     def initiate_fiscalization(self, request: FiscalRequest) -> ProviderOperation:
         """Record one itemized receipt initiation."""
@@ -142,6 +175,7 @@ class FakePaymentProvider:
         """Initialize deterministic payment initiation and polling results."""
         self.initiations: list[PaymentRequest] = []
         self.polls: list[str] = []
+        self.cancellations: list[str] = []
         self.initiate_result = ProviderOperation(
             ProviderOutcomeState.PENDING,
             external_id="fake-payment-operation",
@@ -158,6 +192,13 @@ class FakePaymentProvider:
         del request
         self.polls.append(external_id)
         return self.poll_result
+
+    def request_payment_cancellation(
+        self, external_id: str, request: PaymentRequest
+    ) -> None:
+        """Capture one generic device-command cancellation request."""
+        del request
+        self.cancellations.append(external_id)
 
     def check_health(self) -> ProviderHealth:
         """Return a stable fake health result."""
@@ -1224,6 +1265,7 @@ class RecordingAqsiClient:
         self.operation_calls: list[str] = []
         self.existing_receipt: dict[str, object] | None = None
         self.receipt_lookups: list[tuple[str, datetime]] = []
+        self.cancellation_calls: list[str] = []
 
     def create_purchase(self, payload: dict[str, object]) -> dict[str, object]:
         """Capture acquiring payload."""
@@ -1234,6 +1276,11 @@ class RecordingAqsiClient:
         """Return configured operation state."""
         self.operation_calls.append(operation_id)
         return self.operation
+
+    def cancel_operation(self, operation_id: str) -> dict[str, object]:
+        """Capture one device-operation cancellation command."""
+        self.cancellation_calls.append(operation_id)
+        return {"operationId": operation_id}
 
     def create_receipt(self, payload: dict[str, object]) -> dict[str, object]:
         """Capture itemized fiscal payload."""
@@ -1474,6 +1521,33 @@ def test_aqsi_adapter_maps_terminal_canceled_separately_from_unknown() -> None:
 
     assert result.state is ProviderOutcomeState.CANCELED
     assert result.error_code == "aqsi_canceled"
+
+
+def test_aqsi_adapter_requests_device_cancellation_without_claiming_final_state() -> None:
+    """AQSI cancellation is a command only; final state still comes from GET."""
+    settings = Settings(
+        jwt_secret="test-only-jwt-secret-at-least-32-bytes",
+        aqsi_api_key=SecretStr("not-used-by-double"),
+        aqsi_sale_spike_device_id="748887",
+        aqsi_sale_spike_tax_system_code=2,
+        aqsi_tax_code=6,
+    )
+    client = RecordingAqsiClient()
+    adapter = AqsiCheckoutAdapter(settings, cast(AqsiHttpClient, client))
+    request = PaymentRequest(
+        sale_id=generate_uuid_v7(),
+        attempt_id=generate_uuid_v7(),
+        idempotency_key="payment-key",
+        amount=Decimal("10.00"),
+        currency="RUB",
+        method=PaymentMethod.CARD,
+    )
+
+    result = adapter.request_payment_cancellation("payment-op", request)
+
+    assert result is None
+    assert client.cancellation_calls == ["payment-op"]
+    assert client.operation_calls == []
 
 
 def test_durable_fiscalization_job_claim_prevents_second_worker(
@@ -2303,6 +2377,454 @@ def test_fallback_wins_race_and_late_approval_creates_duplicate_risk(
     }
 
 
+def test_operator_resolves_single_charge_without_new_financial_operation(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Resolution preserves both facts while inventory and revenue remain exactly once."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = _succeeded_payment(cast(str, original.external_id))
+    completed = checkout.process_payment(
+        sale.id,
+        owner_id=user.id,
+        attempt_id=original.id,
+    )
+    payment_count = len(completed.payments)
+    stock_count = session.query(StockMovement).count()
+    fiscal_count = len(provider.fiscal_initiations)
+    initiation_count = len(provider.payment_initiations)
+
+    service = IncidentResolutionService(session)
+    resolution = service.confirm_single_charge(
+        sale.id,
+        owner_id=user.id,
+        confirmation=True,
+        evidence_reference=cast(str, original.external_id),
+        operator_note="Сверена одна операция 310 ₽ в личном кабинете AQSI.",
+    )
+    repeated = service.confirm_single_charge(
+        sale.id,
+        owner_id=user.id,
+        confirmation=True,
+        evidence_reference="повторная отправка формы",
+    )
+
+    assert repeated.id == resolution.id
+    assert resolution.resolution_type is IncidentResolutionType.SINGLE_CHARGE_OPERATOR_CONFIRMED
+    assert resolution.resolution_status is IncidentResolutionStatus.RESOLVED
+    assert len(completed.payments) == payment_count == 2
+    assert original.status is PaymentStatus.SUCCEEDED
+    assert original.duplicate_payment_risk is True
+    assert original.accounting_superseded is True
+    assert session.query(StockMovement).count() == stock_count == 1
+    assert len(provider.payment_initiations) == initiation_count == 1
+    assert len(provider.fiscal_initiations) == fiscal_count == 0
+    assert session.query(FinancialIncidentResolution).count() == 1
+    for event_type in (
+        FinancialEventType.PAYMENT_INCIDENT_REVIEWED,
+        FinancialEventType.SINGLE_CHARGE_OPERATOR_CONFIRMED,
+        FinancialEventType.PAYMENT_INCIDENT_RESOLVED,
+    ):
+        assert (
+            session.scalar(
+                select(func.count(FinancialOperationEvent.id)).where(
+                    FinancialOperationEvent.sale_id == sale.id,
+                    FinancialOperationEvent.event_type == event_type,
+                )
+            )
+            == 1
+        )
+    detail = checkout_operation_detail(sale.id, session, user, 100, None)
+    assert detail.duplicate_payment_risk is True
+    assert detail.payment_incident_unresolved is False
+    assert detail.payment_resolution.id == resolution.id
+    assert detail.fiscal_verification_state == "operator_reported"
+    assert detail.manual_review_required is True
+    assert detail.recovery_state == "fiscal_verification_required"
+
+    period = resolve_sales_period(
+        SalesPeriodPreset.TODAY,
+        "UTC",
+        now=completed.completed_at,
+    )
+    analytics = SalesAnalyticsReadService(session, "UTC")
+    assert analytics.summary(period).sales_revenue == completed.total_amount
+    assert sum(item.revenue for item in analytics.payment_methods(period)) == completed.total_amount
+
+
+def test_fiscal_review_missing_unknown_and_later_verified_are_separate_from_payment(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Fiscal evidence can progress to verified without payment or fiscal provider commands."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = _succeeded_payment(cast(str, original.external_id))
+    checkout.process_payment(sale.id, owner_id=user.id, attempt_id=original.id)
+    resolutions = IncidentResolutionService(session)
+    resolutions.confirm_single_charge(
+        sale.id,
+        owner_id=user.id,
+        confirmation=True,
+        evidence_reference=cast(str, original.external_id),
+    )
+    initial_payment_calls = len(provider.payment_initiations)
+
+    unknown = resolutions.record_fiscal_verification(
+        sale.id,
+        owner_id=user.id,
+        outcome=FiscalVerificationOutcome.UNKNOWN,
+        confirmation=True,
+        operator_note="В архиве смены чек пока не найден.",
+    )
+    assert unknown.resolution_status is IncidentResolutionStatus.UNKNOWN
+    missing = resolutions.record_fiscal_verification(
+        sale.id,
+        owner_id=user.id,
+        outcome=FiscalVerificationOutcome.MISSING,
+        confirmation=True,
+        operator_note="На кассе найден только эквайринговый приход.",
+    )
+    assert missing.id == unknown.id
+    assert missing.resolution_status is IncidentResolutionStatus.REQUIRES_ACTION
+    missing_detail = checkout_operation_detail(sale.id, session, user, 100, None)
+    assert missing_detail.payment_incident_unresolved is False
+    assert missing_detail.fiscal_verification_state == "missing"
+    assert missing_detail.manual_review_required is True
+    assert missing_detail.recovery_state == "fiscal_receipt_missing"
+    settings = Settings(jwt_secret="test", _env_file=None)
+    assert sale in list_checkout_operations(
+        session,
+        settings,
+        user,
+        state="attention",
+        date_from=None,
+        date_to=None,
+        limit=100,
+    )
+
+    verified = resolutions.record_fiscal_verification(
+        sale.id,
+        owner_id=user.id,
+        outcome=FiscalVerificationOutcome.VERIFIED,
+        confirmation=True,
+        evidence_reference="Сверка архива смены AQSI",
+        operator_note="Фискальный документ найден после повторной сверки.",
+        fiscal_fn="9999078900001234",
+        fiscal_fd="1678",
+        fiscal_fpd="1234567890",
+    )
+    repeated = resolutions.record_fiscal_verification(
+        sale.id,
+        owner_id=user.id,
+        outcome=FiscalVerificationOutcome.VERIFIED,
+        confirmation=True,
+        evidence_reference="повторная отправка",
+    )
+
+    assert repeated.id == verified.id == unknown.id
+    assert verified.resolution_status is IncidentResolutionStatus.RESOLVED
+    assert verified.fiscal_fn == "9999078900001234"
+    assert verified.fiscal_fd == "1678"
+    assert verified.fiscal_fpd == "1234567890"
+    assert sale.fiscalization.status is FiscalizationStatus.SKIPPED
+    assert sale.fiscalization.external_receipt_confirmed is True
+    assert len(provider.payment_initiations) == initial_payment_calls
+    assert provider.fiscal_initiations == []
+    assert session.query(StockMovement).count() == 1
+    detail = checkout_operation_detail(sale.id, session, user, 100, None)
+    assert detail.fiscal_verification_state == "verified"
+    assert detail.manual_review_required is False
+    assert detail.recovery_state == "external_pos_completed"
+    assert sale not in list_checkout_operations(
+        session,
+        settings,
+        user,
+        state="attention",
+        date_from=None,
+        date_to=None,
+        limit=100,
+    )
+    assert {
+        FinancialEventType.FISCAL_VERIFICATION_UNKNOWN_RECORDED,
+        FinancialEventType.FISCAL_RECEIPT_MISSING_REPORTED,
+        FinancialEventType.FISCAL_RECEIPT_VERIFIED,
+    }.issubset({event.event_type for event in detail.events})
+
+
+def test_one_incident_resolution_flow_keeps_payment_and_fiscal_facts_separate(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compact choices reuse current facts and never clear another unresolved track."""
+    user, variant, _, provider, binding = checkout_setup
+    user.is_admin = True
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    monkeypatch.setattr(sales_routes_module, "enqueue_sale_payment", lambda sale_id: True)
+
+    payment_result = sales_routes_module.resolve_emergency_incident(
+        sale.id,
+        EmergencyIncidentResolutionRequest(
+            choice=IncidentResolutionChoice.EXTERNAL_POS_PAYMENT_CONFIRMED,
+            confirmation=True,
+            operator_note="Оплата и чек проверены на физической кассе.",
+        ),
+        session,
+        user,
+    )
+    payment_detail = checkout_operation_detail(sale.id, session, user, 100, None)
+
+    assert payment_result.choice is IncidentResolutionChoice.EXTERNAL_POS_PAYMENT_CONFIRMED
+    assert payment_detail.payment_resolution is not None
+    assert (
+        payment_detail.payment_resolution.resolution_type
+        is IncidentResolutionType.EXTERNAL_POS_PAYMENT_CONFIRMED
+    )
+    assert (
+        payment_detail.payment_resolution.resolution_status
+        is IncidentResolutionStatus.REQUIRES_ACTION
+    )
+    assert payment_detail.fiscal_verification_state == "operator_reported"
+    assert payment_detail.fiscal_action_required is True
+    assert payment_detail.manual_review_required is True
+    assert len(provider.payment_initiations) == 1
+    assert provider.fiscal_initiations == []
+    assert session.query(StockMovement).count() == 1
+
+    original.status = PaymentStatus.CANCELED
+    session.commit()
+    canceled_result = sales_routes_module.resolve_emergency_incident(
+        sale.id,
+        EmergencyIncidentResolutionRequest(
+            choice=IncidentResolutionChoice.ORIGINAL_OPERATION_CANCELED,
+            confirmation=True,
+        ),
+        session,
+        user,
+    )
+    canceled_detail = checkout_operation_detail(sale.id, session, user, 100, None)
+
+    assert canceled_result.choice is IncidentResolutionChoice.ORIGINAL_OPERATION_CANCELED
+    assert (
+        canceled_detail.payment_resolution.resolution_type
+        is IncidentResolutionType.ORIGINAL_OPERATION_CANCELED_CONFIRMED
+    )
+    assert (
+        canceled_detail.payment_resolution.resolution_status
+        is IncidentResolutionStatus.RESOLVED
+    )
+    assert canceled_detail.fiscal_action_required is True
+    assert canceled_detail.manual_review_required is True
+
+    correction_result = sales_routes_module.resolve_emergency_incident(
+        sale.id,
+        EmergencyIncidentResolutionRequest(
+            choice=IncidentResolutionChoice.CORRECTION_RECEIPT_FORMED,
+            confirmation=True,
+            operator_note="Чек коррекции сверён в архиве смены.",
+        ),
+        session,
+        user,
+    )
+    final_detail = checkout_operation_detail(sale.id, session, user, 100, None)
+
+    assert correction_result.choice is IncidentResolutionChoice.CORRECTION_RECEIPT_FORMED
+    assert final_detail.fiscal_verification_state == "verified"
+    assert final_detail.manual_review_required is False
+    assert original.external_id is not None
+    assert len(provider.payment_initiations) == 1
+    assert provider.fiscal_initiations == []
+    assert session.query(StockMovement).count() == 1
+
+
+def test_manual_resolution_choice_retains_unknown_payment_and_event_history(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Manual review is evidence, not a fabricated provider conclusion."""
+    user, variant, _, _, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    original.status = PaymentStatus.UNKNOWN
+    session.commit()
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    event_count = session.query(FinancialOperationEvent).count()
+
+    resolution = IncidentResolutionService(session).record_payment_review(
+        sale.id,
+        owner_id=user.id,
+        resolution_type=IncidentResolutionType.MANUAL_REVIEW_CONFIRMED,
+        confirmation=True,
+        operator_note="Сверено вручную, результат банка не установлен.",
+    )
+
+    assert resolution.resolution_status is IncidentResolutionStatus.UNKNOWN
+    assert original.status is PaymentStatus.UNKNOWN
+    assert original.external_id is not None
+    assert session.query(FinancialOperationEvent).count() == event_count + 1
+    assert session.query(StockMovement).count() == 1
+    assert sale.fiscalization.status is FiscalizationStatus.SKIPPED
+
+
+def test_operation_detail_uses_frozen_sale_item_snapshots(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Operational detail never substitutes current Catalog names or prices."""
+    user, variant, _, _, _ = checkout_setup
+    sale = _sale_with_item(session, user, variant, quantity=2)
+    frozen = sale.items[0]
+    frozen_name = frozen.display_label_snapshot
+    frozen_price = frozen.unit_price
+    variant.title = "Новое имя после продажи"
+    price = session.scalar(select(Price).where(Price.variant_id == variant.id))
+    price.amount = Decimal("999.00")
+    session.commit()
+
+    detail = checkout_operation_detail(sale.id, session, user, 100, None)
+    item = detail.sale.items[0]
+
+    assert item.display_label_snapshot == frozen_name
+    assert item.unit_price == frozen_price
+    assert item.quantity == 2
+    assert item.line_total == frozen_price * 2
+
+
+def test_incident_resolution_rejects_unowned_and_unconfirmed_requests(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Ownership and explicit attestation are enforced before any audit mutation."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = _succeeded_payment(cast(str, original.external_id))
+    checkout.process_payment(sale.id, owner_id=user.id, attempt_id=original.id)
+    other = User(email="other@example.com", full_name="Other", password_hash="unused")
+    session.add(other)
+    session.commit()
+    service = IncidentResolutionService(session)
+
+    with pytest.raises(IncidentResolutionNotFoundError):
+        service.confirm_single_charge(
+            sale.id,
+            owner_id=other.id,
+            confirmation=True,
+            evidence_reference=cast(str, original.external_id),
+        )
+    with pytest.raises(IncidentResolutionConflictError, match="Подтвердите"):
+        service.confirm_single_charge(
+            sale.id,
+            owner_id=user.id,
+            confirmation=False,
+            evidence_reference=cast(str, original.external_id),
+        )
+    assert session.query(FinancialIncidentResolution).count() == 0
+
+
+def test_single_charge_resolution_is_blocked_when_two_provider_charges_are_known(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+) -> None:
+    """Known multiple provider approvals remain an unresolved refund incident."""
+    user, variant, integration, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = _succeeded_payment(cast(str, original.external_id))
+    checkout.process_payment(sale.id, owner_id=user.id, attempt_id=original.id)
+    second_charge = PaymentAttempt(
+        sale_id=sale.id,
+        integration_id=integration.id,
+        provider=IntegrationProvider.AQSI,
+        payment_method=PaymentMethod.CARD,
+        requested_amount=sale.total_amount,
+        fiscalization_required=True,
+        currency="RUB",
+        external_id="known-second-provider-charge",
+        status=PaymentStatus.SUCCEEDED,
+        idempotency_key=f"sale:{sale.id}:known-second-charge",
+        attempt_number=3,
+        provider_metadata={},
+        created_by_id=user.id,
+        updated_by_id=user.id,
+    )
+    sale.payments.append(second_charge)
+    session.commit()
+
+    with pytest.raises(IncidentResolutionConflictError, match="несколько"):
+        IncidentResolutionService(session).confirm_single_charge(
+            sale.id,
+            owner_id=user.id,
+            confirmation=True,
+            evidence_reference=cast(str, original.external_id),
+        )
+
+    assert session.query(FinancialIncidentResolution).count() == 0
+    assert session.query(StockMovement).count() == 1
+    assert provider.fiscal_initiations == []
+
+
 def test_emergency_fallback_endpoint_requires_admin_and_reconciliation_remains_read_only(
     session: Session,
     checkout_setup: tuple[
@@ -2324,11 +2846,11 @@ def test_emergency_fallback_endpoint_requires_admin_and_reconciliation_remains_r
 
     user.is_admin = True
     session.commit()
-    completed = sales_routes_module.confirm_external_pos_payment(sale.id, request, session, user)
     wakeups: list[object] = []
     monkeypatch.setattr(
         sales_routes_module, "enqueue_sale_payment", lambda sale_id: wakeups.append(sale_id)
     )
+    completed = sales_routes_module.confirm_external_pos_payment(sale.id, request, session, user)
     sales_routes_module.reconcile_checkout_operation(sale.id, session, user)
 
     assert completed.status is SaleStatus.COMPLETED
@@ -2381,6 +2903,126 @@ def test_payment_worker_records_late_approval_against_original_attempt(
     assert len(provider.payment_initiations) == 1
     assert session.query(StockMovement).count() == 1
     assert completed.fiscalization_job is None
+    assert provider.payment_cancellations == []
+
+
+def test_emergency_worker_cancels_device_command_then_verifies_final_status(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker polls first, requests one cancellation, then trusts only final GET state."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = ProviderOperation(
+        ProviderOutcomeState.PENDING,
+        external_id=cast(str, original.external_id),
+    )
+    provider.payment_state_after_cancellation = ProviderOperation(
+        ProviderOutcomeState.CANCELED,
+        external_id=cast(str, original.external_id),
+    )
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(payment_jobs_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        payment_jobs_module,
+        "CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
+        )(),
+    )
+    monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0, 0.0))
+    monkeypatch.setattr(payment_jobs_module, "enqueue_sale_fiscalization", lambda sale_id: False)
+
+    assert payment_jobs_module.run_payment_job(str(original.job.id)) == "completed"
+    session.expire_all()
+    completed = session.get(Sale, sale.id)
+    original = next(item for item in completed.payments if not item.emergency_fallback)
+
+    assert provider.payment_polls == 2
+    assert provider.payment_cancellations == [original.external_id]
+    assert original.status is PaymentStatus.CANCELED
+    assert original.provider_metadata["emergency_cancellation"]["state"] == "requested"
+    assert completed.status is SaleStatus.COMPLETED
+    assert len([item for item in completed.payments if not item.accounting_superseded]) == 1
+    assert session.query(StockMovement).count() == 1
+    assert completed.fiscalization.status is FiscalizationStatus.SKIPPED
+    assert provider.fiscal_initiations == []
+
+
+@pytest.mark.parametrize("outcome_unknown", [False, True])
+def test_emergency_worker_does_not_repeat_failed_or_ambiguous_cancellation_post(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+    outcome_unknown: bool,
+) -> None:
+    """A failed cancellation response causes GET retries, never a blind second POST."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    original = pending.payments[0]
+    checkout.confirm_external_pos_payment(
+        sale.id,
+        owner_id=user.id,
+        risk_acknowledged=True,
+    )
+    provider.payment_state = ProviderOperation(
+        ProviderOutcomeState.PENDING,
+        external_id=cast(str, original.external_id),
+    )
+    provider.payment_cancellation_error = ProviderCallError(
+        "timeout",
+        "Cancellation response was not received.",
+        outcome_unknown=outcome_unknown,
+    )
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(payment_jobs_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        payment_jobs_module,
+        "CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
+        )(),
+    )
+    monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", (0.0, 0.0))
+    monkeypatch.setattr(payment_jobs_module, "get_checkout_queue", lambda: object())
+    monkeypatch.setattr(payment_jobs_module, "enqueue_payment_job", lambda *args, **kwargs: None)
+
+    assert payment_jobs_module.run_payment_job(str(original.job.id)) == "queued"
+    session.expire_all()
+    original = next(
+        item for item in session.get(Sale, sale.id).payments if not item.emergency_fallback
+    )
+    original.job.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+    session.commit()
+    assert payment_jobs_module.run_payment_job(str(original.job.id)) == "queued"
+    session.expire_all()
+    original = next(
+        item for item in session.get(Sale, sale.id).payments if not item.emergency_fallback
+    )
+
+    assert provider.payment_cancellations == [original.external_id]
+    assert provider.payment_polls >= 4
+    assert original.status is PaymentStatus.PENDING
+    assert original.provider_metadata["emergency_cancellation"]["state"] == "unknown"
+    assert session.query(StockMovement).count() == 1
+    assert session.get(Sale, sale.id).fiscalization_job is None
 
 
 def test_payment_recovery_never_reopens_completed_external_pos_sale(
