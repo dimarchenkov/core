@@ -357,7 +357,8 @@ UNKNOWN quarantine, event journal, exactly-once local Inventory и emergency fal
 Persisted `FiscalizationJob.aqsi_operation_id` пока не переименован: это историческая колонка.
 Generic worker обращается к ней через provider-neutral `provider_operation_id`, а API временно
 возвращает оба имени для обратной совместимости. Cancellation, refund и отдельный receipt-details
-workflow не реализованы; capability registry их не заявляет для AQSI.
+workflow в Phase D не использовались. Ниже описано добавленное позднее строго ограниченное
+device-operation cancellation; reversal/refund по-прежнему отсутствуют.
 
 ### Ручной UAT Phase D
 
@@ -413,3 +414,59 @@ fiscalization и jobs, действительно превысившие configu
    stale job и late-approval предупреждение. Технические IDs не должны появляться в основной кассе.
 7. Для заранее подготовленного безопасного сценария Phase C проверить отображение «Оплачено на
    кассе» и сохранение исходной операции; не провоцировать неоднозначное реальное списание.
+
+## P1: разрешение финансовых инцидентов
+
+Позднее подтверждение исходной provider payment после аварийного «Оплачено на кассе» остаётся
+неизменяемым фактом. CORE не удаляет ни исходный `PaymentAttempt`, ни emergency fallback и не
+запускает новую оплату. Текущий итог ручной сверки хранится отдельно в
+`FinancialIncidentResolution`, а каждый вывод оператора добавляется в append-only
+`FinancialOperationEvent`. Повторный запрос идемпотентен; блокировка Sale и уникальность
+`incident_kind + incident_id` сериализуют конкурирующие подтверждения.
+
+`SINGLE_CHARGE_OPERATOR_CONFIRMED` разрешён только когда исходная provider operation уже имеет
+`SUCCEEDED`, известен provider operation ID и CORE видит ровно одну успешную provider-backed
+CARD-попытку. Это операторское подтверждение по внешнему доказательству, а не автоматическое
+утверждение CORE об отсутствии второй транзакции. Effective payment не переключается: исторический
+fallback остаётся единственным учитываемым PaymentAttempt, исходный approval остаётся
+`accounting_superseded`; Sale, Inventory и revenue не меняются.
+
+Фискальная проверка является отдельным incident track. Старое аварийное утверждение о чеке
+показывается как `OPERATOR_REPORTED`, а не как проверенный фискальный документ. Оператор может
+сохранить `VERIFIED` вместе со ссылкой/ФН/ФД/ФПД, `MISSING / REQUIRES_ACTION` либо `UNKNOWN`.
+Переход из missing/unknown в verified допустим после появления доказательства. Исходный
+`Fiscalization(SKIPPED)` не переписывается, `receipt.process` и коррекционный чек автоматически не
+вызываются. Эквайринговый слип явно не считается фискальным чеком.
+
+Экран «Чеки и операции» показывает два независимых результата: «Оплата сверена» и состояние
+фискального чека. Предупреждение исчезает только когда все относящиеся к продаже incident tracks
+разрешены; подтверждённое отсутствие чека продолжает показывать «Требуется фискализация».
+
+## Emergency workflow simplification
+
+После операторского «Оплата прошла на кассе» исходный `PaymentAttempt` не удаляется и его
+provider result не переписывается. Если operation ID известен, существующий `PaymentJob` снова
+ставится на сверку. Worker сначала выполняет status GET. Только пока авторитетный результат
+остаётся `PENDING`, он один раз вызывает AQSI device-operation cancellation, сохраняет факт
+запроса в `PaymentAttempt.provider_metadata` и затем проверяет финальный статус повторными GET.
+Ответ cancellation endpoint сам по себе не считается отменой банковского списания. При
+неоднозначном ответе второй cancellation POST автоматически не отправляется; сохраняется
+`UNKNOWN` результата запроса и продолжаются только безопасные status query. Reversal/refund не
+выполняются.
+
+Поздний `SUCCEEDED` сохраняется как исходный provider fact и как риск двойного списания. Он не
+создаёт второй effective payment, повторное движение Inventory или новый fiscal command. При
+отсутствующем operation ID worker не создаёт новую команду и оставляет ручную проверку.
+
+Экран detail использует один action «Решить инцидент». В нём оператор может подтвердить чек
+коррекции, оплату на физической кассе, уже подтверждённую провайдером отмену исходной операции
+или записать иной результат ручной проверки. Это evidence оператора, хранимое в существующем
+`FinancialIncidentResolution` и append-only `FinancialOperationEvent`; оно не подменяет provider
+status. Payment и fiscal tracks остаются независимыми, поэтому подтверждение оплаты не закрывает
+обязанность проверить или исправить отсутствующий чек.
+
+В detail сначала показывается состав из frozen `SaleItem` snapshots (название, количество,
+сохранённая цена и сумма строки). Текущие Catalog цены не запрашиваются. Raw enum, provider ID,
+correlation ID и журнал событий находятся в сворачиваемых «Технических подробностях».
+
+Перед production rollout требуется применить migration `0056_emergency_choices`.

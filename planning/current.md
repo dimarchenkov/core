@@ -393,3 +393,14 @@ ranking сохраняют различие источников и не соз�
 Надёжность реальной оплаты и фискализации имеет приоритет над менее критичными pre-1.0
 возможностями. Browser является только инициатором/наблюдателем; acquiring и fiscalization
 продолжаются через durable DB jobs, worker recovery и безопасную reconciliation.
+
+P1 incident resolution добавляет штатную операторскую сверку late approval и независимую проверку
+фискального документа. Исходные payment/fiscal facts не переписываются, новые внешние команды не
+создаются; до применения migration `0055_incident_resolutions` функциональность остаётся
+в UAT pending.
+
+Emergency workflow simplification добавляет только device-command cancellation после status GET:
+это не reversal/refund и не доказательство отмены списания. Один compact resolution UI сохраняет
+операторское evidence в существующих incident/event моделях, а payment/fiscal tracks остаются
+раздельными. Frozen SaleItems показываются до технической истории. До применения migration
+`0056_emergency_choices` новые варианты решения остаются в UAT pending.
