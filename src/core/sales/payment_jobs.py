@@ -119,10 +119,13 @@ def run_payment_job(job_id: str) -> str:
                     _sync_operation(UUID(job_id), provider_operation_id)
                     if (
                         payment.status is PaymentStatus.PENDING
-                        and payment.accounting_superseded
+                        and (
+                            payment.accounting_superseded
+                            or payment.cancellation_requested
+                        )
                         and payment.external_id is not None
                     ):
-                        sale = checkout.request_emergency_payment_cancellation(
+                        sale = checkout.request_pending_payment_cancellation(
                             sale_id,
                             owner_id=owner_id,
                             attempt_id=payment_attempt_id,

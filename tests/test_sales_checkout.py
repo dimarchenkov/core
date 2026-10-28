@@ -1657,6 +1657,7 @@ def test_payment_worker_completes_and_atomically_creates_fiscal_job(
     assert paid.fiscalization_job is not None
     assert paid.status is SaleStatus.FISCALIZATION_PENDING
     assert len(provider.payment_initiations) == 1
+    assert provider.payment_cancellations == []
 
 
 def test_payment_worker_quarantines_unknown_command_without_operation_id(
@@ -2906,6 +2907,154 @@ def test_payment_worker_records_late_approval_against_original_attempt(
     assert provider.payment_cancellations == []
 
 
+def _configure_payment_worker(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    binding: CheckoutProviderBinding,
+    *,
+    delays: tuple[float, ...],
+) -> None:
+    """Bind the durable worker to one mocked provider without Redis or live AQSI."""
+    factory = sessionmaker(bind=session.get_bind(), autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(payment_jobs_module, "SessionLocal", factory)
+    monkeypatch.setattr(
+        payment_jobs_module,
+        "CheckoutProviderFactory",
+        lambda database_session, settings: type(
+            "Factory", (), {"for_recovery": lambda self, **kwargs: binding}
+        )(),
+    )
+    monkeypatch.setattr(payment_jobs_module, "PAYMENT_POLL_DELAYS", delays)
+    monkeypatch.setattr(payment_jobs_module, "enqueue_sale_fiscalization", lambda sale_id: False)
+    monkeypatch.setattr(payment_jobs_module, "get_checkout_queue", lambda: object())
+    monkeypatch.setattr(payment_jobs_module, "enqueue_payment_job", lambda *args, **kwargs: None)
+
+
+def test_active_payment_cancel_is_idempotent_and_returns_sale_items_to_draft(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One click intent produces one device cancel and retains the frozen cart."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant, quantity=2)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    payment = pending.payments[0]
+    item_snapshot = [
+        (item.id, item.display_label_snapshot, item.unit_price, item.quantity)
+        for item in pending.items
+    ]
+    wakeups: list[object] = []
+    monkeypatch.setattr(
+        sales_routes_module, "enqueue_sale_payment", lambda sale_id: wakeups.append(sale_id)
+    )
+
+    first = sales_routes_module.cancel_payment_operation(sale.id, session, user)
+    repeated = sales_routes_module.cancel_payment_operation(sale.id, session, user)
+
+    assert first.payments[0].cancellation_requested is True
+    assert repeated.payments[0].cancellation_requested is True
+    assert wakeups == [sale.id]
+    assert provider.payment_cancellations == []
+    provider.payment_state_after_cancellation = ProviderOperation(
+        ProviderOutcomeState.CANCELED,
+        external_id=cast(str, payment.external_id),
+    )
+    _configure_payment_worker(session, monkeypatch, binding, delays=(0.0, 0.0))
+
+    assert payment_jobs_module.run_payment_job(str(payment.job.id)) == "completed"
+    session.expire_all()
+    canceled = session.get(Sale, sale.id)
+
+    assert canceled.status is SaleStatus.DRAFT
+    assert canceled.payments[0].status is PaymentStatus.CANCELED
+    assert provider.payment_polls == 2
+    assert provider.payment_cancellations == [payment.external_id]
+    assert [
+        (item.id, item.display_label_snapshot, item.unit_price, item.quantity)
+        for item in canceled.items
+    ] == item_snapshot
+    assert session.query(StockMovement).count() == 0
+    assert canceled.fiscalization is None
+
+
+def test_active_payment_cancel_preserves_late_approval_and_fiscalizes(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval found by the pre-cancel GET wins and cancellation is not posted."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    payment = pending.payments[0]
+    checkout.schedule_payment_cancellation(sale.id, owner_id=user.id)
+    provider.payment_state = _succeeded_payment(cast(str, payment.external_id))
+    _configure_payment_worker(session, monkeypatch, binding, delays=(0.0,))
+
+    assert payment_jobs_module.run_payment_job(str(payment.job.id)) == "completed"
+    session.expire_all()
+    approved = session.get(Sale, sale.id)
+
+    assert approved.payments[0].status is PaymentStatus.SUCCEEDED
+    assert approved.status is SaleStatus.FISCALIZATION_PENDING
+    assert provider.payment_cancellations == []
+    assert session.query(StockMovement).count() == 1
+    assert approved.fiscalization_job is not None
+
+
+def test_active_payment_cancel_unknown_blocks_blind_retry(
+    session: Session,
+    checkout_setup: tuple[
+        User, CatalogVariant, Integration, FakeCheckoutProvider, CheckoutProviderBinding
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ambiguous cancel response remains UNKNOWN and cannot create another charge."""
+    user, variant, _, provider, binding = checkout_setup
+    sale = _sale_with_item(session, user, variant)
+    checkout = CheckoutService(session, binding)
+    checkout.start(sale.id, owner_id=user.id)
+    pending = checkout.process_payment(sale.id, owner_id=user.id)
+    payment = pending.payments[0]
+    checkout.schedule_payment_cancellation(sale.id, owner_id=user.id)
+    provider.payment_cancellation_error = ProviderCallError(
+        "timeout",
+        "Cancellation response was not received.",
+        outcome_unknown=True,
+    )
+    _configure_payment_worker(session, monkeypatch, binding, delays=(0.0, 0.0))
+
+    assert payment_jobs_module.run_payment_job(str(payment.job.id)) == "queued"
+    session.expire_all()
+    unknown = session.get(Sale, sale.id)
+
+    assert unknown.status is SaleStatus.PAYMENT_PENDING
+    assert unknown.payments[0].status is PaymentStatus.UNKNOWN
+    assert provider.payment_cancellations == [payment.external_id]
+    assert (
+        unknown.payments[0].provider_metadata["device_operation_cancellation"]["state"]
+        == "unknown"
+    )
+    assert session.query(StockMovement).count() == 0
+    assert unknown.fiscalization is None
+    with pytest.raises(CheckoutStateError):
+        CheckoutService(session, binding).retry_payment(
+            sale.id,
+            owner_id=user.id,
+            payment_option=CheckoutPaymentOption.CARD,
+        )
+    assert len(provider.payment_initiations) == 1
+
+
 def test_emergency_worker_cancels_device_command_then_verifies_final_status(
     session: Session,
     checkout_setup: tuple[
@@ -2953,7 +3102,10 @@ def test_emergency_worker_cancels_device_command_then_verifies_final_status(
     assert provider.payment_polls == 2
     assert provider.payment_cancellations == [original.external_id]
     assert original.status is PaymentStatus.CANCELED
-    assert original.provider_metadata["emergency_cancellation"]["state"] == "requested"
+    assert (
+        original.provider_metadata["device_operation_cancellation"]["state"]
+        == "requested"
+    )
     assert completed.status is SaleStatus.COMPLETED
     assert len([item for item in completed.payments if not item.accounting_superseded]) == 1
     assert session.query(StockMovement).count() == 1
@@ -3019,8 +3171,13 @@ def test_emergency_worker_does_not_repeat_failed_or_ambiguous_cancellation_post(
 
     assert provider.payment_cancellations == [original.external_id]
     assert provider.payment_polls >= 4
-    assert original.status is PaymentStatus.PENDING
-    assert original.provider_metadata["emergency_cancellation"]["state"] == "unknown"
+    assert original.status is (
+        PaymentStatus.UNKNOWN if outcome_unknown else PaymentStatus.PENDING
+    )
+    assert (
+        original.provider_metadata["device_operation_cancellation"]["state"]
+        == ("unknown" if outcome_unknown else "failed")
+    )
     assert session.query(StockMovement).count() == 1
     assert session.get(Sale, sale.id).fiscalization_job is None
 

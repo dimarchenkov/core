@@ -1294,6 +1294,32 @@ def retry_payment(
     )
 
 
+@router.post("/{sale_id}/checkout/cancel-operation", response_model=SaleRead)
+def cancel_payment_operation(
+    sale_id: UUIDv7,
+    session: Annotated[Session, Depends(get_session)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Sale:
+    """Queue safe provider reconciliation before one device cancellation request."""
+    try:
+        sale, created = CheckoutService(session, None).schedule_payment_cancellation(
+            sale_id,
+            owner_id=current_user.id,
+        )
+        if created and any(
+            item.cancellation_requested
+            and item.job is not None
+            and item.job.status is PaymentJobStatus.QUEUED
+            for item in sale.payments
+        ):
+            enqueue_sale_payment(sale.id)
+        return sale
+    except SaleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Продажа не найдена") from exc
+    except CheckoutStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/{sale_id}/checkout/retry-fiscalization", response_model=SaleRead)
 def retry_fiscalization(
     sale_id: UUIDv7,

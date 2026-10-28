@@ -104,19 +104,31 @@ test('Manual-review AQSI payment is selected for operation details', () => {
   assert.match(source, /Исходная операция: требует проверки/);
 });
 
-test('Emergency checkout fallback is explicit, admin-only in UI and never an unsafe retry', () => {
-  assert.match(source, /Оплачено на кассе/);
-  assert.match(source, /Учтём оплату на физической кассе и продолжим проверку исходной операции/);
-  assert.match(source, /resolve-incident/);
-  assert.match(source, /state\.user\?\.is_admin \|\| state\.user\?\.is_superuser/);
-  assert.match(source, /Оплачено на кассе вручную/);
-  assert.match(source, /Возможное двойное списание/);
-  assert.match(source, /Сообщён оператором · не проверен/);
+test('Active payment offers one compact safe cancellation action', () => {
+  const s = setup();
+  const active = {
+    status:'payment_pending', total_amount:'50.00', fiscalization:null,
+    payments:[{payment_method:'card', status:'pending', external_id:'aqsi-operation', requested_amount:'50.00'}],
+    incident_resolutions:[],
+  };
+  const markup = s.context.renderCheckoutState(active);
+  assert.match(markup, /button secondary compact/);
+  assert.match(markup, /Отменить операцию/);
+  assert.doesNotMatch(markup, /Решить инцидент/);
+  assert.doesNotMatch(s.context.renderCheckoutState({...active, payments:[{...active.payments[0], external_id:null}]}), /Отменить операцию/);
+  assert.match(s.context.renderCheckoutState({...active, payments:[{...active.payments[0], status:'unknown'}]}), /Отменить операцию/);
+  assert.match(source, /checkout\/cancel-operation/);
+  assert.match(styles, /\.active-payment-actions\s*\{[^}]*justify-content:\s*flex-end/s);
+  const cancelFunction = source.slice(
+    source.indexOf('async function cancelActivePaymentOperation'),
+    source.indexOf('async function hydrateCheckoutButton'),
+  );
+  assert.doesNotMatch(cancelFunction, /dialog|createElement/);
   const pendingBlock = source.slice(
-    source.indexOf('const emergencyAction = sale.status === "payment_pending"'),
+    source.indexOf('const cancellationAction = sale.status === "payment_pending"'),
     source.indexOf('const action = sale.status === "draft"'),
   );
-  assert.doesNotMatch(pendingBlock, /Повторить оплату/);
+  assert.doesNotMatch(pendingBlock, /Решить инцидент|Повторить оплату/);
 });
 
 test('Financial incidents use one compact resolution action and retain separate facts', () => {

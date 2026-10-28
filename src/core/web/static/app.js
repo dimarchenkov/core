@@ -1369,7 +1369,7 @@ function renderSalesWorkspace(sale = state.sales.active) {
   document.querySelector("#retry-draft-payment")?.addEventListener("click", () => openCheckoutConfirmation(sale));
   document.querySelector("#return-to-sale")?.addEventListener("click", () => document.querySelector(".sale-items")?.scrollIntoView({ behavior: "smooth" }));
   document.querySelector("#retry-fiscalization")?.addEventListener("click", () => executeCheckoutCommand(sale.id, "retry-fiscalization"));
-  document.querySelector("#emergency-pos-payment")?.addEventListener("click", () => openCheckoutOperationDetail(sale.id));
+  document.querySelector("#cancel-payment-operation")?.addEventListener("click", (event) => cancelActivePaymentOperation(sale, event.currentTarget));
   document.querySelector("#defer-sale")?.addEventListener("click", deferActiveSale);
   document.querySelector("#cancel-sale")?.addEventListener("click", () => cancelSale(sale.id));
   if (editable && sale.items.length) void hydrateCheckoutButton(sale.id);
@@ -1752,13 +1752,13 @@ function renderCheckoutState(sale) {
       ? "— Не формировался"
       : fiscal?.status;
   const fiscalSummary = fiscal ? `<div><span>Фискальный чек</span><strong>${escapeHtml(fiscalStatusLabel)}</strong>${fiscal.external_receipt_id ? `<small>№ ${escapeHtml(fiscal.external_receipt_id)}</small>` : ""}</div>` : "";
-  const emergencyAction = sale.status === "payment_pending"
+  const cancellationAction = sale.status === "payment_pending"
     && !fallback
     && !fiscal
     && payment?.payment_method === "card"
+    && payment?.external_id
     && ["pending", "unknown"].includes(payment?.status)
-    && (state.user?.is_admin || state.user?.is_superuser)
-    ? '<button class="button warning" id="emergency-pos-payment" type="button">Решить инцидент</button>'
+    ? `<div class="active-payment-actions"><button class="button secondary compact" id="cancel-payment-operation" type="button" ${payment.cancellation_requested ? "disabled" : ""}>${payment.cancellation_requested ? "Отмена проверяется…" : "Отменить операцию"}</button></div>`
     : "";
   const action = sale.status === "draft" && ["canceled", "failed"].includes(payment?.status)
     ? '<div class="checkout-recovery-actions"><button class="button" id="retry-draft-payment" type="button">Повторить оплату</button><button class="button secondary" id="return-to-sale" type="button">Вернуться к продаже</button></div>'
@@ -1766,8 +1766,22 @@ function renderCheckoutState(sale) {
     ? '<button class="button" id="retry-payment" type="button">Повторить оплату</button>'
     : sale.status === "fiscalization_failed"
       ? '<button class="button" id="retry-fiscalization" type="button">Повторить формирование чека</button>'
-      : emergencyAction;
+      : cancellationAction;
   return `<section class="checkout-state checkout-${sale.status}"><strong>${title}</strong><p>${detail}</p>${paymentSummary || fiscalSummary ? `<div class="transaction-summary">${paymentSummary}${fiscalSummary}</div>` : ""}${action}</section>`;
+}
+
+async function cancelActivePaymentOperation(sale, button) {
+  button.disabled = true;
+  try {
+    const updated = await api(`/api/sales/${sale.id}/checkout/cancel-operation`, {
+      method: "POST",
+    });
+    rememberSale(updated);
+    renderSalesWorkspace(updated);
+  } catch (error) {
+    showToast(error.message, true);
+    button.disabled = false;
+  }
 }
 
 async function hydrateCheckoutButton(saleId) {

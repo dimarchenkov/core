@@ -300,7 +300,72 @@ class CheckoutService:
         self._commit()
         return sale
 
-    def request_emergency_payment_cancellation(
+    def schedule_payment_cancellation(
+        self,
+        sale_id: UUIDv7,
+        *,
+        owner_id: UUIDv7,
+    ) -> tuple[Sale, bool]:
+        """Persist one active-payment cancellation intent for the durable worker."""
+        sale = self._locked_owned(sale_id, owner_id)
+        if sale.status is not SaleStatus.PAYMENT_PENDING:
+            self._rollback()
+            raise CheckoutStateError("Отмена доступна только для активной оплаты.")
+        attempt = self._latest_payment(sale)
+        if (
+            attempt.payment_method is not PaymentMethod.CARD
+            or attempt.status not in {PaymentStatus.PENDING, PaymentStatus.UNKNOWN}
+            or not attempt.external_id
+        ):
+            self._rollback()
+            raise CheckoutStateError(
+                "Для отмены нужна незавершённая операция с идентификатором провайдера."
+            )
+        if attempt.cancellation_requested:
+            self._commit()
+            return sale, False
+        job = attempt.job
+        if job is None:
+            self._rollback()
+            raise CheckoutStateError("Задание проверки оплаты отсутствует.")
+        now = datetime.now(UTC)
+        attempt.provider_metadata = {
+            **attempt.provider_metadata,
+            "cancellation_intent": {
+                "state": "requested",
+                "requested_at": now.isoformat(),
+                "requested_by": str(owner_id),
+            },
+        }
+        attempt.updated_by_id = owner_id
+        if job.status is not PaymentJobStatus.PROCESSING:
+            job.status = PaymentJobStatus.QUEUED
+            job.next_retry_at = now
+            job.completed_at = None
+            job.last_error = None
+            job.reconciliation_requested_at = now
+            job.updated_by_id = owner_id
+        self._event(
+            sale=sale,
+            entity_type=FinancialEntityType.RECONCILIATION,
+            entity_id=attempt.id,
+            event_type=FinancialEventType.RECONCILIATION_REQUESTED,
+            correlation_id=self._payment_correlation(attempt),
+            actor_id=owner_id,
+            previous_status=attempt.status.value,
+            new_status=attempt.status.value,
+            provider=attempt.provider,
+            provider_operation_id=attempt.external_id,
+            safe_message=(
+                "Оператор запросил отмену. CORE сначала проверит фактический статус "
+                "операции у провайдера."
+            ),
+            metadata={"reason": "operator_cancellation_requested"},
+        )
+        self._commit()
+        return sale, True
+
+    def request_pending_payment_cancellation(
         self,
         sale_id: UUIDv7,
         *,
@@ -315,18 +380,24 @@ class CheckoutService:
         sale = self._locked_owned(sale_id, owner_id)
         attempt = self._payment_by_id(sale, attempt_id)
         fallback = self._emergency_fallback_payment(sale)
+        operator_requested = attempt.cancellation_requested
         if (
-            fallback is None
-            or not attempt.accounting_superseded
+            not (
+                operator_requested
+                or (fallback is not None and attempt.accounting_superseded)
+            )
             or attempt.status is not PaymentStatus.PENDING
             or not attempt.external_id
         ):
             self._commit()
             return sale
-        cancellation = attempt.provider_metadata.get("emergency_cancellation")
+        cancellation = attempt.provider_metadata.get(
+            "device_operation_cancellation"
+        ) or attempt.provider_metadata.get("emergency_cancellation")
         if isinstance(cancellation, dict) and cancellation.get("state") in {
             "requested",
             "unknown",
+            "failed",
         }:
             self._commit()
             return sale
@@ -337,14 +408,19 @@ class CheckoutService:
                 self._payment_request(sale, attempt),
             )
         except ProviderCallError as exc:
+            previous_status = attempt.status
             attempt.provider_metadata = {
                 **attempt.provider_metadata,
-                "emergency_cancellation": {
-                    "state": "unknown",
+                "device_operation_cancellation": {
+                    "state": "unknown" if exc.outcome_unknown else "failed",
                     "requested_at": now.isoformat(),
                     "error_code": exc.code,
                 },
             }
+            if exc.outcome_unknown:
+                attempt.status = PaymentStatus.UNKNOWN
+                if fallback is None:
+                    sale.status = SaleStatus.PAYMENT_PENDING
             self._event(
                 sale=sale,
                 entity_type=FinancialEntityType.RECONCILIATION,
@@ -352,7 +428,7 @@ class CheckoutService:
                 event_type=FinancialEventType.RECONCILIATION_INCONCLUSIVE,
                 correlation_id=self._payment_correlation(attempt),
                 actor_id=owner_id,
-                previous_status=attempt.status.value,
+                previous_status=previous_status.value,
                 new_status=attempt.status.value,
                 provider=attempt.provider,
                 provider_operation_id=attempt.external_id,
@@ -365,7 +441,7 @@ class CheckoutService:
         else:
             attempt.provider_metadata = {
                 **attempt.provider_metadata,
-                "emergency_cancellation": {
+                "device_operation_cancellation": {
                     "state": "requested",
                     "requested_at": now.isoformat(),
                 },
@@ -756,7 +832,15 @@ class CheckoutService:
             if not externally_accounted:
                 sale.status = SaleStatus.PAYMENT_PENDING
         else:
-            attempt.status = PaymentStatus.PENDING
+            cancellation = attempt.provider_metadata.get(
+                "device_operation_cancellation"
+            ) or attempt.provider_metadata.get("emergency_cancellation")
+            attempt.status = (
+                PaymentStatus.UNKNOWN
+                if isinstance(cancellation, dict)
+                and cancellation.get("state") == "unknown"
+                else PaymentStatus.PENDING
+            )
             if not externally_accounted:
                 sale.status = SaleStatus.PAYMENT_PENDING
         attempt.updated_by_id = owner_id

@@ -129,6 +129,7 @@ class PaymentAttemptRead(PydanticBaseModel):
     accounting_superseded: bool = False
     emergency_fallback: bool = False
     duplicate_payment_risk: bool = False
+    cancellation_requested: bool = False
     linked_payment_attempt_id: str | None = None
     attempt_number: int
     error_code: str | None

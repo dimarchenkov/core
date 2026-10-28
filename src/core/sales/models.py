@@ -302,6 +302,12 @@ class PaymentAttempt(BaseModel):
         return str(value) if value else None
 
     @property
+    def cancellation_requested(self) -> bool:
+        """Expose a durable operator cancellation intent without provider overclaiming."""
+        intent = (self.provider_metadata or {}).get("cancellation_intent")
+        return isinstance(intent, dict) and intent.get("state") == "requested"
+
+    @property
     def selected_fiscal_integration_id(self) -> UUIDv7 | None:
         """Return the durable fiscal selection, falling back for historical rows."""
         value = (self.provider_metadata or {}).get("fiscal_integration_id")
