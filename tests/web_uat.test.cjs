@@ -106,19 +106,55 @@ test('Manual-review AQSI payment is selected for operation details', () => {
 
 test('Emergency checkout fallback is explicit, admin-only in UI and never an unsafe retry', () => {
   assert.match(source, /Оплачено на кассе/);
-  assert.match(source, /Подтвердите, что оплата принята и фискальный чек сформирован непосредственно на кассе/);
-  assert.match(source, /предыдущая операция через CORE может ещё завершиться списанием денег/);
-  assert.match(source, /checkout\/external-pos/);
-  assert.match(source, /risk_acknowledged: true/);
+  assert.match(source, /Учтём оплату на физической кассе и продолжим проверку исходной операции/);
+  assert.match(source, /resolve-incident/);
   assert.match(source, /state\.user\?\.is_admin \|\| state\.user\?\.is_superuser/);
   assert.match(source, /Оплачено на кассе вручную/);
   assert.match(source, /Возможное двойное списание/);
-  assert.match(source, /Сформирован на кассе вручную/);
+  assert.match(source, /Сообщён оператором · не проверен/);
   const pendingBlock = source.slice(
     source.indexOf('const emergencyAction = sale.status === "payment_pending"'),
     source.indexOf('const action = sale.status === "draft"'),
   );
   assert.doesNotMatch(pendingBlock, /Повторить оплату/);
+});
+
+test('Financial incidents use one compact resolution action and retain separate facts', () => {
+  const s = setup();
+  const sale = {
+    payments: [
+      {duplicate_payment_risk:true, status:'succeeded', external_id:'aqsi-operation'},
+      {emergency_fallback:true, status:'succeeded'},
+    ],
+    fiscalization:{status:'skipped', external_receipt_confirmed:true},
+    incident_resolutions:[],
+  };
+  assert.equal(s.context.manualReviewPayment(sale).external_id, 'aqsi-operation');
+  assert.equal(s.context.fiscalVerificationState(sale), 'operator_reported');
+  const checkoutMarkup = s.context.renderCheckoutState({...sale, status:'completed', total_amount:'310.00'});
+  assert.match(checkoutMarkup, /чек не проверен/);
+  assert.doesNotMatch(checkoutMarkup, /чек подтверждён|Фискализирован/);
+  sale.incident_resolutions.push({
+    incident_kind:'payment_duplicate_risk',
+    resolution_status:'resolved',
+  });
+  assert.equal(s.context.manualReviewPayment(sale), undefined);
+  assert.equal(s.context.fiscalVerificationState(sale), 'operator_reported');
+
+  assert.match(source, /Решить инцидент/);
+  assert.match(source, /Чек коррекции сформирован/);
+  assert.match(source, /Оплата прошла на кассе/);
+  assert.match(source, /Исходная операция отменена/);
+  assert.match(source, /Другое — проверено вручную/);
+  assert.match(source, /resolve-incident/);
+  assert.match(source, /Состав продажи/);
+  assert.match(source, /Технические подробности/);
+  assert.ok(source.indexOf('operation-sale-items') < source.indexOf('operation-technical'));
+  const resolutionUi = source.slice(
+    source.indexOf('function openIncidentResolutionDialog'),
+    source.indexOf('function renderSaleDiscount'),
+  );
+  assert.doesNotMatch(resolutionUi, /retry-payment|receipt\.process|checkout\/progress/);
 });
 
 function setup() {
